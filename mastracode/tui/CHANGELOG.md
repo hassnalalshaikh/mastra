@@ -1,5 +1,40 @@
 # mastracode
 
+## 0.33.0-alpha.3
+
+### Minor Changes
+
+- Add a reasoning-effort configuration surface across mastracode and Factory (fixes #20766): ([#20884](https://github.com/mastra-ai/mastra/pull/20884))
+
+  - New `max` thinking level (mapped to `reasoning effort: max` for OpenAI Codex and Anthropic `effort`).
+  - Anthropic extended-thinking wiring: the session thinking level now applies to anthropic/claude-opus-4-7 and other Anthropic models via provider thinking/effort options (previously OpenAI-only).
+  - New `models.modeThinkingDefaults` setting: per-mode (build/plan/fast) default thinking levels, resolved at request time with precedence session override → mode default → global `preferences.thinkingLevel`. Configuration changes now apply to the next request of every session, including automated Factory runs.
+  - Factory: new Settings → Defaults controls for editing global and per-mode thinking defaults in local deployments.
+  - TUI: `/think` now sets a session-only override, supports `/think default` to clear it, and `/think status` reports the effective level with provenance (session override / mode default / global default).
+
+  Example `settings.json` configuration:
+
+  ```json
+  {
+    "preferences": { "thinkingLevel": "medium" },
+    "models": {
+      "modeThinkingDefaults": {
+        "build": "high",
+        "plan": "max",
+        "fast": "off"
+      }
+    }
+  }
+  ```
+
+### Patch Changes
+
+- Updated dependencies [[`d7cf7fa`](https://github.com/mastra-ai/mastra/commit/d7cf7fafc1ae1b50bd8462dd0e6c671a8606db93), [`289f4ce`](https://github.com/mastra-ai/mastra/commit/289f4ce16e3293370440172132c52ee787cbc09f), [`4f16ff8`](https://github.com/mastra-ai/mastra/commit/4f16ff824bf2f9b0ddc93f210477c10c8a4fb1ab), [`ba24be6`](https://github.com/mastra-ai/mastra/commit/ba24be662439c331ab23a600041f93803c89eca8), [`289f4ce`](https://github.com/mastra-ai/mastra/commit/289f4ce16e3293370440172132c52ee787cbc09f), [`87db0e4`](https://github.com/mastra-ai/mastra/commit/87db0e49a8c04030eb74fff7f051fac330678839), [`edfe906`](https://github.com/mastra-ai/mastra/commit/edfe906f7926faf8c63c21b3c87e797985557feb), [`43ea2a1`](https://github.com/mastra-ai/mastra/commit/43ea2a1f5c5867d0f41254047a786e96cd00798b), [`0976933`](https://github.com/mastra-ai/mastra/commit/0976933142333ec78451feef265b68bcb45aa5e7), [`242b945`](https://github.com/mastra-ai/mastra/commit/242b94558777bfbdeb42cbfea84afff0b6ad0633)]:
+  - @mastra/core@1.58.0-alpha.3
+  - @mastra/mcp@1.16.0-alpha.1
+  - @mastra/code-sdk@1.2.0-alpha.3
+  - @mastra/memory@1.26.1-alpha.2
+
 ## 0.33.0-alpha.2
 
 ### Patch Changes

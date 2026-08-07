@@ -1,5 +1,20 @@
 # @mastra/mcp
 
+## 1.16.0-alpha.1
+
+### Patch Changes
+
+- **Fixed spurious MCP reconnects when tool-execution errors contain transport-like substrings.** ([#20793](https://github.com/mastra-ai/mastra/pull/20793))
+
+  When an MCP tool returns an in-band error (\`isError: true\`) whose text contains words like "session", "404", or "connection closed", the client no longer misclassifies it as a transport failure and triggers a reconnect + retry. This prevents duplicate calls for non-idempotent tools (e.g. payments, writes).
+
+  **Surface the real failure after a failed reconnect.**
+
+  When a transport-level reconnect fails, the caller now receives the actual reconnection error instead of the stale tool/transport error that triggered the recovery attempt.
+
+- Updated dependencies [[`d7cf7fa`](https://github.com/mastra-ai/mastra/commit/d7cf7fafc1ae1b50bd8462dd0e6c671a8606db93), [`289f4ce`](https://github.com/mastra-ai/mastra/commit/289f4ce16e3293370440172132c52ee787cbc09f), [`4f16ff8`](https://github.com/mastra-ai/mastra/commit/4f16ff824bf2f9b0ddc93f210477c10c8a4fb1ab), [`ba24be6`](https://github.com/mastra-ai/mastra/commit/ba24be662439c331ab23a600041f93803c89eca8), [`0976933`](https://github.com/mastra-ai/mastra/commit/0976933142333ec78451feef265b68bcb45aa5e7), [`242b945`](https://github.com/mastra-ai/mastra/commit/242b94558777bfbdeb42cbfea84afff0b6ad0633)]:
+  - @mastra/core@1.58.0-alpha.3
+
 ## 1.16.0-alpha.0
 
 ### Minor Changes

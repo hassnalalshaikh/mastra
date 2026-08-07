@@ -1,5 +1,17 @@
 # @mastra/react
 
+## 1.4.2-alpha.3
+
+### Patch Changes
+
+- Fixed React stream builds and handling when an approved tool's output is denied. ([#20901](https://github.com/mastra-ai/mastra/pull/20901))
+
+- Fixed denied tool approvals remaining pending in React streaming message state. ([#20939](https://github.com/mastra-ai/mastra/pull/20939))
+
+- Updated dependencies [[`d7cf7fa`](https://github.com/mastra-ai/mastra/commit/d7cf7fafc1ae1b50bd8462dd0e6c671a8606db93), [`289f4ce`](https://github.com/mastra-ai/mastra/commit/289f4ce16e3293370440172132c52ee787cbc09f), [`4f16ff8`](https://github.com/mastra-ai/mastra/commit/4f16ff824bf2f9b0ddc93f210477c10c8a4fb1ab), [`ba24be6`](https://github.com/mastra-ai/mastra/commit/ba24be662439c331ab23a600041f93803c89eca8), [`87db0e4`](https://github.com/mastra-ai/mastra/commit/87db0e49a8c04030eb74fff7f051fac330678839), [`0976933`](https://github.com/mastra-ai/mastra/commit/0976933142333ec78451feef265b68bcb45aa5e7), [`242b945`](https://github.com/mastra-ai/mastra/commit/242b94558777bfbdeb42cbfea84afff0b6ad0633)]:
+  - @mastra/core@1.58.0-alpha.3
+  - @mastra/client-js@1.39.0-alpha.3
+
 ## 1.4.2-alpha.2
 
 ### Patch Changes

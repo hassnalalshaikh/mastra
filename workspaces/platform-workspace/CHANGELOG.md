@@ -1,5 +1,33 @@
 # @mastra/platform
 
+## 1.1.1-alpha.1
+
+### Patch Changes
+
+- Add public `captureCheckpoint()` method to `PlatformSandbox` — mirrors `@mastra/railway`'s `RailwaySandbox.captureCheckpoint()` so callers (e.g. a factory-side scheduler) can capture the recovery checkpoint on demand at semantic moments (turn end, session-idle, pre-teardown) without having to know which provider is underneath. ([#20882](https://github.com/mastra-ai/mastra/pull/20882))
+
+  ```ts
+  const result = await sandbox.captureCheckpoint();
+  switch (result.status) {
+    case 'captured':
+    case 'coalesced':
+      await persistBinding({ sessionId, checkpointName: result.checkpointName });
+      break;
+    case 'skipped':
+      // result.reason: 'no-checkpoint-name-configured' | 'sandbox-not-running'
+      break;
+  }
+  ```
+
+  - POSTs to `/v1/projects/:projectId/sandbox/:sandboxId/checkpoint` with the caller-supplied recovery key (the `id` the sandbox was constructed with) as the body, matching the shape the workspace-proxy expects.
+  - Coalesces concurrent callers on the same instance onto a single upstream request, so N simultaneous turn-end fires do not each round-trip the proxy.
+  - Returns `{ status: 'skipped', reason: 'no-checkpoint-name-configured' }` when the sandbox was constructed without a caller-supplied `id` (an auto-generated random id is never a meaningful recovery key), and `{ status: 'skipped', reason: 'sandbox-not-running' }` when the sandbox has not been started yet.
+  - Normalizes upstream "sandbox destroyed" outcomes (a 410 from the proxy, or the proxy's own `skipped` status) to `{ status: 'skipped', reason: 'sandbox-not-running' }` — the discriminant matches the pre-flight case so callers branch uniformly, and the sandbox's local state is cleared as a side effect so the next `start()` provisions fresh instead of reattaching to a dead id.
+  - Transport failures other than 410 (5xx, 429) propagate as `PlatformApiError` for the caller to handle.
+
+- Updated dependencies [[`d7cf7fa`](https://github.com/mastra-ai/mastra/commit/d7cf7fafc1ae1b50bd8462dd0e6c671a8606db93), [`289f4ce`](https://github.com/mastra-ai/mastra/commit/289f4ce16e3293370440172132c52ee787cbc09f), [`4f16ff8`](https://github.com/mastra-ai/mastra/commit/4f16ff824bf2f9b0ddc93f210477c10c8a4fb1ab), [`ba24be6`](https://github.com/mastra-ai/mastra/commit/ba24be662439c331ab23a600041f93803c89eca8), [`0976933`](https://github.com/mastra-ai/mastra/commit/0976933142333ec78451feef265b68bcb45aa5e7), [`242b945`](https://github.com/mastra-ai/mastra/commit/242b94558777bfbdeb42cbfea84afff0b6ad0633)]:
+  - @mastra/core@1.58.0-alpha.3
+
 ## 1.1.1-alpha.0
 
 ### Patch Changes

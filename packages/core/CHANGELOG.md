@@ -1,5 +1,38 @@
 # @mastra/core
 
+## 1.58.0-alpha.3
+
+### Minor Changes
+
+- Added an `openIfEmpty` option to streamed tool display results. Set it to ([#20909](https://github.com/mastra-ai/mastra/pull/20909))
+  `false` when a tool lifecycle chunk should update only an active streaming
+  session:
+
+  ```typescript
+  toolDisplay: event => ({
+    kind: 'stream',
+    chunk: createTaskUpdate(event),
+    openIfEmpty: false,
+  });
+  ```
+
+  By default, stream results continue to open a session when needed. Static
+  channels continue to use plain-text fallback rendering.
+
+### Patch Changes
+
+- Fixed `Mastra.shutdown()` leaving database connections open when storage is a `MastraCompositeStore`. The composite had no `close()` of its own, so shutdown silently skipped storage cleanup and any composed adapter (Redis, LibSQL, Postgres, ...) kept its client connected — leaving processes that wait for a graceful drain, such as test runners and Kubernetes pods handling SIGTERM, hanging until they were killed. ([#20629](https://github.com/mastra-ai/mastra/pull/20629))
+
+  A composite now closes everything it was built from: the `default` and `editor` stores, plus any domain that owns its own connection. Each store is closed once even when it backs several domains, and a store that fails to close is logged and skipped so the remaining handles are still released. See [#20621](https://github.com/mastra-ai/mastra/issues/20621).
+
+- Fixed sub-agent delegation failing when an LLM sends `maxSteps` as a numeric string (e.g. `"10"` instead of `10`). Delegation now accepts valid numeric strings and continues to reject invalid values such as non-integers or numbers below 3. ([#20793](https://github.com/mastra-ai/mastra/pull/20793))
+
+- Fixed agent schedules targeting stored agents being permanently deleted after a server restart. Both deletion paths are covered: the scheduler tick loop no longer counts an unhydrated stored agent as a missing target (it confirms absence against the editor before reclaiming the schedule row), and the fire path resolves stored agents through the editor before self-cleaning. Schedules are never deleted when the editor lookup fails transiently — only a confirmed miss from both the registry and the editor reclaims the row. ([#19791](https://github.com/mastra-ai/mastra/pull/19791))
+
+- Fixed AgentController session preferences (thinking level, notifications) reverting to defaults after a server restart. These preferences now survive restarts and follow the conversation: reopening a thread restores the values that were active in it, including on self-hosted Factory deployments. ([#20901](https://github.com/mastra-ai/mastra/pull/20901))
+
+- Fixed live scorer execution across multiple Mastra instances so only the instance that emitted a scorer run handles it. ([#20840](https://github.com/mastra-ai/mastra/pull/20840))
+
 ## 1.58.0-alpha.2
 
 ### Minor Changes

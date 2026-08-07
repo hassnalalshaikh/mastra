@@ -1,5 +1,83 @@
 # @mastra/factory
 
+## 0.6.0-alpha.3
+
+### Minor Changes
+
+- Add a reasoning-effort configuration surface across mastracode and Factory (fixes #20766): ([#20884](https://github.com/mastra-ai/mastra/pull/20884))
+
+  - New `max` thinking level (mapped to `reasoning effort: max` for OpenAI Codex and Anthropic `effort`).
+  - Anthropic extended-thinking wiring: the session thinking level now applies to anthropic/claude-opus-4-7 and other Anthropic models via provider thinking/effort options (previously OpenAI-only).
+  - New `models.modeThinkingDefaults` setting: per-mode (build/plan/fast) default thinking levels, resolved at request time with precedence session override → mode default → global `preferences.thinkingLevel`. Configuration changes now apply to the next request of every session, including automated Factory runs.
+  - Factory: new Settings → Defaults controls for editing global and per-mode thinking defaults in local deployments.
+  - TUI: `/think` now sets a session-only override, supports `/think default` to clear it, and `/think status` reports the effective level with provenance (session override / mode default / global default).
+
+  Example `settings.json` configuration:
+
+  ```json
+  {
+    "preferences": { "thinkingLevel": "medium" },
+    "models": {
+      "modeThinkingDefaults": {
+        "build": "high",
+        "plan": "max",
+        "fast": "off"
+      }
+    }
+  }
+  ```
+
+- Added label reconciliation and label filtering to Factory work and review boards. GitHub pull requests, GitHub issues, and Linear issues now keep their labels in sync with the provider, and boards expose a searchable multi-select label filter that shares state through the URL. ([#20845](https://github.com/mastra-ai/mastra/pull/20845))
+
+  Selected labels round-trip through the `label` query parameter (repeated per label to preserve values containing commas):
+
+  ```
+  /factory/project/<id>/work?label=bug&label=needs%20triage
+  /factory/project/<id>/review?teammate=<userId>&label=priority%3Ap0
+  ```
+
+- Added automatic GitHub and Linear issue reconciliation so Factory work items stay current when provider metadata changes outside Factory. Platform Linear now tails the Platform event stream and folds a periodic reconcile sweep in on its own cadence, so Issue updates flow into Factory through the normal rules pipeline without waiting for the next board poll. ([#20845](https://github.com/mastra-ai/mastra/pull/20845))
+
+  GitHub issue reconciliation runs inside the same worker as the pull-request reconciler (both self-hosted and Platform), sharing the same lease, cadence, and configured-repository target set. That means one sweep per repository per interval covers both writers of card state.
+
+  Reconciliation is on by default. Disable or tune it with environment variables on the Factory server:
+
+  ```bash
+  # Turn Linear reconciliation off entirely.
+  MASTRACODE_LINEAR_RECONCILE_ENABLED=false
+
+  # Slow the Linear reconcile sweep down (default: 5 minutes).
+  MASTRACODE_LINEAR_RECONCILE_INTERVAL_MS=600000
+
+  # Stop Platform Linear from tailing the event stream; the reconcile sweep still runs.
+  MASTRACODE_PLATFORM_LINEAR_POLLING_ENABLED=false
+
+  # GitHub reconciliation uses the same shape.
+  MASTRACODE_GITHUB_RECONCILE_ENABLED=false
+  MASTRACODE_GITHUB_RECONCILE_INTERVAL_MS=600000
+  ```
+
+### Patch Changes
+
+- Added `dispatcher.maxInFlight` to `MastraFactoryConfig` and the `MASTRACODE_DISPATCH_MAX_IN_FLIGHT` deployment setting to configure the maximum number of concurrent Factory background dispatches per replica. ([#20903](https://github.com/mastra-ai/mastra/pull/20903))
+
+  ```sh
+  export MASTRACODE_DISPATCH_MAX_IN_FLIGHT=10
+  ```
+
+- Hardened the GitHub reconcile worker, the Platform Linear event worker, and the shared issue reconciler: ([#20845](https://github.com/mastra-ai/mastra/pull/20845))
+
+  - Platform Linear Issue events now only dispatch to `(orgId, factoryProjectId)` pairs that already have a persisted work item for the incoming Linear issue. Previously the worker fanned an event out to every Factory project regardless of tenant, which could materialize a triage card in an unrelated org via the default `linearIssueObserved` rule.
+  - Reconciler metadata patches no longer spread `undefined` values over stored fields, so a live issue that omits (for example) an author does not clobber the previously recorded value.
+  - Documented the event worker's at-most-once delivery contract explicitly: the cursor advances past a failing ingest and drift is caught by the folded reconciler sweep on its own cadence.
+  - `GithubReconcileWorker` now renews its lease while a sweep is in flight, so folding the issue sweep into the same tick can no longer let the lease expire and hand off to a replica mid-sweep. A `renewLease` result of `false` or a renewal error is treated as lease loss: the worker aborts before running the folded issue sweep and skips `releaseLease` so the new owner's TTL is not disturbed.
+  - The Platform Linear event worker no longer calls `listWorkspaces` in reconcile-only mode, so a workspace-listing outage cannot block the reconcile sweep.
+  - The Platform Linear event worker now resolves the project list once per event page rather than once per event, avoiding up to `EVENT_PAGE_SIZE` × N project scans per poll cycle.
+
+- Updated dependencies [[`d7cf7fa`](https://github.com/mastra-ai/mastra/commit/d7cf7fafc1ae1b50bd8462dd0e6c671a8606db93), [`289f4ce`](https://github.com/mastra-ai/mastra/commit/289f4ce16e3293370440172132c52ee787cbc09f), [`4f16ff8`](https://github.com/mastra-ai/mastra/commit/4f16ff824bf2f9b0ddc93f210477c10c8a4fb1ab), [`ba24be6`](https://github.com/mastra-ai/mastra/commit/ba24be662439c331ab23a600041f93803c89eca8), [`87db0e4`](https://github.com/mastra-ai/mastra/commit/87db0e49a8c04030eb74fff7f051fac330678839), [`0976933`](https://github.com/mastra-ai/mastra/commit/0976933142333ec78451feef265b68bcb45aa5e7), [`242b945`](https://github.com/mastra-ai/mastra/commit/242b94558777bfbdeb42cbfea84afff0b6ad0633)]:
+  - @mastra/core@1.58.0-alpha.3
+  - @mastra/code-sdk@1.2.0-alpha.3
+
 ## 0.6.0-alpha.2
 
 ### Minor Changes
