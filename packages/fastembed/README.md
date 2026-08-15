@@ -36,6 +36,10 @@ const embedder = fastembed;
 const small = fastembed.small; // bge-small-en-v1.5
 const base = fastembed.base; // bge-base-en-v1.5
 
+// Multilingual E5 Large (AI SDK v3)
+const multilingualQuery = fastembed.multilingualQuery; // adds the E5 `query:` prefix
+const multilingualPassage = fastembed.multilingualPassage; // adds the E5 `passage:` prefix
+
 // V2 models (for AI SDK v5 compatibility)
 const smallV2 = fastembed.smallV2;
 const baseV2 = fastembed.baseV2;
@@ -70,6 +74,9 @@ console.log(result.embedding); // number[]
 | `bge-small-zh-v1.5`     | 512        | Fast Chinese model          |
 | `all-MiniLM-L6-v2`      | 384        | Sentence Transformer model  |
 | `multilingual-e5-large` | 1024       | Multilingual model          |
+
+For asymmetric retrieval with `multilingual-e5-large`, embed stored content with
+`fastembed.multilingualPassage` and search inputs with `fastembed.multilingualQuery`.
 
 ## Attribution
 

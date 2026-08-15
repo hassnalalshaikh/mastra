@@ -64,6 +64,17 @@ test('MLE5Large: queryEmbed', async () => {
   expect(embeddings.length).toBe(1024);
 }, 120_000);
 
+test('MLE5Large: queryEmbedMany', async () => {
+  const flagEmbedding = await FlagEmbedding.init({
+    model: EmbeddingModel.MLE5Large,
+    maxLength: 512,
+  });
+  const embeddings = (await flagEmbedding.queryEmbedMany(['مرحبا بالعالم', 'hello world']).next()).value!;
+  expect(embeddings).toBeDefined();
+  expect(embeddings.length).toBe(2);
+  expect(embeddings.every(embedding => embedding.length === 1024)).toBe(true);
+}, 120_000);
+
 test('MLE5Large: passageEmbed', async () => {
   const flagEmbedding = await FlagEmbedding.init({
     model: EmbeddingModel.MLE5Large,

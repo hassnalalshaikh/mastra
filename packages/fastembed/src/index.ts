@@ -27,12 +27,22 @@ export async function warmup() {
   await warmupFastEmbedModels();
 }
 
+type EmbeddingInputType = 'raw' | 'query' | 'passage';
+
 // Shared function to generate embeddings using fastembed
-async function generateEmbeddings(values: string[], modelType: FastEmbedModelType) {
+async function generateEmbeddings(
+  values: string[],
+  modelType: FastEmbedModelType,
+  inputType: EmbeddingInputType = 'raw',
+) {
   const model = await getCachedModel(modelType);
 
-  // model.embed() returns an AsyncGenerator that processes texts in batches (default size 256)
-  const embeddings = model.embed(values);
+  const embeddings =
+    inputType === 'query'
+      ? model.queryEmbedMany(values)
+      : inputType === 'passage'
+        ? model.passageEmbed(values)
+        : model.embed(values);
 
   const allResults = [];
   for await (const result of embeddings) {
@@ -125,12 +135,36 @@ const fastEmbedProviderV3 = customProviderV3({
         return { ...result, warnings: [] };
       },
     },
+    'multilingual-e5-large-query': {
+      specificationVersion: 'v3',
+      provider: 'fastembed',
+      modelId: 'multilingual-e5-large-query',
+      maxEmbeddingsPerCall: 256,
+      supportsParallelCalls: true,
+      async doEmbed({ values }) {
+        const result = await generateEmbeddings(values, 'MLE5Large', 'query');
+        return { ...result, warnings: [] };
+      },
+    },
+    'multilingual-e5-large-passage': {
+      specificationVersion: 'v3',
+      provider: 'fastembed',
+      modelId: 'multilingual-e5-large-passage',
+      maxEmbeddingsPerCall: 256,
+      supportsParallelCalls: true,
+      async doEmbed({ values }) {
+        const result = await generateEmbeddings(values, 'MLE5Large', 'passage');
+        return { ...result, warnings: [] };
+      },
+    },
   },
 });
 
 export const fastembed: EmbeddingModelV3 & {
   small: EmbeddingModelV3;
   base: EmbeddingModelV3;
+  multilingualQuery: EmbeddingModelV3;
+  multilingualPassage: EmbeddingModelV3;
   smallV2: EmbeddingModelV2<string>;
   baseV2: EmbeddingModelV2<string>;
   smallLegacy: EmbeddingModelV1<string>;
@@ -138,6 +172,8 @@ export const fastembed: EmbeddingModelV3 & {
 } = Object.assign(fastEmbedProviderV3.embeddingModel(`bge-small-en-v1.5`), {
   small: fastEmbedProviderV3.embeddingModel(`bge-small-en-v1.5`),
   base: fastEmbedProviderV3.embeddingModel(`bge-base-en-v1.5`),
+  multilingualQuery: fastEmbedProviderV3.embeddingModel(`multilingual-e5-large-query`),
+  multilingualPassage: fastEmbedProviderV3.embeddingModel(`multilingual-e5-large-passage`),
   smallV2: fastEmbedProviderV2.textEmbeddingModel(`bge-small-en-v1.5`),
   baseV2: fastEmbedProviderV2.textEmbeddingModel(`bge-base-en-v1.5`),
   smallLegacy: fastEmbedLegacyProvider.textEmbeddingModel(`bge-small-en-v1.5`),

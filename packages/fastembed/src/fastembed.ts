@@ -405,8 +405,13 @@ export class FlagEmbedding extends Embedding {
     return this.embed(texts, batchSize);
   }
 
+  queryEmbedMany(queries: string[], batchSize: number = 256) {
+    queries = queries.map(query => `query: ${query}`);
+    return this.embed(queries, batchSize);
+  }
+
   async queryEmbed(query: string): Promise<number[]> {
-    const result = await this.embed([`query: ${query}`]).next();
+    const result = await this.queryEmbedMany([query]).next();
     return result.value![0]!;
   }
 
