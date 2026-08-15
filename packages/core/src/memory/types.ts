@@ -1201,6 +1201,16 @@ export type SharedMemoryConfig = {
   embedder?: EmbeddingModelId | MastraEmbeddingModel<string> | string;
 
   /**
+   * Optional embedding model for semantic recall search queries.
+   *
+   * When provided, `embedder` is used for stored messages and this model is used
+   * for query text. This supports asymmetric retrieval models that require
+   * different query and passage transformations. Defaults to `embedder`.
+   * Both models must produce embeddings with the same dimensions.
+   */
+  queryEmbedder?: EmbeddingModelId | MastraEmbeddingModel<string> | string;
+
+  /**
    * Options to pass to the embedder when generating embeddings.
    * Use this to pass provider-specific options like outputDimensionality for Google models.
    *
@@ -1218,6 +1228,12 @@ export type SharedMemoryConfig = {
    * ```
    */
   embedderOptions?: MastraEmbeddingOptions;
+
+  /**
+   * Options to pass to `queryEmbedder` when generating query embeddings.
+   * Ignored when `queryEmbedder` is not configured.
+   */
+  queryEmbedderOptions?: MastraEmbeddingOptions;
 
   /**
    * @deprecated This option is deprecated and will throw an error if used.

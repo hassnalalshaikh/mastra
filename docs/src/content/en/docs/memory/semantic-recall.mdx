@@ -270,6 +270,21 @@ const options = {
 
 Semantic recall relies on an [embedding model](/reference/memory/memory-class) to convert messages into embeddings. Mastra supports embedding models through the model router using `provider/model` strings, or you can use any [embedding model](https://sdk.vercel.ai/docs/ai-sdk-core/embeddings) compatible with the AI SDK.
 
+### Separate query and passage embedders
+
+Asymmetric retrieval models can require different transformations for search queries and stored content. Set `embedder` to the passage model and `queryEmbedder` to the matching query model. If `queryEmbedder` is omitted, semantic recall uses `embedder` for both roles.
+
+```ts
+const memory = new Memory({
+  storage,
+  vector,
+  embedder: passageEmbeddingModel,
+  queryEmbedder: queryEmbeddingModel,
+})
+```
+
+Both options accept any AI SDK-compatible embedding model and must produce embeddings with the same dimensions. Use `embedderOptions` for stored content and `queryEmbedderOptions` for queries when the provider requires role-specific options.
+
 ### Using the Model Router (Recommended)
 
 The simplest way is to use a `provider/model` string with autocomplete support:

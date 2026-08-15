@@ -124,6 +124,8 @@ export abstract class MastraMemory extends MastraBase {
   vector?: MastraVector;
   embedder?: MastraEmbeddingModel<string>;
   embedderOptions?: MastraEmbeddingOptions;
+  queryEmbedder?: MastraEmbeddingModel<string>;
+  queryEmbedderOptions?: MastraEmbeddingOptions;
   protected threadConfig: MemoryConfigInternal = { ...memoryDefaultOptions };
   #mastra?: Mastra;
 
@@ -213,6 +215,16 @@ https://mastra.ai/en/docs/memory/semantic-recall`,
         this.embedderOptions = config.embedderOptions;
       }
     }
+
+    if (config.queryEmbedder) {
+      this.queryEmbedder =
+        typeof config.queryEmbedder === 'string'
+          ? new ModelRouterEmbeddingModel(config.queryEmbedder)
+          : config.queryEmbedder;
+    }
+    if (config.queryEmbedderOptions) {
+      this.queryEmbedderOptions = config.queryEmbedderOptions;
+    }
   }
 
   /**
@@ -259,6 +271,22 @@ https://mastra.ai/en/docs/memory/overview`,
     }
     if (embedderOptions) {
       this.embedderOptions = embedderOptions;
+    }
+  }
+
+  /**
+   * Set the embedding model used for semantic recall queries.
+   *
+   * Stored messages continue to use the passage embedder configured through
+   * `setEmbedder`. Both models must produce embeddings with the same dimensions.
+   */
+  public setQueryEmbedder(
+    embedder: EmbeddingModelId | MastraEmbeddingModel<string>,
+    embedderOptions?: MastraEmbeddingOptions,
+  ) {
+    this.queryEmbedder = typeof embedder === 'string' ? new ModelRouterEmbeddingModel(embedder) : embedder;
+    if (embedderOptions) {
+      this.queryEmbedderOptions = embedderOptions;
     }
   }
 

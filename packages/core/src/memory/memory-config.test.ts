@@ -201,3 +201,32 @@ describe('MastraMemory config serialization', () => {
     });
   });
 });
+
+describe('MastraMemory embedding roles', () => {
+  it('keeps query and passage embedders separate', () => {
+    const passageEmbedder = {
+      specificationVersion: 'v3',
+      provider: 'test',
+      modelId: 'passage-model',
+      doEmbed: vi.fn(),
+    } as any;
+    const queryEmbedder = {
+      specificationVersion: 'v3',
+      provider: 'test',
+      modelId: 'query-model',
+      doEmbed: vi.fn(),
+    } as any;
+    const memory = new MockMemory({
+      storage: new InMemoryStore(),
+      embedder: passageEmbedder,
+      queryEmbedder,
+    });
+
+    expect(memory.embedder).toBe(passageEmbedder);
+    expect(memory.queryEmbedder).toBe(queryEmbedder);
+
+    const replacement = { ...queryEmbedder, modelId: 'replacement-query-model' };
+    memory.setQueryEmbedder(replacement);
+    expect(memory.queryEmbedder).toBe(replacement);
+  });
+});

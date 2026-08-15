@@ -557,7 +557,7 @@ export class Memory extends MastraMemory {
       }
 
       if (config?.semanticRecall && vectorSearchString && this.vector) {
-        const result = await this.embedMessageContent(vectorSearchString!);
+        const result = await this.embedMessageContent(vectorSearchString!, 'query');
         usage = result.usage;
         const { embeddings, dimension } = result;
         const { indexName } = await this.createEmbeddingIndex(dimension, config);
@@ -1106,11 +1106,21 @@ ${workingMemory}`;
     }
   >({ max: DEFAULT_EMBEDDING_CACHE_MAX_SIZE });
   private firstEmbed: Promise<any> | undefined;
-  protected async embedMessageContent(content: string) {
+  protected async embedMessageContent(content: string, role: 'passage' | 'query' = 'passage') {
+    const embedder = role === 'query' && this.queryEmbedder ? this.queryEmbedder : this.embedder;
+    const embedderOptions = role === 'query' && this.queryEmbedder ? this.queryEmbedderOptions : this.embedderOptions;
+
+    if (typeof embedder === `undefined`) {
+      throw new Error(`Tried to embed message content but this Memory instance doesn't have an attached embedder.`);
+    }
+
     // Key by the content hash (not the content itself) to keep keys small. Use the
     // 64-bit hash: h32 is only 32 bits, so distinct contents collide after ~tens of
     // thousands of entries, which would return another message's cached embeddings.
-    const key = (await this.hasher).h64(content);
+    // Include the role and model identity so asymmetric models and runtime model
+    // changes cannot reuse an embedding generated for a different retrieval role.
+    const modelIdentity = `${embedder.provider}:${embedder.modelId}:${embedder.specificationVersion}`;
+    const key = (await this.hasher).h64(`${role}\0${modelIdentity}\0${content}`);
     const cached = this.embeddingCache.get(key);
     if (cached) {
       this.logger.debug('Embedding cache hit', { contentHash: key.toString(), chunks: cached.chunks.length });
@@ -1118,18 +1128,15 @@ ${workingMemory}`;
     }
     const chunks = this.chunkText(content);
 
-    if (typeof this.embedder === `undefined`) {
-      throw new Error(`Tried to embed message content but this Memory instance doesn't have an attached embedder.`);
-    }
     // for fastembed multiple initial calls to embed will fail if the model hasn't been downloaded yet.
-    const isFastEmbed = this.embedder.provider === `fastembed`;
+    const isFastEmbed = embedder.provider === `fastembed`;
     if (isFastEmbed && this.firstEmbed instanceof Promise) {
       // so wait for the first one
       await this.firstEmbed;
     }
 
     let embedFn: typeof embedMany | typeof embedManyV5 | typeof embedManyV6;
-    const specVersion = this.embedder.specificationVersion;
+    const specVersion = embedder.specificationVersion;
 
     switch (specVersion) {
       case 'v3':
@@ -1147,8 +1154,8 @@ ${workingMemory}`;
       values: chunks,
       maxRetries: 3,
       // @ts-expect-error - embedder type mismatch
-      model: this.embedder,
-      ...(this.embedderOptions || {}),
+      model: embedder,
+      ...(embedderOptions || {}),
     });
 
     if (isFastEmbed && !this.firstEmbed) this.firstEmbed = promise;
@@ -1995,7 +2002,7 @@ Notes:
       throw new Error('searchMessages requires a vector store. Configure vector and embedder on your Memory instance.');
     }
 
-    const { embeddings, dimension } = await this.embedMessageContent(query);
+    const { embeddings, dimension } = await this.embedMessageContent(query, 'query');
     const { indexName } = await this.createObservationEmbeddingIndex(dimension);
 
     const vectorFilter: VectorFilter = { resource_id: resourceId };

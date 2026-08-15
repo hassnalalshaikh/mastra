@@ -79,16 +79,31 @@ export class MockMemory extends MastraMemory {
     workingMemoryTemplate,
     enableMessageHistory = true,
     options,
+    vector,
+    embedder,
+    embedderOptions,
+    queryEmbedder,
+    queryEmbedderOptions,
   }: {
     storage?: InMemoryStore;
     enableWorkingMemory?: boolean;
     enableMessageHistory?: boolean;
     workingMemoryTemplate?: string;
     options?: SharedMemoryConfig['options'];
+    vector?: SharedMemoryConfig['vector'];
+    embedder?: SharedMemoryConfig['embedder'];
+    embedderOptions?: SharedMemoryConfig['embedderOptions'];
+    queryEmbedder?: SharedMemoryConfig['queryEmbedder'];
+    queryEmbedderOptions?: SharedMemoryConfig['queryEmbedderOptions'];
   } = {}) {
     super({
       name: 'mock',
       storage: storage || new InMemoryStore(),
+      vector,
+      embedder,
+      embedderOptions,
+      queryEmbedder,
+      queryEmbedderOptions,
       options: {
         ...options,
         workingMemory: enableWorkingMemory
