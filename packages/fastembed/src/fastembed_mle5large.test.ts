@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { FlagEmbedding, EmbeddingModel } from './fastembed.js';
+import { fastembed } from './index.js';
 
 test('MLE5Large: init', async () => {
   const model = await FlagEmbedding.init({
@@ -73,6 +74,18 @@ test('MLE5Large: queryEmbedMany', async () => {
   expect(embeddings).toBeDefined();
   expect(embeddings.length).toBe(2);
   expect(embeddings.every(embedding => embedding.length === 1024)).toBe(true);
+}, 120_000);
+
+test('MLE5Large: role-specific AI SDK v3 models', async () => {
+  const values = ['البحث الدلالي semantic search'];
+  const queryResult = await fastembed.multilingualQuery.doEmbed({ values });
+  const passageResult = await fastembed.multilingualPassage.doEmbed({ values });
+
+  expect(queryResult.embeddings).toHaveLength(1);
+  expect(passageResult.embeddings).toHaveLength(1);
+  expect(queryResult.embeddings[0]).toHaveLength(1024);
+  expect(passageResult.embeddings[0]).toHaveLength(1024);
+  expect(queryResult.embeddings[0]).not.toEqual(passageResult.embeddings[0]);
 }, 120_000);
 
 test('MLE5Large: passageEmbed', async () => {
