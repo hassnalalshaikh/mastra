@@ -37,7 +37,7 @@ export const createWorkflowTool = createTool({
     summary: z.string().describe('Natural-language summary of what the sub-agent built. Relay this to the user.'),
     workflowId: z.string().optional().describe('The id of the saved workflow, if save-workflow returned ok.'),
   }),
-  execute: async ({ request }, { mastra, requestContext }) => {
+  execute: async ({ request }, { mastra, requestContext, abortSignal }) => {
     if (!mastra) throw new Error('create-workflow requires a Mastra context.');
     const builder = (mastra as Mastra).getAgent('workflow-builder' as never);
     if (!builder) {
@@ -50,7 +50,10 @@ export const createWorkflowTool = createTool({
     // dynamic model resolver (getDynamicModel) sees controller.session.modelId.
     // Without this the sub-agent throws "No model selected" even when the user
     // has /models configured for the main code-agent.
-    const stream = await builder.stream(request, { requestContext });
+    const stream = await builder.stream(request, {
+      requestContext,
+      ...(abortSignal ? { abortSignal } : {}),
+    });
 
     // Sub-agent runs its own tool loop. We MUST verify save-workflow actually
     // ran and returned ok — otherwise the sub-agent's natural-language "summary"

@@ -27,10 +27,13 @@ function makeMastraStub(agent: unknown) {
   };
 }
 
-async function invoke(mastra: unknown, requestContext?: RequestContext) {
+async function invoke(mastra: unknown, requestContext?: RequestContext, abortSignal?: AbortSignal) {
   // `execute` is a function on the tool — call it directly to avoid the
   // input-validation wrapper and get raw throw semantics.
-  return await (createWorkflowTool as any).execute({ request: 'do a thing' }, { mastra, requestContext });
+  return await (createWorkflowTool as any).execute(
+    { request: 'do a thing' },
+    { mastra, requestContext, abortSignal },
+  );
 }
 
 describe('create-workflow tool surfaces sub-agent failures', () => {
@@ -54,6 +57,21 @@ describe('create-workflow tool surfaces sub-agent failures', () => {
     await expect(invoke(makeMastraStub({ stream }), requestContext)).rejects.toThrow(/never called save-workflow/);
 
     expect(stream).toHaveBeenCalledWith('do a thing', { requestContext });
+  });
+
+  it('forwards the caller abortSignal to the workflow-builder agent', async () => {
+    const controller = new AbortController();
+    const requestContext = new RequestContext();
+    const stream = vi.fn().mockResolvedValue(makeStreamingAgent([], '').stream());
+
+    await expect(invoke(makeMastraStub({ stream }), requestContext, controller.signal)).rejects.toThrow(
+      /never called save-workflow/,
+    );
+
+    expect(stream).toHaveBeenCalledWith('do a thing', {
+      requestContext,
+      abortSignal: controller.signal,
+    });
   });
 
   it('cancels and releases the stream reader when reading fails', async () => {
