@@ -138,6 +138,8 @@ export interface DurableAgentStreamResult<OUTPUT = undefined> {
   cleanup: () => void;
   /** Promise that resolves when subscription is established */
   ready: Promise<void>;
+  /** Whether this adapter can still receive future workflow events. */
+  isOpen: () => boolean;
 }
 
 /**
@@ -633,6 +635,7 @@ export function createDurableAgentStream<OUTPUT = undefined>(
     output,
     cleanup,
     ready,
+    isOpen: () => !terminated && !cancelled,
   };
 }
 
