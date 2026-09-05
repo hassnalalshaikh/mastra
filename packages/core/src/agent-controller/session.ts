@@ -3731,6 +3731,7 @@ export class Session<TState = unknown> {
     ) {
       return { accepted: false, reason: 'aborting' };
     }
+    const hadPendingApproval = this.displayState.get().pendingApprovals.has(toolCallId);
     const result = this.approval.respond({
       decision,
       toolCallId,
@@ -3743,6 +3744,12 @@ export class Session<TState = unknown> {
     });
     // The gate is gone; drop its display-state entry so the UI stops rendering it.
     this.displayState.clearPendingApprovals([toolCallId]);
+    // Clearing the entry is a direct mutation that bypasses the reducer. Publish
+    // the cleared prompt now, without waiting for a later run event. A stale or
+    // duplicate response removes nothing and emits nothing.
+    if (hadPendingApproval) {
+      this.emit({ type: 'display_state_changed', displayState: this.displayState.get() });
+    }
     return result;
   }
 
@@ -3760,7 +3767,13 @@ export class Session<TState = unknown> {
       declineContext?: { reason?: string; message?: string };
     } = {},
   ): void {
-    this.displayState.clearPendingApprovals(this.approval.cancel(filter));
+    const released = this.approval.cancel(filter);
+    const displayed = this.displayState.get().pendingApprovals;
+    const hadPendingApproval = released.some(toolCallId => displayed.has(toolCallId));
+    this.displayState.clearPendingApprovals(released);
+    if (hadPendingApproval) {
+      this.emit({ type: 'display_state_changed', displayState: this.displayState.get() });
+    }
   }
 
   /**
