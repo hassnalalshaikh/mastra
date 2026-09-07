@@ -375,6 +375,7 @@ type ProcessorLoadedToolsProvider = {
   getLoadedToolsForRequestContext?: (args: {
     requestContext: RequestContext;
     tools?: Record<string, unknown>;
+    includeMetaTools?: boolean;
   }) => Record<string, ToolToConvert> | Promise<Record<string, ToolToConvert>>;
 };
 
@@ -4579,7 +4580,11 @@ export class Agent<
         return;
       }
 
-      const loadedTools = await toolProvider.getLoadedToolsForRequestContext({ requestContext, tools });
+      const loadedTools = await toolProvider.getLoadedToolsForRequestContext({
+        requestContext,
+        tools,
+        includeMetaTools: true,
+      });
       if (!loadedTools || Object.keys(loadedTools).length === 0) {
         return;
       }
