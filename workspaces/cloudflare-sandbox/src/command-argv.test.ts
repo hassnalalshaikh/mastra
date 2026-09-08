@@ -11,7 +11,7 @@ describe('CloudflareSandbox command forms', () => {
 
     await sandbox.executeCommand(command, args, { cwd: '/workspace/project', timeout: 5000 });
 
-    expect(bridge.execs).toEqual([{ argv: ['bash', '-c', command], cwd: '/workspace/project', timeout_ms: 5000 }]);
+    expect(bridge.execs).toEqual([{ argv: ['/bin/bash', '-c', command], cwd: '/workspace/project', timeout_ms: 5000 }]);
   });
 
   it('preserves explicit arguments as literal argv elements', async () => {
@@ -29,15 +29,15 @@ describe('CloudflareSandbox command forms', () => {
     const bridge = createFakeBridge();
     const sandbox = new CloudflareSandbox({
       baseUrl: 'https://bridge.example.com', fetch: bridge.fetch,
-      env: { PATH: '/workspace/venv/bin:/usr/bin:/bin', BASE: 'original' },
+      env: { PATH: '/workspace/venv/bin', BASE: 'original' },
     });
     await sandbox.start();
 
     await sandbox.executeCommand('python3 --version', undefined, { env: { BASE: 'replacement value' } });
 
     expect(bridge.execs[0]?.argv).toEqual([
-      'env', 'PATH=/workspace/venv/bin:/usr/bin:/bin', 'BASE=replacement value',
-      'bash', '-c', 'python3 --version',
+      'env', 'PATH=/workspace/venv/bin', 'BASE=replacement value',
+      '/bin/bash', '-c', 'python3 --version',
     ]);
   });
 });

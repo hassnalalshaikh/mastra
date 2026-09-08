@@ -56,8 +56,9 @@ function buildArgv(command: string, args: string[] | undefined, env: Record<stri
     return `${key}=${value}`;
   });
   // Workspace tools supply a complete command line without a separate argv.
-  // A non-login shell preserves the sandbox image's PATH and environment.
-  const invocation = args?.length ? [command, ...args] : ['bash', '-c', command];
+  // Use the image's absolute shell path so a custom PATH cannot hide it.
+  // A non-login shell preserves that PATH and the command's environment.
+  const invocation = args?.length ? [command, ...args] : ['/bin/bash', '-c', command];
   return assignments.length ? ['env', ...assignments, ...invocation] : invocation;
 }
 
