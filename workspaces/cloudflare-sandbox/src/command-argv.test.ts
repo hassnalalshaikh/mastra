@@ -1,8 +1,27 @@
 import { describe, expect, it } from 'vitest';
+import { Workspace, createWorkspaceTools, WORKSPACE_TOOLS } from '@mastra/core/workspace';
 import { CloudflareSandbox } from './sandbox';
 import { createFakeBridge } from './testing/fake-bridge';
 
 describe('CloudflareSandbox command forms', () => {
+  it('executes the full command accepted by the built-in Workspace agent tool', async () => {
+    const bridge = createFakeBridge();
+    bridge.onExec = () => ({ stdout: 'native-tool-ok', exitCode: 0 });
+    const sandbox = new CloudflareSandbox({ baseUrl: 'https://bridge.example.com', fetch: bridge.fetch });
+    const workspace = new Workspace({ sandbox });
+    await workspace.init();
+    try {
+      const tools = await createWorkspaceTools(workspace);
+      const result = await tools[WORKSPACE_TOOLS.SANDBOX.EXECUTE_COMMAND].execute({
+        command: "printf '%s' native-tool-ok", timeout: 5,
+      });
+      expect(bridge.execs).toEqual([{ argv: ['/bin/bash', '-c', "printf '%s' native-tool-ok"], timeout_ms: 5000 }]);
+      expect(result).toBe('native-tool-ok');
+    } finally {
+      await workspace.destroy();
+    }
+  });
+
   it.each([undefined, []])('passes a complete command through a non-login shell with args %j', async args => {
     const bridge = createFakeBridge();
     const sandbox = new CloudflareSandbox({ baseUrl: 'https://bridge.example.com', fetch: bridge.fetch });
