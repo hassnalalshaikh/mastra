@@ -20,6 +20,7 @@ const sandbox = new CloudflareSandbox({
 });
 
 const workspace = new Workspace({ sandbox });
+await workspace.init();
 ```
 
 Commands without a separate argument list run through a non-login shell, so
