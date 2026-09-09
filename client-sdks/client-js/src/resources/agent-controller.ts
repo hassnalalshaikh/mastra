@@ -412,6 +412,7 @@ export class AgentControllerSession extends BaseResource {
       try {
         while (!cancelled) {
           const { done, value } = await reader.read();
+          if (cancelled) return { kind: 'cancelled' };
           if (done) return cancelled ? { kind: 'cancelled' } : { kind: 'done' };
           buffer += decoder.decode(value, { stream: true });
 
@@ -429,6 +430,7 @@ export class AgentControllerSession extends BaseResource {
               } catch {
                 continue;
               }
+              if (cancelled) return { kind: 'cancelled' };
               try {
                 options.onEvent(event);
               } catch (cause) {
@@ -524,6 +526,10 @@ export class AgentControllerSession extends BaseResource {
           options.onReconnect?.();
         } catch {
           // Consumer callback failures must not kill the stream loop.
+        }
+        if (cancelled) {
+          void response.body?.cancel().catch(() => {});
+          return;
         }
       }
     };
