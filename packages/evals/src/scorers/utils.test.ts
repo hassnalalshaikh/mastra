@@ -830,6 +830,99 @@ describe('Scorer Utils', () => {
   });
 
   describe('extractToolCalls', () => {
+    it.each([
+      { legacy: ['read', 'save'], parts: ['save'], expected: ['read', 'save'] },
+      { legacy: ['read', 'check', 'save'], parts: ['read', 'save'], expected: ['read', 'check', 'save'] },
+      { legacy: ['save'], parts: ['read', 'save'], expected: ['read', 'save'] },
+    ])('preserves call order when merging $legacy and $parts', ({ legacy, parts, expected }) => {
+      const invocation = (name: string) => ({
+        state: 'result' as const,
+        toolCallId: name,
+        toolName: name,
+        args: {},
+        result: {},
+      });
+      const output: ScorerRunOutputForAgent = [
+        {
+          id: 'ordered',
+          role: 'assistant',
+          createdAt: new Date(0),
+          content: {
+            format: 2,
+            toolInvocations: legacy.map(invocation),
+            parts: parts.map(name => ({ type: 'tool-invocation', toolInvocation: invocation(name) })),
+          },
+        },
+      ];
+      const actual = extractToolCalls(output);
+      expect(actual.tools).toEqual(expected);
+      expect(actual.toolCallInfos.map(info => info.invocationIndex)).toEqual(expected.map((_, index) => index));
+    });
+
+    it.each(['parts-only', 'mixed', 'distinct-legacy'] as const)(
+      'counts thrown calls and preserves distinct call IDs (%s)',
+      shape => {
+        const good = { state: 'result' as const, toolCallId: 'good', toolName: 'read', args: {}, result: {} };
+        const bad = {
+          state: 'output-error' as const,
+          toolCallId: 'bad',
+          toolName: 'save',
+          args: {},
+          errorText: 'Save failed',
+        };
+        const parts = shape === 'parts-only' ? [bad] : shape === 'mixed' ? [good, bad] : [good];
+        const output: ScorerRunOutputForAgent = [
+          {
+            id: 'message',
+            role: 'assistant',
+            createdAt: new Date(0),
+            content: {
+              format: 2,
+              parts: parts.map(toolInvocation => ({ type: 'tool-invocation', toolInvocation })),
+              ...(shape === 'parts-only'
+                ? {}
+                : {
+                    toolInvocations:
+                      shape === 'mixed' ? [good] : [good, { ...good, toolCallId: 'legacy', toolName: 'legacy' }],
+                  }),
+            },
+          },
+        ];
+        const actual = extractToolCalls(output);
+        const expected = shape === 'parts-only' ? ['save'] : shape === 'mixed' ? ['read', 'save'] : ['read', 'legacy'];
+        expect(actual.tools).toEqual(expected);
+        expect(actual.toolCallInfos.map(info => info.toolCallId)).toEqual(
+          shape === 'parts-only' ? ['bad'] : shape === 'mixed' ? ['good', 'bad'] : ['good', 'legacy'],
+        );
+        expect(actual.toolCallInfos.map(info => info.messageIndex)).toEqual(expected.map(() => 0));
+      },
+    );
+
+    it('does not count incomplete partial calls as executed calls', () => {
+      const output: ScorerRunOutputForAgent = [
+        {
+          id: 'partial',
+          role: 'assistant',
+          createdAt: new Date(0),
+          content: {
+            format: 2,
+            parts: [
+              {
+                type: 'tool-invocation',
+                toolInvocation: {
+                  state: 'partial-call',
+                  toolCallId: 'partial',
+                  toolName: 'save',
+                  args: {},
+                },
+              },
+            ],
+          },
+        },
+      ];
+      expect(extractToolCalls(output)).toEqual({ tools: [], toolCallInfos: [] });
+    });
+
     it('should extract tool calls from legacy toolInvocations', () => {
       const output: ScorerRunOutputForAgent = [
         createTestMessage({

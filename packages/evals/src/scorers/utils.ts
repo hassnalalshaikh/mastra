@@ -790,7 +790,7 @@ export type ToolCallInfo = {
  * Extracts all tool calls from a scorer run output.
  *
  * Iterates through all messages and their tool invocations to collect
- * information about tools that were called (with state 'result' or 'call').
+ * information about tools that were called, including calls that threw an error.
  *
  * @param output - The scorer run output (array of MastraDBMessage)
  * @returns An object containing tool names and detailed tool call info
@@ -813,21 +813,46 @@ export function extractToolCalls(output: ScorerRunOutputForAgent): { tools: stri
 
   for (let messageIndex = 0; messageIndex < output.length; messageIndex++) {
     const message = output[messageIndex];
-    // Prefer the legacy toolInvocations array when present; fall back to
-    // V2 content.parts for messages that only store tool calls there.
+    // Native parts retain thrown calls that the legacy array may omit.
+    // Count mirrored IDs once while preserving distinct legacy calls.
     const legacy = message?.content?.toolInvocations;
-    const fromParts = legacy
-      ? undefined
-      : message?.content?.parts
-          ?.filter((p): p is Extract<typeof p, { type: 'tool-invocation' }> => p.type === 'tool-invocation')
-          .map(p => p.toolInvocation);
-    const toolInvocations = legacy ?? fromParts;
+    const fromParts =
+      message?.content?.parts
+        ?.filter((p): p is Extract<typeof p, { type: 'tool-invocation' }> => p.type === 'tool-invocation')
+        .map(p => p.toolInvocation)
+        .filter(Boolean) ?? [];
+    const partCallIds = new Set(fromParts.map(invocation => invocation.toolCallId).filter(Boolean));
+    const legacyInvocations = legacy ?? [];
+    const legacyPositions = new Map(legacyInvocations.map((invocation, index) => [invocation?.toolCallId, index]));
+    const toolInvocations: typeof fromParts = [];
+    let legacyIndex = 0;
+    for (const invocation of fromParts) {
+      const sharedIndex = invocation.toolCallId ? legacyPositions.get(invocation.toolCallId) : undefined;
+      if (sharedIndex !== undefined && sharedIndex >= legacyIndex) {
+        // Keep legacy-only calls before their next shared anchor, rather than
+        // appending them after all parts and reversing the observed call order.
+        for (; legacyIndex < sharedIndex; legacyIndex++) {
+          const previous = legacyInvocations[legacyIndex];
+          if (previous && !partCallIds.has(previous.toolCallId)) toolInvocations.push(previous);
+        }
+        legacyIndex++;
+      }
+      toolInvocations.push(invocation);
+    }
+    for (; legacyIndex < legacyInvocations.length; legacyIndex++) {
+      const invocation = legacyInvocations[legacyIndex];
+      if (invocation && !partCallIds.has(invocation.toolCallId)) toolInvocations.push(invocation);
+    }
 
     if (!toolInvocations?.length) continue;
 
     for (let invocationIndex = 0; invocationIndex < toolInvocations.length; invocationIndex++) {
       const invocation = toolInvocations[invocationIndex];
-      if (invocation && invocation.toolName && (invocation.state === 'result' || invocation.state === 'call')) {
+      if (
+        invocation &&
+        invocation.toolName &&
+        (invocation.state === 'result' || invocation.state === 'call' || invocation.state === 'output-error')
+      ) {
         toolCalls.push(invocation.toolName);
         toolCallInfos.push({
           toolName: invocation.toolName,
