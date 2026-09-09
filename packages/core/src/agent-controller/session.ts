@@ -3422,7 +3422,7 @@ export class Session<TState = unknown> {
       const threadId = this.thread.getId()!;
 
       const agent = this.machinery.getAgent();
-      await this.thread.ensureSubscription(threadId);
+      await this.thread.ensureSubscription(threadId, agent);
 
       // A deferred abort (parked approval gate) leaves the AbortController
       // armed until the decline lands, so `submittedIsRunning` stays true for a
@@ -3463,6 +3463,8 @@ export class Session<TState = unknown> {
       // run hasn't reset yet) so normal idle signals aren't delayed.
       if (submittedAbortRequested && (submittedRunId || submittedActiveRunId)) {
         await this.waitForStreamIdle();
+        // Abort teardown may have detached the subscription ensured above.
+        await this.thread.ensureSubscription(threadId, agent);
       }
 
       const streamOptions = await this.machinery.buildStreamOptions({
