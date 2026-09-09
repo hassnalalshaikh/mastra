@@ -688,6 +688,36 @@ describe('AgentController Resource', () => {
   // observe subscribe()'s connection policy directly.
   const noRetryClient = () => new MastraClient({ baseUrl: 'http://localhost:4111', retries: 0 });
 
+  it('does not report a late reconnect failure after unsubscribe', async () => {
+    (global.fetch as any).mockResolvedValueOnce(sseResponse([]));
+    let rejectReconnect!: (error: Error) => void;
+    (global.fetch as any).mockImplementationOnce(
+      () =>
+        new Promise<Response>((_, reject) => {
+          rejectReconnect = reject;
+        }),
+    );
+    const onError = vi.fn();
+    const sub = await noRetryClient()
+      .getAgentController('code')
+      .session('user-1')
+      .subscribe({
+        onEvent: () => {},
+        onError,
+        reconnect: { maxRetries: 1, delayMs: 0 },
+      });
+    try {
+      await vi.waitFor(() => expect(rejectReconnect).toBeDefined());
+      sub.unsubscribe();
+      rejectReconnect(new Error('Connection rejected after unsubscribe'));
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(onError).not.toHaveBeenCalled();
+      expect((global.fetch as any).mock.calls).toHaveLength(2);
+    } finally {
+      sub.unsubscribe();
+    }
+  });
+
   it('rejects subscribe when the initial connection fails without reconnect', async () => {
     (global.fetch as any).mockRejectedValue(new Error('connect refused'));
 

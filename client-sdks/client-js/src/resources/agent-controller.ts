@@ -502,6 +502,7 @@ export class AgentControllerSession extends BaseResource {
         let attempts = 0;
         let reconnectedResponse: Response | undefined;
         while (!reconnectedResponse) {
+          if (cancelled) return;
           if (attempts >= reconnectOptions.maxRetries) {
             reportTerminalError(result);
             return;
