@@ -355,7 +355,9 @@ export function noToolErrors() {
   })
     .preprocess(async ({ run }) => {
       const invocations = extractRawInvocations(run.output);
-      const errorCount = invocations.filter(inv => inv.state === 'call' || (inv.result && inv.result.error)).length;
+      const errorCount = invocations.filter(
+        inv => inv.state !== 'result' || inv.isError === true || (inv.result && inv.result.error),
+      ).length;
       return { errorCount, totalCalls: invocations.length, passed: errorCount === 0 };
     })
     .generateScore(({ results }) => {
@@ -369,12 +371,16 @@ function extractRawInvocations(output: Parameters<typeof extractToolCalls>[0]) {
   const invocations: any[] = [];
   for (const message of output) {
     const legacy = message?.content?.toolInvocations;
-    const fromParts = legacy
-      ? undefined
-      : (message?.content as any)?.parts
-          ?.filter((p: any) => p.type === 'tool-invocation')
-          .map((p: any) => p.toolInvocation);
-    for (const inv of legacy ?? fromParts ?? []) {
+    const fromParts =
+      (message?.content as any)?.parts
+        ?.filter((p: any) => p.type === 'tool-invocation')
+        .map((p: any) => p.toolInvocation)
+        .filter(Boolean) ?? [];
+    const partCallIds = new Set(fromParts.map((inv: any) => inv.toolCallId).filter(Boolean));
+    // Parts retain native error and approval states omitted by the legacy list.
+    // Prefer parts for mirrored calls, but preserve distinct legacy invocations.
+    const legacyOnly = (legacy ?? []).filter(inv => !inv?.toolCallId || !partCallIds.has(inv.toolCallId));
+    for (const inv of [...fromParts, ...legacyOnly]) {
       if (inv) invocations.push(inv);
     }
   }

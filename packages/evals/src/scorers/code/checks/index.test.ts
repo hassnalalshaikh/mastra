@@ -563,6 +563,145 @@ describe('checks.usedNoTools', () => {
 // ─── noToolErrors ─────────────────────────────────────────────────────────────
 
 describe('checks.noToolErrors', () => {
+  test.each(['distinct-legacy-error', 'stale-mirrored-call'] as const)(
+    'preserves distinct legacy calls without duplicating their parts mirror (%s)',
+    async scenario => {
+      const successful = {
+        state: 'result' as const,
+        toolCallId: 'good',
+        toolName: 'save_result',
+        args: {},
+        result: { saved: true },
+      };
+      const distinct = scenario === 'distinct-legacy-error';
+      const legacy = distinct
+        ? [successful, { ...successful, toolCallId: 'bad', result: { error: 'Save failed' } }]
+        : [{ ...successful, state: 'call' as const }];
+      const run = createAgentTestRun({
+        inputMessages: [],
+        output: [
+          {
+            id: 'o1',
+            role: 'assistant',
+            createdAt: new Date(0),
+            content: {
+              format: 2,
+              parts: [{ type: 'tool-invocation', toolInvocation: successful }],
+              toolInvocations: legacy,
+            },
+          },
+        ],
+      });
+      const result = await checks.noToolErrors().run(run);
+      expect(result.score).toBe(distinct ? 0 : 1);
+      expect(result.preprocessStepResult).toEqual({
+        errorCount: distinct ? 1 : 0,
+        totalCalls: distinct ? 2 : 1,
+        passed: !distinct,
+      });
+    },
+  );
+
+  test.each(['partial-call', 'approval-requested', 'approval-responded', 'output-denied'] as const)(
+    'does not treat native state %s as a successful tool result',
+    async state => {
+      const run = createAgentTestRun({
+        inputMessages: [],
+        output: [
+          {
+            id: 'o1',
+            role: 'assistant',
+            createdAt: new Date(0),
+            content: {
+              format: 2,
+              parts: [
+                {
+                  type: 'tool-invocation',
+                  toolInvocation: { state, toolCallId: 'c1', toolName: 'save_result', args: {} },
+                },
+              ],
+            },
+          },
+        ],
+      });
+      expect((await checks.noToolErrors().run(run)).score).toBe(0);
+    },
+  );
+
+  test('detects the native isError marker on a completed tool invocation', async () => {
+    const run = createAgentTestRun({
+      inputMessages: [],
+      output: [
+        {
+          id: 'o1',
+          role: 'assistant',
+          createdAt: new Date(0),
+          content: {
+            format: 2,
+            parts: [
+              {
+                type: 'tool-invocation',
+                toolInvocation: {
+                  state: 'result',
+                  toolCallId: 'c1',
+                  toolName: 'save_result',
+                  args: {},
+                  result: 'Save failed',
+                  isError: true,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect((await checks.noToolErrors().run(run)).score).toBe(0);
+  });
+
+  test.each(['parts-only', 'mixed-legacy-and-parts'] as const)(
+    'scores native output-error invocations as failures (%s)',
+    async shape => {
+      const successful = {
+        state: 'result' as const,
+        toolCallId: 'saved-call',
+        toolName: 'save_result',
+        args: {},
+        result: { saved: true },
+      };
+      const failed = {
+        state: 'output-error' as const,
+        toolCallId: 'failed-call',
+        toolName: 'save_result',
+        args: {},
+        errorText: 'Save failed',
+      };
+      const mixed = shape === 'mixed-legacy-and-parts';
+      // Native messages preserve output-error in parts while the legacy list
+      // may contain only successful invocations from the same message.
+      const run = createAgentTestRun({
+        inputMessages: [createTestMessage({ content: 'Save the result', role: 'user', id: 'i1' })],
+        output: [
+          {
+            id: 'o1',
+            role: 'assistant',
+            createdAt: new Date(0),
+            content: {
+              format: 2,
+              parts: [
+                ...(mixed ? [{ type: 'tool-invocation' as const, toolInvocation: successful }] : []),
+                { type: 'tool-invocation', toolInvocation: failed },
+              ],
+              ...(mixed ? { toolInvocations: [successful] } : {}),
+            },
+          },
+        ],
+      });
+      const result = await checks.noToolErrors().run(run);
+      expect(result.score).toBe(0);
+      expect(result.preprocessStepResult).toEqual({ errorCount: 1, totalCalls: mixed ? 2 : 1, passed: false });
+    },
+  );
+
   test('should score 1 when all tool calls succeeded', async () => {
     const scorer = checks.noToolErrors();
     const run = createAgentTestRun({
