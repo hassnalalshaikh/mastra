@@ -23,6 +23,7 @@ import type {
 } from '@mastra/core/memory';
 import type { TracingOptions } from '@mastra/core/observability';
 import type { RequestContext } from '@mastra/core/request-context';
+import type { ScheduleStreamOptions } from '@mastra/core/schedules';
 
 import type {
   AgentInstructionBlock,
@@ -2269,9 +2270,7 @@ export interface ScheduleIfActive {
 export interface ScheduleIfIdle {
   behavior?: 'wake' | 'persist' | 'discard';
   attributes?: ScheduleSignalAttributes;
-  streamOptions?: {
-    requestContext?: Record<string, unknown>;
-  };
+  streamOptions?: ScheduleStreamOptions;
 }
 
 /**
