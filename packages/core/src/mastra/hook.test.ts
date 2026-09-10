@@ -299,10 +299,25 @@ describe('createOnScorerHook', () => {
     expect(scorer.run.mock.calls[0][0].output).toBe(output);
   });
 
-  it('should pass live span correlation context and metadata into scorer.run', async () => {
+  it.each([
+    { label: 'legacy span', rawSpanId: 'span-live', expectedSpanId: 'span-live', hasResolver: false },
+    { label: 'visible span', rawSpanId: 'span-live', expectedSpanId: 'span-live', hasResolver: true },
+    {
+      label: 'hidden span with visible ancestor',
+      rawSpanId: 'hidden-step',
+      expectedSpanId: 'agent-span',
+      hasResolver: true,
+    },
+    {
+      label: 'hidden span without visible ancestor',
+      rawSpanId: 'hidden-step',
+      expectedSpanId: undefined,
+      hasResolver: true,
+    },
+  ])('passes exported correlation for $label', async ({ rawSpanId, expectedSpanId, hasResolver }) => {
     const correlationContext = {
       traceId: 'trace-live',
-      spanId: 'span-live',
+      spanId: expectedSpanId,
       entityName: 'agent-run',
       rootEntityName: 'workflow-root',
       source: 'cloud',
@@ -319,11 +334,12 @@ describe('createOnScorerHook', () => {
       entityType: 'AGENT' as const,
       tracingContext: {
         currentSpan: {
-          id: 'span-live',
+          id: rawSpanId,
           traceId: 'trace-live',
           isValid: true,
           metadata: { sessionId: 'session-1', inherited: true },
           getCorrelationContext: vi.fn().mockReturnValue(correlationContext),
+          ...(hasResolver ? { getExportedSpanId: () => expectedSpanId } : {}),
           observabilityInstance: {
             getExporters: () => [],
           },
@@ -348,11 +364,14 @@ describe('createOnScorerHook', () => {
         scoreSource: 'live',
         targetScope: 'span',
         targetTraceId: 'trace-live',
-        targetSpanId: 'span-live',
+        targetSpanId: expectedSpanId,
         targetCorrelationContext: correlationContext,
         targetMetadata: { sessionId: 'session-1', inherited: true },
       }),
     );
+    expect(mockScoresStore.saveScore).toHaveBeenCalledTimes(1);
+    expect(mockScoresStore.saveScore.mock.calls[0][0].spanId).toBe(expectedSpanId);
+    expect(mockScoresStore.saveScore.mock.calls[0][0].traceId).toBe('trace-live');
   });
 
   it('should handle scorer not found without throwing', async () => {

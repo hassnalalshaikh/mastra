@@ -2,15 +2,20 @@ import type { ScoringHookInput } from '../evals';
 import type { Mastra } from '../mastra';
 
 const scorerHookOwnerTokens = new WeakMap<ScoringHookInput, object>();
-const mastraScorerHookTokens = new WeakMap<Mastra, object>();
+const mastraScorerHookTokens = new WeakMap<object, object>();
 
-function getScorerHookToken(mastra: Mastra): object {
+function getScorerHookToken(mastra: object): object {
   let token = mastraScorerHookTokens.get(mastra);
   if (!token) {
     token = {};
     mastraScorerHookTokens.set(mastra, token);
   }
   return token;
+}
+
+/** A native tracing proxy represents the same hook owner as its wrapped instance. */
+export function registerScorerHookOwnerAlias(alias: object, owner: object): void {
+  mastraScorerHookTokens.set(alias, getScorerHookToken(owner));
 }
 
 /**

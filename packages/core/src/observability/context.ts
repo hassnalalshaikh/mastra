@@ -8,6 +8,7 @@
 
 import type { MastraPrimitives } from '../action';
 import type { Agent } from '../agent';
+import { registerScorerHookOwnerAlias } from '../hooks/scorer-owner';
 import type { Mastra } from '../mastra';
 import type { Workflow } from '../workflows';
 import { createObservabilityContext } from './context-factory';
@@ -57,7 +58,7 @@ export function wrapMastra<T extends Mastra | (Mastra & MastraPrimitives) | Mast
   }
 
   try {
-    return new Proxy(mastra, {
+    const proxy = new Proxy(mastra, {
       get(target, prop) {
         try {
           if (AGENT_GETTERS.includes(prop as string)) {
@@ -85,6 +86,8 @@ export function wrapMastra<T extends Mastra | (Mastra & MastraPrimitives) | Mast
         }
       },
     });
+    registerScorerHookOwnerAlias(proxy, mastra);
+    return proxy;
   } catch (error) {
     console.warn('Tracing: Failed to create proxy, using original Mastra instance', error);
     return mastra;

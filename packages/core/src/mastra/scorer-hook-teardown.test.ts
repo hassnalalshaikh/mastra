@@ -3,6 +3,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { createScorer } from '../evals';
 import { runScorer } from '../evals/hooks';
 import { AvailableHooks, executeHook } from '../hooks';
+import type { AnySpan } from '../observability';
+import { wrapMastra } from '../observability/context';
 import { InMemoryStore } from '../storage/mock';
 
 import { Mastra } from './index';
@@ -24,7 +26,7 @@ async function flushHook() {
 }
 
 describe('scorer hook teardown', () => {
-  it('only runs a scorer on the Mastra instance that emitted the hook', async () => {
+  it.each([0, 1, 2])('only runs a scorer on its owner through %i tracing wrappers', async wrapDepth => {
     const sharedScorer = createScorer({
       id: 'shared-instance-scorer',
       name: 'Shared instance scorer',
@@ -47,9 +49,15 @@ describe('scorer hook teardown', () => {
     const nonOwnerLookup = vi.spyOn(nonOwner, 'getScorerById');
     const nonOwnerException = vi.spyOn(nonOwner.getLogger(), 'trackException');
 
+    let emittingOwner = owner;
+    for (let depth = 0; depth < wrapDepth; depth++) {
+      emittingOwner = wrapMastra(emittingOwner, { currentSpan: {} as AnySpan });
+    }
+    if (wrapDepth > 0) expect(emittingOwner).not.toBe(owner);
+
     try {
       runScorer({
-        mastra: owner,
+        mastra: emittingOwner,
         scorerId: sharedScorer.id,
         scorerObject: { scorer: sharedScorer },
         runId: 'shared-instance-run',
