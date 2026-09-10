@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { createScorer } from '../evals';
 import { validateAndSaveScore, createOnScorerHook } from './hooks';
 
 describe('validateAndSaveScore', () => {
@@ -182,6 +183,120 @@ describe('createOnScorerHook', () => {
         source: 'LIVE',
       }),
     );
+  });
+
+  it.each(['success', 'thrown', 'mixed', 'empty', 'no-messages'] as const)(
+    'passes a native trajectory to live trajectory scorers for %s responses',
+    async outcome => {
+      const states =
+        outcome === 'empty' || outcome === 'no-messages'
+          ? []
+          : outcome === 'mixed'
+            ? ['result', 'output-error']
+            : [outcome === 'thrown' ? 'output-error' : 'result'];
+      const output = [
+        {
+          id: 'response',
+          role: 'assistant',
+          content: {
+            format: 2,
+            parts: states.map((state, index) => ({
+              type: 'tool-invocation',
+              toolInvocation: {
+                state,
+                toolCallId: `call-${index}`,
+                toolName: 'save_result',
+                args: { index },
+                ...(state === 'result' ? { result: { saved: true } } : { error: 'Save failed' }),
+              },
+            })),
+          },
+        },
+      ];
+      const input = { inputMessages: [], rememberedMessages: [], systemMessages: [] };
+      if (outcome === 'no-messages') output.length = 0;
+      const scorer = createScorer({ id: 'trajectory', name: 'Trajectory', type: 'trajectory' }).generateScore(
+        ({ run }) => (run.output.steps.length === states.length ? 1 : 0),
+      );
+      mockMastra.getScorerById.mockReturnValue(scorer);
+      await hook({
+        runId: 'live-run',
+        scorer: { id: scorer.id },
+        input,
+        output,
+        source: 'LIVE',
+        entity: { id: 'agent' },
+        entityType: 'AGENT',
+        threadId: 'thread',
+        resourceId: 'resource',
+      });
+      expect(mockMastra.getLogger().trackException).not.toHaveBeenCalled();
+      expect(mockScoresStore.saveScore).toHaveBeenCalledTimes(1);
+      const saved = mockScoresStore.saveScore.mock.calls[0][0];
+      expect(saved).toMatchObject({
+        runId: 'live-run',
+        source: 'LIVE',
+        entityId: 'agent',
+        threadId: 'thread',
+        resourceId: 'resource',
+        input,
+        score: 1,
+      });
+      expect(saved.output.rawOutput).toEqual(output);
+      expect(
+        saved.output.steps.map((step: any) => ({ name: step.name, args: step.toolArgs, success: step.success })),
+      ).toEqual(states.map((state, index) => ({ name: 'save_result', args: { index }, success: state === 'result' })));
+    },
+  );
+
+  it.each(['agent', undefined])('preserves response messages for scorer type %s', async type => {
+    const output = [
+      { id: 'response', role: 'assistant', content: { format: 2, parts: [{ type: 'text', text: 'Done' }] } },
+    ];
+    const scorer = { id: 'messages', type, run: vi.fn().mockResolvedValue({ score: 1 }) };
+    mockMastra.getScorerById.mockReturnValue(scorer);
+    await hook({
+      runId: 'live-run',
+      scorer: { id: scorer.id },
+      input: [],
+      output,
+      source: 'LIVE',
+      entity: { id: 'agent' },
+      entityType: 'AGENT',
+    });
+    expect(scorer.run.mock.calls[0][0].output).toBe(output);
+  });
+
+  it('preserves an already extracted trajectory', async () => {
+    const output = { steps: [{ stepType: 'tool_call', name: 'save_result', success: true }] };
+    const scorer = { id: 'trajectory', type: 'trajectory', run: vi.fn().mockResolvedValue({ score: 1 }) };
+    mockMastra.getScorerById.mockReturnValue(scorer);
+    await hook({
+      runId: 'live-run',
+      scorer: { id: scorer.id },
+      input: [],
+      output,
+      source: 'LIVE',
+      entity: { id: 'agent' },
+      entityType: 'AGENT',
+    });
+    expect(scorer.run.mock.calls[0][0].output).toBe(output);
+  });
+
+  it('does not interpret workflow-step array output as agent messages', async () => {
+    const output = [{ value: 'step-result' }];
+    const scorer = { id: 'trajectory', type: 'trajectory', run: vi.fn().mockResolvedValue({ score: 1 }) };
+    mockMastra.getWorkflowById.mockReturnValue({ listScorers: vi.fn().mockReturnValue({ trajectory: { scorer } }) });
+    await hook({
+      runId: 'live-run',
+      scorer: { id: scorer.id },
+      input: [],
+      output,
+      source: 'LIVE',
+      entity: { id: 'workflow' },
+      entityType: 'WORKFLOW',
+    });
+    expect(scorer.run.mock.calls[0][0].output).toBe(output);
   });
 
   it('should pass live span correlation context and metadata into scorer.run', async () => {
