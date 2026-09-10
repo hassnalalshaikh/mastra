@@ -13,10 +13,39 @@ import { EventEmitterPubSub } from '../../../events/event-emitter';
 import '../../../tools';
 import { Agent } from '../../agent';
 import { createDurableAgent } from '../create-durable-agent';
+import { calculateAccumulatedUsage } from '../workflows/shared/iteration-state';
+import { accumulatedUsageSchema } from '../workflows/shared/schemas';
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+describe('durable usage completeness across saved state', () => {
+  const known = { inputTokens: 10, outputTokens: 20, totalTokens: 30 };
+  const zero = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  it.each([
+    { name: 'missing then known', usages: [{}, known], expected: {} },
+    { name: 'known then missing', usages: [known, {}], expected: {} },
+    { name: 'missing then zero', usages: [{}, zero], expected: {} },
+    { name: 'zero then known', usages: [zero, known], expected: known },
+    { name: 'both known', usages: [known, known], expected: { inputTokens: 20, outputTokens: 40, totalTokens: 60 } },
+    { name: 'both zero', usages: [zero, zero], expected: zero },
+    { name: 'missing input', usages: [{ outputTokens: 5 }, known], expected: { outputTokens: 25 } },
+    { name: 'missing output', usages: [known, { inputTokens: 2 }], expected: { inputTokens: 12 } },
+  ])('preserves $name across JSON and native schema parsing', ({ usages, expected }) => {
+    let accumulated = accumulatedUsageSchema.parse(zero);
+    for (const usage of usages) {
+      accumulated = accumulatedUsageSchema.parse(
+        JSON.parse(JSON.stringify(calculateAccumulatedUsage(accumulated, usage))),
+      );
+    }
+    expect(accumulated).toEqual(expected);
+  });
+
+  it('does not treat a missing usage object as a measured zero', () => {
+    expect(JSON.parse(JSON.stringify(calculateAccumulatedUsage(known)))).toEqual({});
+  });
+});
 
 function createModelWithUsage(usage: { inputTokens: number; outputTokens: number; totalTokens: number }) {
   return new MockLanguageModelV2({

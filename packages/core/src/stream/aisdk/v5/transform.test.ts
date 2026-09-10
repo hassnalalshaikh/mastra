@@ -9,6 +9,45 @@ import {
 import type { StreamPart } from './transform';
 
 describe('convertFullStreamChunkToMastra', () => {
+  describe('usage completeness', () => {
+    it.each(['v2', 'v3'] as const)('does not derive a partial total from %s usage', version => {
+      for (const counts of [
+        { inputTokens: undefined, outputTokens: undefined, expected: undefined },
+        { inputTokens: 2, outputTokens: undefined, expected: undefined },
+        { inputTokens: undefined, outputTokens: 3, expected: undefined },
+        { inputTokens: 0, outputTokens: 0, expected: 0 },
+        { inputTokens: 2, outputTokens: 3, expected: 5 },
+      ]) {
+        const usage =
+          version === 'v3'
+            ? { inputTokens: { total: counts.inputTokens }, outputTokens: { total: counts.outputTokens } }
+            : { inputTokens: counts.inputTokens, outputTokens: counts.outputTokens };
+        const result = convertFullStreamChunkToMastra({ type: 'finish', finishReason: 'stop', usage } as StreamPart, {
+          runId: 'usage-completeness',
+        });
+        expect(result?.type).toBe('finish');
+        if (result?.type === 'finish')
+          expect(result.payload.output.usage).toMatchObject({
+            inputTokens: counts.inputTokens,
+            outputTokens: counts.outputTokens,
+            totalTokens: counts.expected,
+          });
+      }
+    });
+
+    it('retains a separately reported total when component counts are missing', () => {
+      const result = convertFullStreamChunkToMastra(
+        {
+          type: 'finish',
+          finishReason: 'stop',
+          usage: { inputTokens: undefined, outputTokens: undefined, totalTokens: 7 },
+        } as StreamPart,
+        { runId: 'reported-total' },
+      );
+      expect(result?.type === 'finish' && result.payload.output.usage.totalTokens).toBe(7);
+    });
+  });
+
   describe('tool-call handling', () => {
     it('should parse valid JSON input', () => {
       const chunk: StreamPart = {

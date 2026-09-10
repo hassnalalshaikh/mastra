@@ -30,9 +30,18 @@ export function calculateAccumulatedUsage(
   executionUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number },
 ): AccumulatedUsage {
   return {
-    inputTokens: currentUsage.inputTokens + (executionUsage?.inputTokens || 0),
-    outputTokens: currentUsage.outputTokens + (executionUsage?.outputTokens || 0),
-    totalTokens: currentUsage.totalTokens + (executionUsage?.totalTokens || 0),
+    inputTokens:
+      currentUsage.inputTokens !== undefined && executionUsage?.inputTokens !== undefined
+        ? currentUsage.inputTokens + executionUsage.inputTokens
+        : undefined,
+    outputTokens:
+      currentUsage.outputTokens !== undefined && executionUsage?.outputTokens !== undefined
+        ? currentUsage.outputTokens + executionUsage.outputTokens
+        : undefined,
+    totalTokens:
+      currentUsage.totalTokens !== undefined && executionUsage?.totalTokens !== undefined
+        ? currentUsage.totalTokens + executionUsage.totalTokens
+        : undefined,
   };
 }
 

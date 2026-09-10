@@ -617,6 +617,12 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
           // Extract final text from last step
           const lastStep = state.accumulatedSteps[state.accumulatedSteps.length - 1];
           let finalText = lastStep?.text;
+          // The public usage shape requires these keys, while persisted unknown values may be omitted.
+          const usage = {
+            inputTokens: state.accumulatedUsage.inputTokens,
+            outputTokens: state.accumulatedUsage.outputTokens,
+            totalTokens: state.accumulatedUsage.totalTokens,
+          };
 
           const finishResult = await runDurableFinishSideEffects({
             runId: state.runId,
@@ -628,7 +634,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
             logger,
             outputResult: {
               text: finalText ?? '',
-              usage: state.accumulatedUsage,
+              usage,
               finishReason: state.lastStepResult?.reason ?? 'unknown',
               steps: state.accumulatedSteps,
             },
@@ -648,7 +654,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
             },
             output: {
               text: finalText,
-              usage: state.accumulatedUsage,
+              usage,
               steps: state.accumulatedSteps,
             },
             state: state.state,
@@ -678,7 +684,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
                 modelSpan?.createTracker()?.endGeneration({
                   output: { text: finalText },
                   attributes: { finishReason: finalOutput.stepResult?.reason },
-                  usage: state.accumulatedUsage,
+                  usage,
                 });
               }
               if (agentSpanData) {

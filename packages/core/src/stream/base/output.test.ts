@@ -539,6 +539,133 @@ describe('MastraModelOutput', () => {
     });
   });
 
+  describe('primary usage completeness', () => {
+    const known = { inputTokens: 10, outputTokens: 20, totalTokens: 30 };
+    const zero = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    const unknown = { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined };
+    const cases = [
+      { name: 'unknown then known', usages: [{}, known], expected: unknown },
+      { name: 'known then unknown', usages: [known, {}], expected: unknown },
+      { name: 'unknown then zero', usages: [{}, zero], expected: unknown },
+      { name: 'zero then known', usages: [zero, known], expected: known },
+      { name: 'measured zeros', usages: [zero, zero], expected: zero },
+      {
+        name: 'complete components without reported total',
+        usages: [{ inputTokens: 2, outputTokens: 3, reasoningTokens: 1 }],
+        expected: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+      },
+      {
+        name: 'known counts',
+        usages: [known, known],
+        expected: { inputTokens: 20, outputTokens: 40, totalTokens: 60 },
+      },
+      {
+        name: 'missing input',
+        usages: [{ outputTokens: 5 }, known],
+        expected: { inputTokens: undefined, outputTokens: 25, totalTokens: undefined },
+      },
+      {
+        name: 'missing output',
+        usages: [known, { inputTokens: 2 }],
+        expected: { inputTokens: 12, outputTokens: undefined, totalTokens: undefined },
+      },
+    ];
+
+    it.each(cases)('preserves $name despite late finish counts', async ({ usages, expected }) => {
+      const runId = 'usage-completeness';
+      let finishPayload: any;
+      const output = new MastraModelOutput({
+        model: { modelId: 'test-model', provider: 'test', version: 'v3' },
+        stream: createChunkStream([
+          ...usages.map(usage => createStepFinishChunk(runId, undefined, usage)),
+          createFinishChunk(runId, undefined, { inputTokens: 99, outputTokens: 99, totalTokens: 198 }),
+        ]),
+        messageList: new MessageList({ threadId: 'test-thread' }),
+        messageId: 'msg-usage',
+        options: {
+          runId,
+          onFinish: async payload => {
+            finishPayload = payload;
+          },
+        },
+      });
+      const chunks = [];
+      for await (const chunk of output.fullStream) chunks.push(chunk);
+      expect(await output.totalUsage).toMatchObject(expected);
+      expect(finishPayload.totalUsage).toMatchObject(expected);
+      const finish = chunks.find(chunk => chunk.type === 'finish');
+      expect(finish?.type === 'finish' && finish.payload.output.usage).toMatchObject(expected);
+    });
+
+    it('accepts finish-only usage without inventing missing components', async () => {
+      for (const usage of [known, {}, { outputTokens: 5 }]) {
+        const output = new MastraModelOutput({
+          model: { modelId: 'test-model', provider: 'test', version: 'v3' },
+          stream: createChunkStream([createFinishChunk('finish-only', undefined, usage)]),
+          messageList: new MessageList({ threadId: 'test-thread' }),
+          messageId: 'finish-only',
+          options: { runId: 'finish-only' },
+        });
+        const chunks = [];
+        for await (const chunk of output.fullStream) chunks.push(chunk);
+        const expected = { ...unknown, ...usage };
+        expect(await output.totalUsage).toMatchObject(expected);
+        const finish = chunks.find(chunk => chunk.type === 'finish');
+        expect(finish?.type === 'finish' && finish.payload.output.usage).toMatchObject(expected);
+      }
+    });
+
+    it('retains incomplete counts through a native state JSON roundtrip', async () => {
+      const makeOutput = () =>
+        new MastraModelOutput({
+          model: { modelId: 'test-model', provider: 'test', version: 'v3' },
+          stream: createChunkStream([]),
+          messageList: new MessageList({ threadId: 'test-thread' }),
+          messageId: 'state-usage',
+          options: { runId: 'state-usage' },
+        });
+      for (const usages of [
+        [{}, known],
+        [known, {}],
+      ]) {
+        const original = makeOutput();
+        for (const usage of usages) original.updateUsageCount(usage);
+        const restored = makeOutput();
+        restored.deserializeState(JSON.parse(JSON.stringify(original.serializeState())));
+        restored.updateUsageCount(known);
+        restored.populateUsageCount(known);
+        expect(restored.serializeState().usageCount).toMatchObject(unknown);
+        await original.consumeStream();
+        await restored.consumeStream();
+      }
+    });
+
+    it('distinguishes an untouched saved accumulator from an older unknown snapshot', async () => {
+      const makeOutput = () =>
+        new MastraModelOutput({
+          model: { modelId: 'test-model', provider: 'test', version: 'v3' },
+          stream: createChunkStream([]),
+          messageList: new MessageList({ threadId: 'test-thread' }),
+          messageId: 'empty-state',
+          options: { runId: 'empty-state' },
+        });
+      const original = makeOutput();
+      const untouched = makeOutput();
+      untouched.deserializeState(JSON.parse(JSON.stringify(original.serializeState())));
+      untouched.updateUsageCount(known);
+      expect(untouched.serializeState().usageCount).toMatchObject(known);
+      const legacyState = JSON.parse(JSON.stringify(original.serializeState()));
+      delete legacyState.hasUsageUpdates;
+      const legacy = makeOutput();
+      legacy.deserializeState(legacyState);
+      legacy.updateUsageCount(known);
+      expect(legacy.serializeState().usageCount).toMatchObject(unknown);
+      await original.consumeStream();
+      await untouched.consumeStream();
+      await legacy.consumeStream();
+    });
+  });
+
   describe('usage raw passthrough', () => {
     it('should expose raw usage in onStepFinish callback', async () => {
       const runId = 'test-run';

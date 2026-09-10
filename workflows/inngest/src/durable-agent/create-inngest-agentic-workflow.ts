@@ -327,6 +327,12 @@ export function createInngestDurableAgenticWorkflow(options: InngestDurableAgent
           // Extract final text from last step
           const lastStep = state.accumulatedSteps[state.accumulatedSteps.length - 1];
           let finalText = lastStep?.text;
+          // Restore the public keys without replacing persisted unknown counts with zero.
+          const usage = {
+            inputTokens: state.accumulatedUsage.inputTokens,
+            outputTokens: state.accumulatedUsage.outputTokens,
+            totalTokens: state.accumulatedUsage.totalTokens,
+          };
 
           const finishResult = await params.engine.step.run(`agent.${state.runId}.finish-side-effects`, () =>
             runDurableFinishSideEffects({
@@ -339,7 +345,7 @@ export function createInngestDurableAgenticWorkflow(options: InngestDurableAgent
               logger: mastra?.getLogger?.(),
               outputResult: {
                 text: finalText ?? '',
-                usage: state.accumulatedUsage,
+                usage,
                 finishReason: state.lastStepResult?.reason ?? 'unknown',
                 steps: state.accumulatedSteps,
               },
@@ -360,7 +366,7 @@ export function createInngestDurableAgenticWorkflow(options: InngestDurableAgent
             },
             output: {
               text: finalText,
-              usage: state.accumulatedUsage,
+              usage,
               steps: state.accumulatedSteps,
             },
             state: state.state,
@@ -374,7 +380,7 @@ export function createInngestDurableAgenticWorkflow(options: InngestDurableAgent
             modelSpan?.end({
               output: {
                 text: finalText,
-                usage: state.accumulatedUsage,
+                usage,
               },
               attributes: {
                 finishReason: state.lastStepResult?.reason || 'stop',

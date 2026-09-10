@@ -274,6 +274,7 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
     outputTokens: undefined,
     totalTokens: undefined,
   };
+  #hasUsageUpdates = false;
   #tripwire: StepTripwireData | undefined = undefined;
   #wasSuspended = false;
   #transportRef: MastraModelOutputOptions<OUTPUT>['transportRef'] | undefined;
@@ -1014,9 +1015,9 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
               this.populateUsageCount(chunk.payload.output.usage as Record<string, number>);
 
               chunk.payload.output.usage = {
-                inputTokens: self.#usageCount.inputTokens ?? 0,
-                outputTokens: self.#usageCount.outputTokens ?? 0,
-                totalTokens: self.#usageCount.totalTokens ?? 0,
+                inputTokens: self.#usageCount.inputTokens,
+                outputTokens: self.#usageCount.outputTokens,
+                totalTokens: self.#getTotalUsage().totalTokens,
                 ...(self.#usageCount.reasoningTokens !== undefined && {
                   reasoningTokens: self.#usageCount.reasoningTokens,
                 }),
@@ -1553,20 +1554,23 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
   }
 
   updateUsageCount(usage: Partial<LanguageModelUsage>) {
+    // A primary total is known only if every contributing step reported it.
+    // The untouched accumulator is distinct from a step with unknown usage.
+    for (const field of ['inputTokens', 'outputTokens', 'totalTokens'] as const) {
+      const current = this.#usageCount[field];
+      const next = usage?.[field];
+      this.#usageCount[field] = !this.#hasUsageUpdates
+        ? next
+        : current !== undefined && next !== undefined
+          ? current + next
+          : undefined;
+    }
+    this.#hasUsageUpdates = true;
     if (!usage) {
       return;
     }
 
     // Use AI SDK v5 format only (MastraModelOutput is only used in VNext paths)
-    if (usage.inputTokens !== undefined) {
-      this.#usageCount.inputTokens = (this.#usageCount.inputTokens ?? 0) + usage.inputTokens;
-    }
-    if (usage.outputTokens !== undefined) {
-      this.#usageCount.outputTokens = (this.#usageCount.outputTokens ?? 0) + usage.outputTokens;
-    }
-    if (usage.totalTokens !== undefined) {
-      this.#usageCount.totalTokens = (this.#usageCount.totalTokens ?? 0) + usage.totalTokens;
-    }
     if (usage.reasoningTokens !== undefined) {
       this.#usageCount.reasoningTokens = (this.#usageCount.reasoningTokens ?? 0) + usage.reasoningTokens;
     }
@@ -1597,13 +1601,13 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
     }
 
     // Use AI SDK v5 format only (MastraModelOutput is only used in VNext paths)
-    if (usage.inputTokens !== undefined && this.#usageCount.inputTokens === undefined) {
+    if (!this.#hasUsageUpdates && usage.inputTokens !== undefined && this.#usageCount.inputTokens === undefined) {
       this.#usageCount.inputTokens = usage.inputTokens;
     }
-    if (usage.outputTokens !== undefined && this.#usageCount.outputTokens === undefined) {
+    if (!this.#hasUsageUpdates && usage.outputTokens !== undefined && this.#usageCount.outputTokens === undefined) {
       this.#usageCount.outputTokens = usage.outputTokens;
     }
-    if (usage.totalTokens !== undefined && this.#usageCount.totalTokens === undefined) {
+    if (!this.#hasUsageUpdates && usage.totalTokens !== undefined && this.#usageCount.totalTokens === undefined) {
       this.#usageCount.totalTokens = usage.totalTokens;
     }
     if (usage.reasoningTokens !== undefined && this.#usageCount.reasoningTokens === undefined) {
@@ -1905,11 +1909,13 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
   #getTotalUsage(): LanguageModelUsage {
     let total = this.#usageCount.totalTokens;
 
-    if (total === undefined) {
-      const input = this.#usageCount.inputTokens ?? 0;
-      const output = this.#usageCount.outputTokens ?? 0;
-      const reasoning = this.#usageCount.reasoningTokens ?? 0;
-      total = input + output + reasoning;
+    if (
+      total === undefined &&
+      this.#usageCount.inputTokens !== undefined &&
+      this.#usageCount.outputTokens !== undefined
+    ) {
+      // Output tokens already include reasoning tokens.
+      total = this.#usageCount.inputTokens + this.#usageCount.outputTokens;
     }
 
     return {
@@ -2106,6 +2112,7 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
       finishReason: this.#finishReason,
       request: this.#request,
       usageCount: this.#usageCount,
+      hasUsageUpdates: this.#hasUsageUpdates,
       tripwire: this.#tripwire,
       wasSuspended: this.#wasSuspended,
       messageList: this.messageList.serialize(),
@@ -2131,6 +2138,8 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
     this.#finishReason = state.finishReason;
     this.#request = state.request;
     this.#usageCount = state.usageCount;
+    // Older snapshots cannot establish that omitted counts had no contributions.
+    this.#hasUsageUpdates = state.hasUsageUpdates ?? true;
     this.#tripwire = state.tripwire;
     this.#wasSuspended = state.wasSuspended ?? state.status === 'suspended';
     this.messageList = this.messageList.deserialize(state.messageList);
