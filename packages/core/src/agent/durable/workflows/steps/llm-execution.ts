@@ -1918,7 +1918,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
           isContinued: false,
         },
         metadata: { modelId },
-        state: typedInput.state,
+        state: { ...typedInput.state, terminalError: fatalError.message },
       };
     },
   });
