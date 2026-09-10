@@ -9,10 +9,20 @@ import { createTool } from '../../../tools';
 import { Agent } from '../../agent';
 import { createDurableAgent } from '../create-durable-agent';
 import { createEventedAgent } from '../create-evented-agent';
+import { globalRunRegistry } from '../run-registry';
 
 describe.each(['durable', 'evented'] as const)('final output after %s resume', execution => {
   describe.each(['warm', 'rehydrated'] as const)('%s registry', registry => {
-    it.each(['none', 'save', 'processor', 'tripwire', 'redaction', 'empty'] as const)(
+    it.each([
+      'none',
+      'save',
+      'processor',
+      'processor-readonly',
+      'processor-no-registry',
+      'tripwire',
+      'redaction',
+      'empty',
+    ] as const)(
       'preserves the real terminal outcome: %s',
       async fault => {
         const network = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network forbidden'));
@@ -22,6 +32,7 @@ describe.each(['durable', 'evented'] as const)('final output after %s resume', e
         let toolCalls = 0;
         let outputChecks = 0;
         let failedWrites = 0;
+        let resumedRunId: string | undefined;
         class FailingMemory extends InMemoryMemory {
           override async saveMessages(args: Parameters<InMemoryMemory['saveMessages']>[0]) {
             if (
@@ -67,7 +78,12 @@ describe.each(['durable', 'evented'] as const)('final output after %s resume', e
                 id: 'resumed-output-check',
                 processOutputResult({ abort, messageList, messages }) {
                   outputChecks++;
-                  if (fault === 'processor') throw new Error('Resumed output processor failed');
+                  if (fault === 'processor-no-registry') {
+                    expect(resumedRunId).toBeDefined();
+                    expect(globalRunRegistry.delete(resumedRunId!)).toBe(true);
+                  }
+                  if (fault === 'processor' || fault === 'processor-readonly' || fault === 'processor-no-registry')
+                    throw new Error('Resumed output processor failed');
                   if (fault === 'tripwire')
                     abort('Resumed output rejected', {
                       retry: true,
@@ -139,7 +155,12 @@ describe.each(['durable', 'evented'] as const)('final output after %s resume', e
         };
         let agent = makeAgent();
         try {
-          const suspended = await agent.generate('Do the approved task.', { memory: { thread: id, resource: id } });
+          if (fault === 'processor-readonly') {
+            await (await agent.getMemory())!.createThread({ threadId: id, resourceId: id });
+          }
+          const suspended = await agent.generate('Do the approved task.', {
+            memory: { thread: id, resource: id, options: { readOnly: fault === 'processor-readonly' } },
+          });
           expect(suspended.finishReason).toBe('suspended');
           expect(modelCalls).toBe(1);
           expect(toolCalls).toBe(0);
@@ -147,6 +168,7 @@ describe.each(['durable', 'evented'] as const)('final output after %s resume', e
           const runId = suspended.runId;
           expect(typeof runId).toBe('string');
           if (!runId) throw new Error('Missing suspended run ID');
+          resumedRunId = runId;
           expect(agent.runRegistry.has(runId)).toBe(true);
           if (registry === 'rehydrated') {
             // This proves restoration from actual saved snapshots in one process;
@@ -188,6 +210,19 @@ describe.each(['durable', 'evented'] as const)('final output after %s resume', e
             expect(result).toBeUndefined();
           }
           expect(failedWrites > 0).toBe(fault === 'save');
+          const history = await storage.stores.memory!.listMessages({ threadId: id, resourceId: id, perPage: false });
+          const failures = history.messages.filter(message => message.content.metadata?.stopReason === 'error');
+          expect(failures).toHaveLength(
+            ['save', 'processor', 'processor-no-registry', 'tripwire'].includes(fault) ? 1 : 0,
+          );
+          if (
+            fault === 'processor' ||
+            fault === 'processor-readonly' ||
+            fault === 'processor-no-registry' ||
+            fault === 'tripwire'
+          ) {
+            expect(JSON.stringify(history.messages)).not.toContain(answer);
+          }
           await vi.waitFor(async () => {
             expect((await agent.listActiveRuns()).runs).toHaveLength(0);
           });

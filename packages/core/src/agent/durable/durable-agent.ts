@@ -33,6 +33,7 @@ import type { AgentSubscribeToThreadOptions, ToolsInput } from '../types';
 import { publishAbortRequest } from './abort-transport';
 import { AGENT_STREAM_TOPIC, DurableStepIds } from './constants';
 import { runDurableStreamUntilIdle, runResumeDurableStreamUntilIdle } from './durable-stream-until-idle';
+import { persistTerminalError, TerminalErrorHistorySaveError } from './persist-terminal-error';
 import { prepareForDurableExecution } from './preparation';
 import { endRunSpansWithError, ExtendedRunRegistry, globalRunRegistry } from './run-registry';
 import { createDurableAgentStream, emitChunkEvent, emitErrorEvent } from './stream-adapter';
@@ -1557,14 +1558,15 @@ export class DurableAgent<
       ...createObservabilityContext({ currentSpan: entry?.agentSpan }),
     });
     const error = this.getWorkflowFailure(result, 'Workflow execution failed');
+    let historySaveFailed = false;
     if (error) {
-      await this.emitError(runId, error);
+      historySaveFailed = !(await this.emitError(runId, error, workflowInput));
     }
     // Reaching any non-suspended terminal status means the run is done and its
     // persisted snapshot rows will never be resumed. Delete them so snapshot
     // storage doesn't grow one stale row per completed run. Suspended runs
     // keep their snapshots so `resume()` / `recoverActiveRuns()` can find them.
-    if (result?.status && result.status !== 'suspended') {
+    if (result?.status && result.status !== 'suspended' && !historySaveFailed) {
       await this.deleteRunSnapshots(runId);
     }
   }
@@ -1591,7 +1593,32 @@ export class DurableAgent<
    * @param error - The error to emit
    * @internal
    */
-  protected async emitError(runId: string, error: Error): Promise<void> {
+  async #prepareTerminalError(
+    runId: string,
+    error: Error,
+    input: DurableAgenticWorkflowInput,
+    assertOwned?: () => void,
+  ): Promise<Error> {
+    if (error.name === 'TerminalErrorHistorySaveError') return error;
+    try {
+      const entry = globalRunRegistry.get(runId);
+      const memory = entry
+        ? entry.memory
+        : await this.getMemory({
+            requestContext: new RequestContext<unknown>(Object.entries(input.requestContextEntries ?? {})),
+          });
+      assertOwned?.();
+      await persistTerminalError({ agentId: input.agentId, runId, state: input.state, memory, error, assertOwned });
+      return error;
+    } catch (saveError) {
+      assertOwned?.();
+      return new TerminalErrorHistorySaveError(error, saveError);
+    }
+  }
+
+  protected async emitError(runId: string, error: Error, input?: DurableAgenticWorkflowInput): Promise<boolean> {
+    if (input) error = await this.#prepareTerminalError(runId, error, input);
+    const historySaveFailed = error.name === 'TerminalErrorHistorySaveError';
     // End the root spans on error so the trace exports (mirrors the non-durable map-results-step).
     endRunSpansWithError(runId, error);
     if (error instanceof TripWire) {
@@ -1606,9 +1633,10 @@ export class DurableAgent<
           processorId: error.processorId,
         },
       });
-      return;
+      return !historySaveFailed;
     }
     await emitErrorEvent(this.pubsub, runId, error);
+    return !historySaveFailed;
   }
 
   /** Preserve native workflow guard failures across start, resume and recovery. */
@@ -1625,7 +1653,9 @@ export class DurableAgent<
       );
     }
     if (result?.status === 'failed') {
-      return new Error(result.error?.message || fallbackMessage);
+      const error = new Error(result.error?.message || fallbackMessage);
+      error.name = result.error?.name ?? 'Error';
+      return error;
     }
     return undefined;
   }
@@ -2470,14 +2500,29 @@ export class DurableAgent<
           await stopGoalActivity({ agentId: this.id, runId });
         }
         const error = this.getWorkflowFailure(result, 'Workflow resume failed');
+        let historySaveFailed = false;
         if (error) {
-          await this.emitError(runId, error);
+          let terminalError = error;
+          try {
+            const store = await this.#mastra?.getStorage()?.getStore('workflows');
+            const persisted = await store?.getWorkflowRunById({ runId, workflowName: DurableStepIds.AGENTIC_LOOP });
+            const snapshot =
+              typeof persisted?.snapshot === 'string' ? JSON.parse(persisted.snapshot) : persisted?.snapshot;
+            const input = snapshot?.context?.input as DurableAgenticWorkflowInput | undefined;
+            if (input?.__workflowKind !== 'durable-agent' || input.agentId !== this.id || input.runId !== runId) {
+              throw new Error('Cannot load the original run memory policy.');
+            }
+            terminalError = await this.#prepareTerminalError(runId, error, input);
+          } catch (saveError) {
+            terminalError = new TerminalErrorHistorySaveError(error, saveError);
+          }
+          historySaveFailed = !(await this.emitError(runId, terminalError));
         }
         // Same snapshot cleanup as the initial `start()` path: once resume
         // settles on any non-suspended terminal status the persisted rows are
         // no longer needed. A resume that re-suspends must keep them so the
         // next resume/recover can find the snapshot.
-        if (result?.status && result.status !== 'suspended') {
+        if (result?.status && result.status !== 'suspended' && !historySaveFailed) {
           await this.deleteRunSnapshots(runId);
         }
       })
@@ -2755,16 +2800,22 @@ export class DurableAgent<
           recoveryLease,
         );
         recoveryLease.assertOwned();
-        // Snapshot cleanup runs for every non-suspended terminal (success or
-        // failed) so storage stays bounded — mirrors the start()/resume()
-        // contract.
-        if (result?.status && result.status !== 'suspended') {
+        const error = this.getWorkflowFailure(result, 'Workflow recover failed');
+        const terminalError = error
+          ? await this.#prepareTerminalError(runId, error, workflowInput, () => recoveryLease.assertOwned())
+          : undefined;
+        recoveryLease.assertOwned();
+        // Keep the failed snapshot when its terminal history could not be saved.
+        if (
+          result?.status &&
+          result.status !== 'suspended' &&
+          terminalError?.name !== 'TerminalErrorHistorySaveError'
+        ) {
           await this.deleteRunSnapshots(runId);
           recoveryLease.assertOwned();
         }
-        const error = this.getWorkflowFailure(result, 'Workflow recover failed');
-        if (error) {
-          throw error;
+        if (terminalError) {
+          throw terminalError;
         }
       })
       .catch(async error => {
