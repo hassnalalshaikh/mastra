@@ -2042,8 +2042,8 @@ class SessionPermissions {
 
 /**
  * How long a message submitted right after an abort waits for the aborted run
- * to finish tearing down before it is refused. Real teardown includes stream
- * cancellation and every output processor; a few seconds is normal.
+ * to finish tearing down before it is dispatched anyway. Real teardown includes
+ * stream cancellation and every output processor; a few seconds is normal.
  */
 const POST_ABORT_TEARDOWN_TIMEOUT_MS = 30_000;
 
@@ -3803,25 +3803,14 @@ export class Session<TState = unknown> {
       // Only do this in the post-abort window (an abort was requested but the
       // run hasn't reset yet) so normal idle signals aren't delayed.
       if (submittedAbortRequested && (submittedRunId || submittedActiveRunId)) {
-        if (submittedIsRunning) {
-          // A deferred abort (parked approval gate): nothing is streaming, and
-          // the run only leaves once the gated call is declined. A short wait
-          // is enough; the new-run path below starts the fresh run.
-          await this.waitForStreamIdle();
-        } else {
-          // Teardown of an aborted run is not instant: the model stream has to
-          // cancel and the output processors (memory, billing, ...) still run
-          // on the partial result. Dispatching before that completes hands the
-          // new message to the dying run, which drops it. Wait for the real
-          // teardown; if it never comes, fail loudly rather than lose the
-          // message silently.
-          await this.waitForStreamIdle(POST_ABORT_TEARDOWN_TIMEOUT_MS);
-          if (this.stream.isActive() || this.run.getRunId() !== null) {
-            throw new Error(
-              'The previous run is still stopping, so the new message was not sent. Send it again once the run has stopped.',
-            );
-          }
-        }
+        // A deferred abort (parked approval gate) streams nothing and only
+        // leaves once the gated call is declined, so the short wait is enough.
+        // A normal abort tears down for real: the model stream has to cancel
+        // and the output processors (memory, billing, ...) still run on the
+        // partial result, which takes longer than a second. Dispatching before
+        // that completes hands the new message to the dying run, which drops
+        // it, so wait for the real teardown.
+        await this.waitForStreamIdle(submittedIsRunning ? undefined : POST_ABORT_TEARDOWN_TIMEOUT_MS);
         // Abort teardown may have detached the subscription ensured above.
         await this.thread.ensureSubscription(threadId, agent);
       }

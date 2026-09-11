@@ -594,7 +594,7 @@ describe('AgentController signal messages', () => {
     );
   }, 10_000);
 
-  it('refuses the message instead of handing it to a run that never finishes stopping', async () => {
+  it('still dispatches after the bounded wait when the aborted run never finishes stopping', async () => {
     vi.useFakeTimers();
     try {
       const storage = new InMemoryStore();
@@ -616,16 +616,17 @@ describe('AgentController signal messages', () => {
       session.run.ensureAbortController();
       session.run.setRunId({ runId: 'run-1' });
       session.abort();
-      const sendSignal = vi.spyOn(agent, 'sendSignal');
+      const sendSignal = vi.spyOn(agent, 'sendSignal').mockReturnValue({
+        accepted: Promise.resolve({ action: 'deliver', runId: 'new-run-id' }),
+        signal: createSignal({ type: 'user-message', contents: 'steered into a stuck teardown' }),
+      });
 
       const signal = session.sendSignal({ content: 'steered into a stuck teardown' });
-      const outcome = signal.accepted.then(
-        () => 'resolved',
-        (error: Error) => error.message,
-      );
-      await vi.advanceTimersByTimeAsync(31_000);
-      await expect(outcome).resolves.toMatch(/still stopping/);
+      await vi.advanceTimersByTimeAsync(29_000);
       expect(sendSignal).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(signal.accepted).resolves.toEqual({ accepted: true, runId: undefined });
+      expect(sendSignal).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
