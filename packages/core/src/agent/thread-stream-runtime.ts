@@ -859,6 +859,7 @@ export class AgentThreadStreamRuntime {
     const preparedRun = state.preparedRunsById.get(runId);
     if (!preparedRun) {
       state.abortedRunIds.add(runId);
+      this.#releaseAbortedSuspendedRun(state, pubsub, runId);
       return false;
     }
 
@@ -873,6 +874,39 @@ export class AgentThreadStreamRuntime {
     }
 
     return true;
+  }
+
+  /**
+   * A run parked on a suspension has no prepared stream for {@link abortRun} to
+   * cancel, and its completion watcher returned when it suspended, so nothing
+   * else frees the thread it holds. Without this, Stop leaves the parked record
+   * as the thread's blocking run: every later message is parked on a run that
+   * will never resume, and work queued behind it never starts. Release it the
+   * way a finished run is released: drop its records and thread reservation,
+   * then hand its lease to the next queued message or give the lease up.
+   */
+  #releaseAbortedSuspendedRun(state: AgentThreadRuntimeState, pubsub: PubSub | undefined, runId: string): void {
+    const record = state.threadRunsById.get(runId);
+    const parked =
+      this.#isSuspendedRun(state, runId) || record?.lifecycle === 'suspended' || record?.lifecycle === 'suspending';
+    if (!parked) return;
+    const key =
+      state.threadKeysByRunId.get(runId) ?? (record ? this.#threadKey(record.resourceId, record.threadId) : undefined);
+    this.#clearSuspendedRun(state, runId);
+    if (!record || !key) return;
+    record.lifecycle = 'completed';
+    state.threadRunsByStreamId.delete(record.streamId);
+    if (state.threadRunsById.get(runId) === record) state.threadRunsById.delete(runId);
+    state.threadKeysByRunId.delete(runId);
+    if (state.activeThreadRunIds.get(key) !== runId) return;
+    state.activeThreadRunIds.delete(key);
+    if (state.activeThreadStreamIds.get(key) === record.streamId) state.activeThreadStreamIds.delete(key);
+    this.#publish(pubsub, key, { type: 'run-aborted', runId, streamId: record.streamId });
+    if (this.#hasPendingThreadWork(state, key)) {
+      void this.#drainPendingSignals(state, pubsub, key, record);
+    } else {
+      this.#releaseThreadLease(pubsub, key, runId);
+    }
   }
 
   getActiveThreadRunId(options: AgentSubscribeToThreadOptions, pubsub?: PubSub): string | undefined {

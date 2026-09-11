@@ -312,9 +312,13 @@ describe('Session follow-ups behind a parked run', () => {
     }
   });
 
-  it('moves the queue on when Stop abandons a parked run', async () => {
+  // With a live subscription the run engine's teardown drains the queue after Stop
+  // (covered with a real ask_user suspension in agent-controller-ask-user.test.ts).
+  // Without one there is no teardown to wait for, so Stop moves the queue on at once.
+  it('moves the queue on at once when Stop abandons a parked run with no live stream', async () => {
     const { controller, session, dispatched } = await createIdleSession('follow-up-parked-stop');
     try {
+      session.stream.detach();
       park(session);
       await session.followUp({ content: 'After the stop.' });
       expect(session.followUps.count()).toBe(1);
@@ -331,6 +335,7 @@ describe('Session follow-ups behind a parked run', () => {
   it('steer on a parked run sends the steered message first, as an interjection, and keeps the queue', async () => {
     const { controller, session, dispatched } = await createIdleSession('follow-up-parked-steer');
     try {
+      session.stream.detach();
       park(session);
       await session.followUp({ content: 'Queued while generating.' });
 

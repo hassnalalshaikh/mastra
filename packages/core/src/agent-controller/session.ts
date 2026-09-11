@@ -3529,6 +3529,8 @@ export class Session<TState = unknown> {
    */
   abort(): void {
     const hadPendingSuspensions = this.displayState.get().pendingSuspensions.size > 0;
+    // Registered before Stop tears anything down: resolves when the live subscription is detached.
+    const teardown = hadPendingSuspensions && this.stream.isOpen() ? this.#watchStreamTeardown() : undefined;
     this.displayState.clearPendingSuspensions();
     this.abortRun();
     // Clearing the suspension mirror is a direct mutation, so it doesn't flow
@@ -3539,8 +3541,19 @@ export class Session<TState = unknown> {
     }
     // A run parked on a tool suspension has no run in progress whose end would
     // send the next queued message: once Stop abandons it, the queue moves on.
+    // With a live subscription, the run engine detaches it, resets the run and
+    // drains the queue itself; draining earlier would dispatch onto the handle
+    // about to be detached. The wait below only covers a teardown that never comes.
     if (hadPendingSuspensions && !this.run.isRunning()) {
-      void this.drainFollowUpQueue().catch(() => {});
+      if (teardown) {
+        void teardown.wait(POST_ABORT_TEARDOWN_TIMEOUT_MS).then(() => {
+          if (!this.#hasRunInFlight() && !this.followUps.isEmpty()) void this.drainFollowUpQueue().catch(() => {});
+        });
+      } else {
+        void this.drainFollowUpQueue().catch(() => {});
+      }
+    } else {
+      teardown?.cancel();
     }
   }
 
@@ -3676,6 +3689,34 @@ export class Session<TState = unknown> {
    * to avoid the new signal being queued onto the dying run, which would then
    * be drained with the previous run's already-aborted abortSignal.
    */
+  /**
+   * Watch for the live subscription's next teardown (detach or cleanup). The run
+   * engine detaches an aborted subscription only after that run has ended, so
+   * work that must land on a fresh subscription waits for this first. Register
+   * it before awaiting anything, while the aborted handle is still attached.
+   */
+  #watchStreamTeardown(): { wait: (timeoutMs: number) => Promise<void>; cancel: () => void } {
+    const watcher = new AbortController();
+    const teardown = this.stream.waitForTeardown(watcher.signal);
+    return {
+      wait: async timeoutMs => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            teardown,
+            new Promise<void>(resolve => {
+              timer = setTimeout(resolve, timeoutMs);
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+          watcher.abort();
+        }
+      },
+      cancel: () => watcher.abort(),
+    };
+  }
+
   private async waitForStreamIdle(timeoutMs = 1_000): Promise<void> {
     if (!this.stream.isActive() && this.run.getRunId() === null) return;
 
@@ -3776,6 +3817,10 @@ export class Session<TState = unknown> {
     const submittedAbortRequested = this.run.isAbortRequested();
     const submittedWhileWorking =
       submittedIsRunning || (submittedAbortRequested && Boolean(submittedRunId || submittedActiveRunId));
+    // Registered before any await: resolves when the aborted live subscription is
+    // detached, which the run engine does only after that run has ended.
+    const abortedStreamTeardown =
+      submittedAbortRequested && !submittedIsRunning && this.stream.isOpen() ? this.#watchStreamTeardown() : undefined;
     const submitted = createSignal(
       'content' in input
         ? { type: 'user', tagName: 'user', contents: input.content, providerOptions: input.providerOptions }
@@ -3841,10 +3886,19 @@ export class Session<TState = unknown> {
         // partial result, which takes longer than a second. Dispatching before
         // that completes hands the new message to the dying run, which drops
         // it, so wait for the real teardown.
+        const teardownDeadline = Date.now() + POST_ABORT_TEARDOWN_TIMEOUT_MS;
         await this.waitForStreamIdle(submittedIsRunning ? undefined : POST_ABORT_TEARDOWN_TIMEOUT_MS);
+        // The stream can read idle before the run engine detaches the aborted
+        // subscription (it detaches, then resets the run). Ensuring the
+        // subscription in that gap reuses the handle about to be detached, and
+        // the new run's events never reach this session: wait for the detach.
+        if (abortedStreamTeardown && this.run.isAbortRequested()) {
+          await abortedStreamTeardown.wait(Math.max(0, teardownDeadline - Date.now()));
+        }
         // Abort teardown may have detached the subscription ensured above.
         await this.thread.ensureSubscription(threadId, agent);
       }
+      abortedStreamTeardown?.cancel();
 
       const streamOptions = await this.machinery.buildStreamOptions({
         requestContext: requestContextInput,
