@@ -1718,8 +1718,9 @@ export class DurableAgent<
     const cancellation = this.#mastra
       ? this.#mastra.__runDurableAgentCancellation(async () => {
           await this.cancelStoredRun(runId);
+          this.#releaseCancelledParkedRun(runId);
         })
-      : this.cancelStoredRun(runId);
+      : this.cancelStoredRun(runId).then(() => this.#releaseCancelledParkedRun(runId));
     void cancellation.catch(async error => {
       // A competing restoration owns this run's stream. Keep the rejection
       // on this cancellation's lifecycle; do not terminate the winner's stream.
@@ -1742,7 +1743,18 @@ export class DurableAgent<
   async __abortRunStreamAndWait(runId: string): Promise<{ messages: MastraDBMessage[] } | void> {
     super.abortRunStream(runId);
     this.#signalDurableRun(runId);
-    return this.cancelStoredRun(runId);
+    const cancelled = await this.cancelStoredRun(runId);
+    this.#releaseCancelledParkedRun(runId);
+    return cancelled;
+  }
+
+  /**
+   * Once its stored run is cancelled, a run that was parked on a tool
+   * suspension no longer holds its thread. A failed cancellation never gets
+   * here, so that run stays observable with its stored work retained.
+   */
+  #releaseCancelledParkedRun(runId: string): void {
+    agentThreadStreamRuntime.releaseAbortedSuspendedRun(runId, this.getPubSub());
   }
 
   #signalDurableRun(runId: string): void {

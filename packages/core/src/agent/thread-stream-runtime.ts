@@ -859,7 +859,6 @@ export class AgentThreadStreamRuntime {
     const preparedRun = state.preparedRunsById.get(runId);
     if (!preparedRun) {
       state.abortedRunIds.add(runId);
-      this.#releaseAbortedSuspendedRun(state, pubsub, runId);
       return false;
     }
 
@@ -877,28 +876,31 @@ export class AgentThreadStreamRuntime {
   }
 
   /**
-   * A run parked on a suspension has no prepared stream for {@link abortRun} to
-   * cancel, and its completion watcher returned when it suspended, so nothing
-   * else frees the thread it holds. Without this, Stop leaves the parked record
-   * as the thread's blocking run: every later message is parked on a run that
-   * will never resume, and work queued behind it never starts. Release it the
-   * way a finished run is released: drop its records and thread reservation,
-   * then hand its lease to the next queued message or give the lease up.
+   * Release a run that was parked on a tool suspension and has since been
+   * aborted and cancelled. Its completion watcher returned when it suspended,
+   * so nothing else frees the thread it holds: without this every later message
+   * is parked on a run that will never resume, and work queued behind it never
+   * starts. The run is released the way a finished run is: its records and
+   * thread reservation are dropped, then its lease goes to the next queued
+   * message or is given up. Approval suspensions are released by their own
+   * decline path and are left alone.
+   *
+   * @internal
    */
-  #releaseAbortedSuspendedRun(state: AgentThreadRuntimeState, pubsub: PubSub | undefined, runId: string): void {
+  releaseAbortedSuspendedRun(runId: string, pubsub?: PubSub): boolean {
+    const state = this.#getState(pubsub);
+    if (!state.abortedRunIds.has(runId) || state.approvalSuspendedRunIds.has(runId)) return false;
     const record = state.threadRunsById.get(runId);
     const parked =
-      this.#isSuspendedRun(state, runId) || record?.lifecycle === 'suspended' || record?.lifecycle === 'suspending';
-    if (!parked) return;
-    const key =
-      state.threadKeysByRunId.get(runId) ?? (record ? this.#threadKey(record.resourceId, record.threadId) : undefined);
+      state.suspendedRunIds.has(runId) || record?.lifecycle === 'suspended' || record?.lifecycle === 'suspending';
+    if (!parked || !record) return false;
+    const key = state.threadKeysByRunId.get(runId) ?? this.#threadKey(record.resourceId, record.threadId);
     this.#clearSuspendedRun(state, runId);
-    if (!record || !key) return;
     record.lifecycle = 'completed';
     state.threadRunsByStreamId.delete(record.streamId);
     if (state.threadRunsById.get(runId) === record) state.threadRunsById.delete(runId);
     state.threadKeysByRunId.delete(runId);
-    if (state.activeThreadRunIds.get(key) !== runId) return;
+    if (state.activeThreadRunIds.get(key) !== runId) return true;
     state.activeThreadRunIds.delete(key);
     if (state.activeThreadStreamIds.get(key) === record.streamId) state.activeThreadStreamIds.delete(key);
     this.#publish(pubsub, key, { type: 'run-aborted', runId, streamId: record.streamId });
@@ -907,6 +909,7 @@ export class AgentThreadStreamRuntime {
     } else {
       this.#releaseThreadLease(pubsub, key, runId);
     }
+    return true;
   }
 
   getActiveThreadRunId(options: AgentSubscribeToThreadOptions, pubsub?: PubSub): string | undefined {
