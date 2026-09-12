@@ -2817,11 +2817,13 @@ export class DurableAgent<
           ? await this.#prepareTerminalError(runId, error, workflowInput, () => recoveryLease.assertOwned())
           : undefined;
         recoveryLease.assertOwned();
-        // Keep the failed snapshot when its terminal history could not be saved.
+        // Keep the failed snapshot when its terminal history could not be saved,
+        // except for a Stop: the user ended the run on purpose, so its rows go
+        // even when the stopped state could not be saved.
         if (
           result?.status &&
           result.status !== 'suspended' &&
-          terminalError?.name !== 'TerminalErrorHistorySaveError'
+          (cancellation || terminalError?.name !== 'TerminalErrorHistorySaveError')
         ) {
           await this.deleteRunSnapshots(runId);
           recoveryLease.assertOwned();
