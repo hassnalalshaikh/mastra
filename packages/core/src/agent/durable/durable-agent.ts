@@ -18,6 +18,7 @@ import type { WorkflowsStorage } from '../../storage';
 import type { FullOutput, MastraModelOutput } from '../../stream/base/output';
 import type { ChunkType, MastraOnFinishCallback, MastraStreamTransformOptions } from '../../stream/types';
 import { ChunkFrom } from '../../stream/types';
+import { getPreparedToolPolicy } from '../../tools/tool-policy-execution';
 import { deepMerge } from '../../utils';
 import type { ShouldPersistSnapshotFn, WorkflowRunState, WorkflowRunStatus } from '../../workflows/types';
 import type { Workflow } from '../../workflows/workflow';
@@ -964,7 +965,16 @@ export class DurableAgent<
       });
     }
 
-    return { snapshot, workflowInput };
+    const savedExecution = snapshot.context?.[DurableStepIds.AGENTIC_EXECUTION] as
+      | { payload?: { messageListState?: SerializedMessageListState } }
+      | undefined;
+    return {
+      snapshot,
+      workflowInput: {
+        ...workflowInput,
+        messageListState: savedExecution?.payload?.messageListState ?? workflowInput.messageListState,
+      },
+    };
   }
 
   async #bindScheduledController(input: DurableAgenticWorkflowInput): Promise<void> {
@@ -1185,12 +1195,14 @@ export class DurableAgent<
     abortController,
     recoveryLease,
     originalSpansEnded,
+    cancellation,
   }: {
     runId: string;
     workflowInput: DurableAgenticWorkflowInput;
     abortController: AbortController;
     recoveryLease: RecoveryLease;
     originalSpansEnded: boolean;
+    cancellation?: { toolCallId: string };
   }): Promise<RehydratedRecoveryState> {
     const requestContext: RequestContext = workflowInput.requestContextEntries
       ? new RequestContext(Object.entries(workflowInput.requestContextEntries) as Iterable<readonly [string, unknown]>)
@@ -1349,7 +1361,19 @@ export class DurableAgent<
     }
     recoveryLease.assertOwned();
 
+    const tools = cancellation
+      ? {}
+      : await wrapped.getToolsForExecution({
+          runId,
+          threadId,
+          resourceId,
+          requestContext,
+          resumeMessageList: messageList,
+        });
+    recoveryLease.assertOwned();
     const registryEntry = {
+      tools,
+      toolPolicy: getPreparedToolPolicy(tools),
       // Restore the original run's flag from the persisted snapshot so a
       // warm resume after recovery keeps returning scoringData without the
       // caller re-passing the option.
@@ -1631,6 +1655,10 @@ export class DurableAgent<
   // --- Request context ---
   override get requestContextSchema() {
     return this.#wrappedAgent.requestContextSchema;
+  }
+
+  override getToolPolicy() {
+    return this.#wrappedAgent.getToolPolicy();
   }
 
   // --- Processors ---

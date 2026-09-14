@@ -1161,6 +1161,7 @@ export function createStepFromProcessor<TProcessorId extends string>(
         text,
         retryCount,
         // inputStep phase fields for model/tools configuration
+        toolPolicy: input.toolPolicy,
         model,
         tools,
         toolChoice,
@@ -1317,6 +1318,7 @@ export function createStepFromProcessor<TProcessorId extends string>(
 
               const result = await processor.processInputStep({
                 ...baseContext,
+                toolPolicy: input.toolPolicy,
                 messages: messages as MastraDBMessage[],
                 messageList: checkedMessageList,
                 stepNumber: stepNumber ?? 0,
@@ -1362,6 +1364,7 @@ export function createStepFromProcessor<TProcessorId extends string>(
                 messages,
                 ...validatedResult,
                 runId: agentRunId,
+                toolPolicy: input.toolPolicy,
                 systemMessages: checkedMessageList.getSystemMessages(),
                 ...(currentMessageId ? { messageId: validatedResult.messageId ?? currentMessageId } : {}),
               };

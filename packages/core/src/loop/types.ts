@@ -249,6 +249,8 @@ export type LoopOptions<TOOLS extends ToolSet = ToolSet, OUTPUT = undefined> = {
   requireToolApproval?: RequireToolApproval;
   toolApprovalPolicy?: 'manual' | 'auto';
   toolApprovalContext?: import('../agent/tool-approval-context').ToolApprovalContext;
+  /** Configured Agent policy, never a per-run override. */
+  toolPolicy?: import('../tools/tool-policy').ToolPolicy;
   autoResumeSuspendedTools?: boolean;
   agentId: string;
   /**

@@ -23,6 +23,17 @@ import type {
 } from '../../types';
 import { rebuildRunToolsFromMastra } from '../../utils/resolve-runtime';
 
+/** Keep the dependency recovery contract in both model and stored tool output. */
+function toolErrorOutput(error: NonNullable<DurableToolCallOutput['error']>): string | Record<string, unknown> {
+  if (error.name !== 'ToolDependencyError') return error.message;
+  return { ...error };
+}
+
+function toolErrorText(error: NonNullable<DurableToolCallOutput['error']>): string {
+  const output = toolErrorOutput(error);
+  return typeof output === 'string' ? output : JSON.stringify(output);
+}
+
 /**
  * Input schema for the durable LLM mapping step.
  * This combines the LLM execution output with tool call results.
@@ -290,7 +301,7 @@ export function createDurableLLMMappingStep() {
           commitToolResult({
             messageList,
             outcome: toolResult.error
-              ? { kind: 'error', errorText: toolResult.error.message }
+              ? { kind: 'error', errorText: toolErrorText(toolResult.error) }
               : { kind: 'result', result: toolResult.result },
             toolCallId: toolResult.toolCallId,
             toolName: toolResult.toolName,
@@ -455,7 +466,7 @@ export function createDurableLLMMappingStep() {
               type: 'tool-result',
               toolCallId: tr.toolCallId,
               toolName: tr.toolName,
-              result: tr.error ? tr.error.message : tr.result,
+              result: tr.error ? toolErrorOutput(tr.error) : tr.result,
               ...(tr.error ? { isError: true } : {}),
             });
           }

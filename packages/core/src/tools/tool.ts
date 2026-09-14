@@ -6,6 +6,7 @@ import { toStandardSchema } from '../schema';
 import type { PublicSchema, StandardSchemaWithJSON, InferPublicSchema } from '../schema';
 import type { SuspendOptions } from '../workflows';
 import { consumeBuilderValidatedInput } from './builder-validation-context';
+import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from './tool-policy-execution';
 import type {
   McpMetadata,
   MCPToolProperties,
@@ -407,7 +408,7 @@ export class Tool<
     // 2. context - Execution metadata (mastra, suspend, etc.)
     if (opts.execute) {
       const originalExecute = opts.execute;
-      this.execute = async (inputData: TSchemaIn, context?: any) => {
+      this.execute = markPolicyExecutor(async (inputData: TSchemaIn, context?: any) => {
         // When a tool is being resumed (resumeData present in context), skip input
         // validation. The original args were already validated during the initial
         // execution, and during resume the tool's execute function checks resumeData
@@ -569,6 +570,9 @@ export class Tool<
         }
 
         // Call the original execute with validated input and organized context
+        const decision = await checkExecutionPolicy(context, data);
+        if (decision?.allowed === false) return decision.error as any;
+        delete organizedContext[TOOL_EXECUTION_POLICY];
         const output = await originalExecute(data as any, organizedContext);
 
         if (suspendData) {
@@ -594,7 +598,7 @@ export class Tool<
         }
 
         return outputValidation.data;
-      };
+      });
     }
   }
 }
