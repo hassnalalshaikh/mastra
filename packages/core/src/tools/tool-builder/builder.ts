@@ -33,6 +33,7 @@ import { isZodObject, safeExtendZodObject } from '../../utils/zod-utils';
 
 import type { SuspendOptions } from '../../workflows';
 import { markBuilderValidatedInput } from '../builder-validation-context';
+import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from '../tool-policy-execution';
 import { captureToolInput, restoreToolInput, TOOL_INPUT_STATE } from '../resumable-input';
 import { ToolStream } from '../stream';
 import type {
@@ -603,7 +604,11 @@ export class CoreToolBuilder extends MastraBase {
         let suspendData = null;
 
         if (isVercelTool(tool)) {
-          const { [TOOL_INPUT_STATE]: _toolInputState, ...publicOptions } = execOptions;
+          const {
+            [TOOL_INPUT_STATE]: _toolInputState,
+            [TOOL_EXECUTION_POLICY]: _toolPolicy,
+            ...publicOptions
+          } = execOptions;
           // Handle Vercel tools (AI SDK tools)
           result = await executeWithContext({
             span: toolSpan,
@@ -641,6 +646,9 @@ export class CoreToolBuilder extends MastraBase {
             memory: options.memory,
             runId: options.runId,
             requestContext: mergeRequestContexts(options.requestContext, execOptions.requestContext),
+            ...(execOptions[TOOL_EXECUTION_POLICY]
+              ? { [TOOL_EXECUTION_POLICY]: execOptions[TOOL_EXECUTION_POLICY] }
+              : {}),
             actor: execOptions.actor,
             // Workspace for file operations and command execution
             // Execution-time workspace (from prepareStep/processInputStep) takes precedence over build-time workspace
@@ -797,7 +805,7 @@ export class CoreToolBuilder extends MastraBase {
       }
     };
 
-    return async (args: unknown, execOptions?: MastraToolInvocationOptions) => {
+    return markPolicyExecutor(async (args: unknown, execOptions?: MastraToolInvocationOptions) => {
       let logger = options.logger || this.logger;
 
       // Create tool span early so validation failures are always observable.
@@ -901,6 +909,12 @@ export class CoreToolBuilder extends MastraBase {
         return await new Promise((resolve, reject) => {
           setImmediate(async () => {
             try {
+              const decision = await checkExecutionPolicy(execOptions, args);
+              if (decision?.allowed === false) {
+                toolSpan?.end({ output: decision.error, attributes: { success: false } });
+                resolve(decision.error);
+                return;
+              }
               const result = await execFunction(args, execOptions!, toolSpan);
               resolve(result);
             } catch (err) {
@@ -926,7 +940,7 @@ export class CoreToolBuilder extends MastraBase {
         logger.trackException(mastraError, { ...logData, ...rest, model: logModelObject, args });
         throw mastraError;
       }
-    };
+    });
   }
 
   buildV5() {

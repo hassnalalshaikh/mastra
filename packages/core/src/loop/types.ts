@@ -232,6 +232,8 @@ export type LoopOptions<TOOLS extends ToolSet = ToolSet, OUTPUT = undefined> = {
   modelSpanTracker?: IModelSpanTracker;
   requireToolApproval?: RequireToolApproval;
   toolApprovalPolicy?: 'manual' | 'auto';
+  /** Configured Agent policy, never a per-run override. */
+  toolPolicy?: import('../tools/tool-policy').ToolPolicy;
   toolApprovalContext?: import('../agent/tool-approval-context').ToolApprovalContext;
   autoResumeSuspendedTools?: boolean;
   agentId: string;

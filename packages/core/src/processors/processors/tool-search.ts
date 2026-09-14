@@ -1,4 +1,6 @@
 import { z } from 'zod/v4';
+import type { ToolPolicy, ToolPolicyArgs } from '../../tools/tool-policy';
+import { combineToolPolicies, executeToolWithPolicy, markPolicyExecutor } from '../../tools/tool-policy-execution';
 import { parseMemoryRequestContext } from '../../memory/types';
 import { MASTRA_THREAD_ID_KEY } from '../../request-context';
 import type { RequestContext } from '../../request-context';
@@ -113,6 +115,8 @@ export interface ToolSearchProcessorOptions {
    * Return false to hide or block a tool for the current request.
    */
   filter?: (args: ToolSearchFilterArgs) => boolean | Promise<boolean>;
+  /** Activation and execution policy; blocked tools remain discoverable. */
+  toolPolicy?: ToolPolicy;
 }
 
 /**
@@ -169,6 +173,7 @@ const TOOL_SEARCH_TOKENIZE_OPTIONS: TokenizeOptions = {
  */
 /** Meta-tools this processor injects; never searchable, never withheld. */
 const META_TOOL_NAMES = new Set(['search_tools', 'load_tool']);
+const POLICY_GUARD = Symbol('tool-search-policy-guard');
 
 /** A searchable set of tools: the tools themselves plus their BM25 index. */
 type ToolCatalog = {
@@ -219,6 +224,10 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
   private includeResolvedTools: boolean;
   private searchConfig: Required<NonNullable<ToolSearchProcessorOptions['search']>>;
   private filter?: ToolSearchProcessorOptions['filter'];
+  private toolPolicy?: ToolPolicy;
+  private getToolPolicy(prepared?: ToolPolicy): ToolPolicy | undefined {
+    return combineToolPolicies(prepared, this.toolPolicy);
+  }
 
   /** Pluggable backend for loaded-tool state. */
   private store: LoadedToolStore;
@@ -229,6 +238,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
   constructor(options: ToolSearchProcessorOptions) {
     this.includeResolvedTools = options.includeResolvedTools ?? false;
     this.filter = options.filter;
+    this.toolPolicy = options.toolPolicy;
     this.searchConfig = {
       topK: options.search?.topK ?? 5,
       minScore: options.search?.minScore ?? 0,
@@ -307,6 +317,31 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
     }
   }
 
+  private async checkPolicy(policy: ToolPolicy | undefined, args: ToolPolicyArgs) {
+    return policy?.(args) ?? { allowed: true as const };
+  }
+
+  private protectTool(
+    toolName: string,
+    tool: Tool<any, any>,
+    requestContext?: RequestContext,
+    policy?: ToolPolicy,
+  ): Tool<any, any> {
+    if (!policy || !tool.execute) return tool;
+    const existing = (
+      tool.execute as typeof tool.execute & {
+        [POLICY_GUARD]?: { owner: ToolSearchProcessor; requestContext?: RequestContext; toolName: string };
+      }
+    )[POLICY_GUARD];
+    if (existing?.owner === this && existing.requestContext === requestContext && existing.toolName === toolName)
+      return tool;
+    const guardedExecute = markPolicyExecutor(async (input: unknown, context: any) =>
+      executeToolWithPolicy(tool, toolName, input, context, policy, context?.requestContext ?? requestContext),
+    );
+    Object.defineProperty(guardedExecute, POLICY_GUARD, { value: { owner: this, requestContext, toolName } });
+    return Object.assign(Object.create(Object.getPrototypeOf(tool)), tool, { execute: guardedExecute });
+  }
+
   private async getSuggestedToolNames(
     catalog: ToolCatalog,
     toolName: string,
@@ -345,6 +380,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
     catalog: ToolCatalog,
     loadedNames: Set<string>,
     requestContext?: RequestContext,
+    policy?: ToolPolicy,
   ): Promise<Record<string, Tool<any, any>>> {
     const loadedTools: Record<string, Tool<any, any>> = {};
 
@@ -352,8 +388,16 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
       const tool = this.findToolForDynamicName(catalog, toolName);
       if (tool) {
         const isAllowed = await this.isToolAllowed(tool, requestContext, 'active');
-        if (isAllowed) {
-          loadedTools[toolName] = tool;
+        const decision =
+          isAllowed &&
+          (await this.checkPolicy(policy, {
+            toolName,
+            requestContext,
+            phase: 'active',
+            hasExecute: typeof tool.execute === 'function',
+          }));
+        if (decision && decision.allowed) {
+          loadedTools[toolName] = this.protectTool(toolName, tool, requestContext, policy);
         }
       }
     }
@@ -381,7 +425,9 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
     tools?: Record<string, unknown>;
     /** Include native discovery tools when rebuilding an agent's executors. */
     includeMetaTools?: boolean;
+    toolPolicy?: ToolPolicy;
   }): Promise<Record<string, Tool<any, any>>> {
+    const policy = this.getToolPolicy(args?.toolPolicy ?? args?.stepArgs?.toolPolicy);
     const requestContext = args?.requestContext ?? args?.stepArgs?.requestContext;
     const resolvedTools = args?.stepArgs ? args.stepArgs.tools : args?.tools;
     const catalog = this.catalogForStep(resolvedTools);
@@ -389,9 +435,9 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
       ? this.makeStoreContext(args.stepArgs)
       : { threadId: this.resolveThreadId(requestContext), args: undefined };
     const loadedNames = await this.store.getLoadedNames(storeContext);
-    const loadedTools = await this.getLoadedTools(catalog, loadedNames, requestContext);
+    const loadedTools = await this.getLoadedTools(catalog, loadedNames, requestContext, policy);
     if (!args?.includeMetaTools) return loadedTools;
-    const metaTools = this.createMetaTools(catalog, storeContext, loadedNames, requestContext);
+    const metaTools = this.createMetaTools(catalog, storeContext, loadedNames, requestContext, policy);
     return {
       ...Object.fromEntries(
         Object.entries(metaTools).filter(
@@ -520,6 +566,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
     storeContext: LoadedToolStoreContext,
     loadedToolNames: Set<string>,
     requestContext?: RequestContext,
+    policy?: ToolPolicy,
   ) {
     const autoLoad = this.searchConfig.autoLoad;
     // Create the search tool with BM25 ranking
@@ -543,6 +590,8 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
             name: z.string(),
             description: z.string(),
             score: z.number(),
+            loaded: z.boolean().optional(),
+            dependencyError: z.record(z.string(), z.unknown()).optional(),
           }),
         ),
         message: z.string(),
@@ -559,29 +608,39 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
         }
 
         if (autoLoad) {
-          // Activate the matches immediately. They become usable on the next turn —
-          // no explicit load_tool call needed. The store records the activation;
-          // for the context store this result in the conversation messages is the durable record.
           const newlyLoaded: string[] = [];
+          const activationResults = [];
           for (const result of results) {
-            if (!loadedToolNames.has(result.name)) {
-              newlyLoaded.push(result.name);
+            const tool = this.findToolForDynamicName(catalog, result.name);
+            if (!tool || !(await this.isToolAllowed(tool, requestContext, 'load'))) continue;
+            const decision = await this.checkPolicy(policy, {
+              toolName: result.name,
+              requestContext,
+              phase: 'load',
+              hasExecute: typeof tool.execute === 'function',
+            });
+            if (!decision.allowed) {
+              activationResults.push({ ...result, loaded: false, dependencyError: decision.error });
+              continue;
             }
+            activationResults.push(policy ? { ...result, loaded: true } : result);
+            if (!loadedToolNames.has(result.name)) newlyLoaded.push(result.name);
           }
           await this.store.addLoaded(newlyLoaded, storeContext);
           for (const name of newlyLoaded) loadedToolNames.add(name);
-
+          const blocked = activationResults.some(result => 'dependencyError' in result);
           return {
-            results,
-            message:
-              `Found and loaded ${results.length} tool(s): ${results.map(r => r.name).join(', ')}. ` +
-              `They are available on your next turn — call them directly.` +
-              (newlyLoaded.length < results.length ? ' Some were already loaded.' : ''),
+            results: activationResults,
+            message: blocked
+              ? 'Some tools require skills first. Read dependencyError, call load_skill for each missing skill, then search_tools again.'
+              : `Found and loaded ${activationResults.length} tool(s): ${activationResults.map(r => r.name).join(', ')}. ` +
+                'They are available on your next turn — call them directly.' +
+                (newlyLoaded.length < activationResults.length ? ' Some were already loaded.' : ''),
           };
         }
 
         return {
-          results,
+          results: policy ? results.map(result => ({ ...result, loaded: false })) : results,
           message: `Found ${results.length} tool(s). Use load_tool with an exact toolName or a toolNames array to make them available.`,
         };
       },
@@ -611,6 +670,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
         loaded: z.array(z.string()).optional(),
         notFound: z.array(z.string()).optional(),
         alreadyLoaded: z.array(z.string()).optional(),
+        dependencyErrors: z.array(z.record(z.string(), z.unknown())).optional(),
       }),
       execute: async ({ toolName, toolNames }) => {
         // Determine which tools to load
@@ -636,6 +696,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
           };
         }
 
+        const dependencyErrors: Record<string, unknown>[] = [];
         const notFound: string[] = [];
         const alreadyLoaded: string[] = [];
         const loaded: string[] = [];
@@ -652,6 +713,17 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
           const isAllowed = await this.isToolAllowed(matchingTool, requestContext, 'load');
           if (!isAllowed) {
             notFound.push(name);
+            continue;
+          }
+
+          const decision = await this.checkPolicy(policy, {
+            toolName: name,
+            requestContext,
+            phase: 'load',
+            hasExecute: typeof matchingTool.execute === 'function',
+          });
+          if (!decision.allowed) {
+            dependencyErrors.push(decision.error);
             continue;
           }
 
@@ -684,6 +756,13 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
             }
             return { success: false, message, toolName: name };
           }
+          if (dependencyErrors.length > 0) {
+            return {
+              success: false,
+              dependencyErrors,
+              message: 'Load the missing skills with load_skill, then retry load_tool.',
+            };
+          }
           if (alreadyLoaded.length > 0) {
             return {
               success: true,
@@ -703,9 +782,11 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
         if (loaded.length > 0) parts.push(`Loaded: ${loaded.join(', ')} — available on your next turn`);
         if (alreadyLoaded.length > 0) parts.push(`Already loaded: ${alreadyLoaded.join(', ')}`);
         if (notFound.length > 0) parts.push(`Not found: ${notFound.join(', ')}`);
+        if (dependencyErrors.length) parts.push('Load the missing skills with load_skill, then retry load_tool.');
 
         return {
-          success: notFound.length === 0,
+          success: notFound.length === 0 && dependencyErrors.length === 0,
+          ...(dependencyErrors.length ? { dependencyErrors } : {}),
           message: parts.join(' | '),
           loadedCount: loaded.length,
           loaded: loaded.length > 0 ? loaded : undefined,
@@ -719,6 +800,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
   }
 
   async processInputStep(args: ProcessInputStepArgs) {
+    const policy = this.getToolPolicy(args.toolPolicy);
     const { tools, messageList } = args;
     const catalog = this.catalogForStep(tools);
     const storeContext = this.makeStoreContext(args);
@@ -739,10 +821,10 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
             'Tools must be loaded before they can be used.',
     );
 
-    const metaTools = this.createMetaTools(catalog, storeContext, loadedToolNames, args.requestContext);
+    const metaTools = this.createMetaTools(catalog, storeContext, loadedToolNames, args.requestContext, policy);
 
     // Get loaded tools as of this step's snapshot.
-    const loadedTools = await this.getLoadedTools(catalog, loadedToolNames, args.requestContext);
+    const loadedTools = await this.getLoadedTools(catalog, loadedToolNames, args.requestContext, policy);
     // Replace only our own earlier meta-tool closures. Explicit user overrides
     // retain their existing precedence over the processor's generated tools.
     const existingTools = Object.fromEntries(
@@ -750,6 +832,19 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
         ([name, tool]) => !META_TOOL_NAMES.has(name) || getProcessorToolOwner(tool) !== this.id,
       ),
     );
+
+    if (policy) {
+      for (const [name, tool] of Object.entries(existingTools)) {
+        const decision = await this.checkPolicy(policy, {
+          toolName: name,
+          requestContext: args.requestContext,
+          phase: 'active',
+          hasExecute: typeof (tool as Tool<any, any>).execute === 'function',
+        });
+        if (!decision.allowed) delete existingTools[name];
+        else existingTools[name] = this.protectTool(name, tool as Tool<any, any>, args.requestContext, policy);
+      }
+    }
 
     // Return merged tools, ordered to keep the cacheable prefix stable:
     // meta-tool(s) first (always present, fixed position), then existing tools,

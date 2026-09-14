@@ -20,12 +20,14 @@ import { ProcessorRunner } from '../../../../processors/runner';
 import type { ChunkType } from '../../../../stream/types';
 import { ChunkFrom } from '../../../../stream/types';
 import { findProviderToolByName } from '../../../../tools/provider-tool-utils';
+import { executeToolWithPolicy } from '../../../../tools/tool-policy-execution';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../../tools/resumable-input';
 import { PUBSUB_SYMBOL } from '../../../../workflows/constants';
 import type { SuspendOptions } from '../../../../workflows/step';
 import { createStep } from '../../../../workflows/workflow';
 import { stopGoalActivity } from '../../../goal';
-import type { MessageList } from '../../../message-list';
+import { MessageList } from '../../../message-list';
+import type { SerializedMessageListState } from '../../../message-list/state';
 import type { SaveQueueManager } from '../../../save-queue';
 import { resolveDeclineReason } from '../../../tool-approval';
 import { DurableStepIds } from '../../constants';
@@ -280,6 +282,7 @@ export function createDurableToolCallStep() {
           threadExists?: boolean;
         };
         requestContextEntries?: Record<string, unknown>;
+        messageListState?: SerializedMessageListState;
         agentSpanData?: unknown;
         modelSpanData?: unknown;
       }>();
@@ -334,7 +337,7 @@ export function createDurableToolCallStep() {
       // provider tool advertises the snake-case name), then by id, then fall
       // back to the Mastra-wide tool registry (exact name, provider-tool
       // name, then by id). Mirrors the non-durable tool-call step.
-      const registryEntry = globalRunRegistry.get(runId);
+      let registryEntry = globalRunRegistry.get(runId);
       let tool = registryEntry?.tools?.[toolName];
       let mastraTools: Record<string, any> | undefined;
       // Tools rebuilt from the Mastra instance when the per-process registry is
@@ -393,8 +396,17 @@ export function createDurableToolCallStep() {
       // threadId regardless. Without this guard every tool call on a memoryless durable run would
       // pay for a full rebuild to obtain something that can neither exist nor be used.
       const needsSaveQueueForFlush = !registryEntry?.saveQueueManager && !!state?.threadId;
-      if ((!tool || needsSaveQueueForFlush) && mastra) {
+      const decliningSavedApproval =
+        approvalDecision?.approved === false && (suspendData as { type?: unknown } | undefined)?.type === 'approval';
+      if ((!tool || needsSaveQueueForFlush) && mastra && !decliningSavedApproval) {
         const rebuilt = await rebuildRunToolsFromMastra({
+          messageList:
+            (globalRunRegistry.get(runId) as any)?.messageList ??
+            (initData.messageListState
+              ? new MessageList({ threadId: state?.threadId, resourceId: state?.resourceId }).deserialize(
+                  initData.messageListState,
+                )
+              : undefined),
           mastra: mastra as Mastra,
           runId,
           agentId: initData.agentId,
@@ -405,6 +417,7 @@ export function createDurableToolCallStep() {
           logger,
         });
         if (rebuilt) {
+          registryEntry = globalRunRegistry.get(runId);
           rebuiltTools = rebuilt.tools;
           rebuiltWorkspace = rebuilt.workspace;
           rebuiltMemory = rebuilt.memory;
@@ -426,6 +439,14 @@ export function createDurableToolCallStep() {
       }
 
       // Resolve the key the tool is registered under for activeTools filtering.
+      const effectiveRegistry = globalRunRegistry.get(runId);
+      const toolPolicy =
+        effectiveRegistry && 'toolPolicy' in effectiveRegistry
+          ? effectiveRegistry.toolPolicy
+          : await Object.values((mastra as Mastra | undefined)?.listAgents?.() ?? {})
+              .find(agent => agent.id === initData.agentId)
+              ?.resolveToolPolicy({ requestContext, runId });
+
       // Prefer the per-run registryEntry key (exact name then identity match),
       // and fall back to the Mastra-wide registry when the tool was resolved
       // there. Without this fallback, a globally-registered tool like
@@ -442,14 +463,31 @@ export function createDurableToolCallStep() {
       const activeToolKey = toolKey ?? toolName;
       const isHiddenByActiveTools = effectiveActiveTools !== undefined && !effectiveActiveTools.includes(activeToolKey);
 
-      if (!tool || isHiddenByActiveTools) {
+      const rejectMissingTool = async () => {
         const availableToolNames = effectiveActiveTools ?? Object.keys(rebuiltTools ?? registryEntry?.tools ?? {});
         const availableToolsStr =
           availableToolNames.length > 0 ? ` Available tools: ${availableToolNames.join(', ')}` : '';
-        const error = {
-          name: 'ToolNotFoundError',
-          message: `Tool "${toolName}" not found.${availableToolsStr}. Call tools by their exact name only — never add prefixes, namespaces, or colons.`,
-        };
+        const dependencyDecision =
+          !tool && toolPolicy
+            ? await toolPolicy({
+                toolName: activeToolKey,
+                requestContext: registryEntry?.requestContext ?? requestContext,
+                phase: 'execute',
+                input: args,
+                hasExecute: true,
+              })
+            : undefined;
+        const error =
+          dependencyDecision?.allowed === false
+            ? {
+                name: 'ToolDependencyError',
+                message: 'Load the required skills before retrying this tool.',
+                ...dependencyDecision.error,
+              }
+            : {
+                name: 'ToolNotFoundError',
+                message: `Tool "${toolName}" not found.${availableToolsStr}. Call tools by their exact name only — never add prefixes, namespaces, or colons.`,
+              };
         if (pubsub) {
           await emitChunkEvent(pubsub, runId, {
             type: 'tool-error',
@@ -462,7 +500,8 @@ export function createDurableToolCallStep() {
           ...typedInput,
           error,
         };
-      }
+      };
+      if ((!tool || isHiddenByActiveTools) && !decliningSavedApproval) return rejectMissingTool();
 
       // Get memory-related state for message persistence. Fall back to the
       // values rebuilt from Mastra above (cross-process worker), so workspace
@@ -509,17 +548,18 @@ export function createDurableToolCallStep() {
       const requiresApproval =
         agentOptions.toolApprovalPolicy === 'manual' ||
         agentOptions.toolApprovalPolicy === 'auto' ||
-        (await toolRequiresApproval(tool, effectiveRequireToolApproval, args, {
-          toolName,
-          requestContext: registryEntry?.requestContext
-            ? Object.fromEntries(
-                [...registryEntry.requestContext.entries()].filter(([key]) => key !== '__mastra_requireToolApproval'),
-              )
-            : undefined,
-          // Use the same rebuilt-workspace fallback as execution (above), so
-          // workspace-aware approval policies see their workspace cross-process.
-          workspace,
-        }));
+        (!!tool &&
+          (await toolRequiresApproval(tool, effectiveRequireToolApproval, args, {
+            toolName,
+            requestContext: registryEntry?.requestContext
+              ? Object.fromEntries(
+                  [...registryEntry.requestContext.entries()].filter(([key]) => key !== '__mastra_requireToolApproval'),
+                )
+              : undefined,
+            // Use the same rebuilt-workspace fallback as execution (above), so
+            // workspace-aware approval policies see their workspace cross-process.
+            workspace,
+          })));
 
       // Add suspended-tool / pending-approval metadata to the last assistant
       // message so `extractSuspendedToolsFromMessages` can detect it on the
@@ -798,6 +838,8 @@ export function createDurableToolCallStep() {
           };
         }
       }
+
+      if (!tool || isHiddenByActiveTools) return rejectMissingTool();
 
       // When an approval-gated tool is approved on resume, tag the resolved output with the
       // approval decision so it round-trips through persistence as `approval: { approved: true }`.
@@ -1122,20 +1164,27 @@ export function createDurableToolCallStep() {
                   execute: async (taskArgs: any, taskContext: any) => {
                     const backgroundInputState = taskContext?.[TOOL_INPUT_STATE] ?? toolInputState;
                     backgroundInputState.accepted ??= toolInputState.accepted;
-                    return tool.execute!(taskArgs, {
-                      ...toolOptions,
-                      [TOOL_INPUT_STATE]: backgroundInputState,
-                      ...(taskContext?.resumeData !== undefined ? { resumeData: taskContext.resumeData } : {}),
-                      suspend: async (data?: unknown, options?: SuspendOptions) => {
-                        Object.assign(toolInputState, backgroundInputState);
-                        await toolOptions.suspend?.(data, options);
-                        return taskContext?.suspend?.(data, options);
-                      },
-                      outputWriter: async (chunk: any) => {
-                        await taskContext?.onProgress?.(chunk);
-                        return toolOptions.outputWriter?.(chunk);
-                      },
-                    });
+                    return executeToolWithPolicy(
+                      tool,
+                      toolKey ?? toolName,
+                      taskArgs,
+                      {
+                        ...toolOptions,
+                        [TOOL_INPUT_STATE]: backgroundInputState,
+                        ...(taskContext?.resumeData !== undefined ? { resumeData: taskContext.resumeData } : {}),
+                        suspend: async (data?: unknown, options?: SuspendOptions) => {
+                          Object.assign(toolInputState, backgroundInputState);
+                          await toolOptions.suspend?.(data, options);
+                          return taskContext?.suspend?.(data, options);
+                        },
+                        outputWriter: async (chunk: any) => {
+                          await taskContext?.onProgress?.(chunk);
+                          return toolOptions.outputWriter?.(chunk);
+                        },
+                      } as any,
+                      toolPolicy,
+                      registryEntry?.requestContext ?? requestContext,
+                    );
                   },
                 },
                 onChunk: (chunk: any) => {
@@ -1377,7 +1426,14 @@ export function createDurableToolCallStep() {
         const releaseRunActivity = markRunActive(runId);
         let result: unknown;
         try {
-          result = await tool.execute(cleanedArgs, toolOptions);
+          result = await executeToolWithPolicy(
+            tool,
+            toolKey ?? toolName,
+            cleanedArgs,
+            toolOptions,
+            toolPolicy,
+            registryEntry?.requestContext ?? requestContext,
+          );
         } finally {
           releaseRunActivity();
         }

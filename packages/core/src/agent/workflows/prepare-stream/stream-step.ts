@@ -1,3 +1,4 @@
+import { getPreparedToolPolicy } from '../../../tools/tool-policy-execution';
 import { z } from 'zod/v4';
 import type { BackgroundTaskManager } from '../../../background-tasks';
 import type { AgentBackgroundConfig } from '../../../background-tasks/types';
@@ -112,6 +113,7 @@ export function createStreamStep<OUTPUT = undefined>({
         returnScorerData,
         ...resolveObservabilityContext(observabilityContext),
         requireToolApproval,
+        toolPolicy: getPreparedToolPolicy(loopOptions.tools),
         toolApprovalPolicy,
         toolApprovalContext,
         toolCallConcurrency,

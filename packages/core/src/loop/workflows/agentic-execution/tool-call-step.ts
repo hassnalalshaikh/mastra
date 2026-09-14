@@ -22,6 +22,7 @@ import {
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../tools/resumable-input';
 import { getNeedsApprovalFn } from '../../../tools/toolchecks';
+import { executeToolWithPolicy } from '../../../tools/tool-policy-execution';
 import type { MastraToolInvocationOptions, ToolApprovalContext } from '../../../tools/types';
 import { noopObserve } from '../../../tools/types';
 import { ensureSerializable } from '../../../utils';
@@ -91,6 +92,8 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
   agentVersionId,
   mastra,
   requireToolApproval: requireToolApprovalFromFactory,
+  toolPolicy,
+  requestContext: policyRequestContext,
   toolApprovalPolicy,
   toolApprovalContext,
   actor,
@@ -1083,21 +1086,28 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     // would suspend the AGENT run via tool-call-approval) with
                     // the bg-task workflow's, so calling `suspend()` from the
                     // tool pauses the bg-task run instead.
-                    return resolvedTool.execute!(bgArgs, {
-                      ...toolOptions,
-                      [TOOL_INPUT_STATE]: backgroundInputState,
-                      ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
-                      suspend: async (data?: unknown, options?: SuspendOptions) => {
-                        Object.assign(toolInputState, backgroundInputState);
-                        await toolOptions.suspend?.(data, options);
-                        return opts?.suspend?.(data, options);
-                      },
-                      outputWriter: async (chunk: any) => {
-                        await opts?.onProgress?.(chunk);
-                        return toolOptions.outputWriter?.(chunk);
-                      },
-                      abortSignal: opts?.abortSignal,
-                    } as any);
+                    return executeToolWithPolicy(
+                      resolvedTool,
+                      toolKey ?? inputData.toolName,
+                      bgArgs,
+                      {
+                        ...toolOptions,
+                        [TOOL_INPUT_STATE]: backgroundInputState,
+                        ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
+                        suspend: async (data?: unknown, options?: SuspendOptions) => {
+                          Object.assign(toolInputState, backgroundInputState);
+                          await toolOptions.suspend?.(data, options);
+                          return opts?.suspend?.(data, options);
+                        },
+                        outputWriter: async (chunk: any) => {
+                          await opts?.onProgress?.(chunk);
+                          return toolOptions.outputWriter?.(chunk);
+                        },
+                        abortSignal: opts?.abortSignal,
+                      } as any,
+                      toolPolicy,
+                      policyRequestContext ?? requestContext,
+                    );
                   },
                 },
 
@@ -1472,7 +1482,14 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           }
         }
 
-        const rawResult = await tool.execute(args, toolOptions);
+        const rawResult = await executeToolWithPolicy(
+          tool,
+          toolKey ?? inputData.toolName,
+          args,
+          toolOptions,
+          toolPolicy,
+          policyRequestContext ?? requestContext,
+        );
         const result = ensureSerializable(rawResult);
 
         // Call onOutput hook after successful execution

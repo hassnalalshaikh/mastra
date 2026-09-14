@@ -172,6 +172,8 @@ export interface ProcessOutputResultArgs<
  * The actual schema type is only known at the generate()/stream() call site.
  */
 export interface ProcessInputStepArgs<TTripwireMetadata = unknown> extends ProcessorMessageContext<TTripwireMetadata> {
+  /** Native prepared mandatory policy; processor return values cannot replace it. */
+  toolPolicy?: import('../tools/tool-policy').ToolPolicy;
   /** The current step number (0-indexed) */
   stepNumber: number;
   steps: Array<StepResult<any>>;
@@ -913,6 +915,10 @@ export type { CompatRule } from './provider-history-compat';
 export { ProcessorState, ProcessorRunner } from './runner';
 export { createProcessorSendSignal } from './send-signal';
 export * from './memory';
+export { getSkillReadiness } from './processors/skill-readiness';
+export type { SkillReadiness } from './processors/skill-readiness';
+export { createToolSkillPolicy } from './processors/tool-skill-dependencies';
+export type { ToolSkillDependencies } from './processors/tool-skill-dependencies';
 export type { TripWireOptions } from '../agent/trip-wire';
 export {
   ProcessorStepSchema,

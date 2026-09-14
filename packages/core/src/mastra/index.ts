@@ -1,3 +1,12 @@
+import { ToolPolicyError } from '../tools/tool-policy';
+import type { ToolPolicy, ToolPolicyConfig, ToolPolicyResolverArgs } from '../tools/tool-policy';
+import {
+  combineToolPolicies,
+  executeToolWithPolicy,
+  markPolicyExecutor,
+  TOOL_EXECUTION_POLICY,
+  withToolPolicyInvocation,
+} from '../tools/tool-policy-execution';
 import { randomUUID } from 'node:crypto';
 import type { Agent } from '../agent';
 import { createDurableAgent } from '../agent/durable/create-durable-agent';
@@ -271,6 +280,9 @@ export interface Config<
    * Required for agent memory and workflow persistence.
    */
   storage?: MastraCompositeStore;
+
+  /** Mandatory policy for every registered agent and server tool; agent policies cannot relax it. */
+  toolPolicy?: ToolPolicyConfig;
 
   /**
    * Vector stores for semantic search and retrieval-augmented generation (RAG).
@@ -731,6 +743,7 @@ export class Mastra<
   #shutdownPromise?: Promise<void>;
   #scorers?: TScorers;
   #tools?: TTools;
+  #toolPolicy?: ToolPolicyConfig;
   #processors?: TProcessors;
   #processorConfigurations: Map<string, Array<{ processor: Processor; agentId: string; type: 'input' | 'output' }>> =
     new Map();
@@ -1327,6 +1340,7 @@ export class Mastra<
     // Register AsyncLocalStorage-backed context resolvers so that DualLogger
     // can correlate logs to the active span. Must happen before any agent runs.
     initContextStorage();
+    this.#toolPolicy = config?.toolPolicy;
 
     // Server cache for temporary persistence and durable agent resumable streams
     this.#serverCache = config?.cache ?? new InMemoryServerCache();
@@ -4341,6 +4355,22 @@ export class Mastra<
    * mastra.addTool(newTool, 'customKey'); // Uses custom key
    * ```
    */
+  public getToolPolicy(): ToolPolicyConfig | undefined {
+    return this.#toolPolicy;
+  }
+
+  public async resolveToolPolicy(args: ToolPolicyResolverArgs): Promise<ToolPolicy | undefined> {
+    try {
+      return typeof this.#toolPolicy === 'function' ? this.#toolPolicy : await this.#toolPolicy?.resolve(args);
+    } catch (error) {
+      if (error instanceof ToolPolicyError) throw error;
+      throw new ToolPolicyError(
+        { code: 'TOOL_POLICY_UNAVAILABLE', retryable: true },
+        { cause: error, message: 'Tool policy is unavailable.' },
+      );
+    }
+  }
+
   public addTool<T extends ToolAction<any, any, any, any>>(tool: T, key?: string): void {
     if (!tool) {
       throw createUndefinedPrimitiveError('tool', tool, key);
@@ -4351,6 +4381,28 @@ export class Mastra<
       return;
     }
 
+    if (this.#toolPolicy && typeof tool.execute === 'function') {
+      const original = tool;
+      tool = Object.create(tool, {
+        execute: {
+          enumerable: true,
+          value: markPolicyExecutor(async (input: unknown, options: any) => {
+            const inherited = options?.[TOOL_EXECUTION_POLICY];
+            const requestContext = inherited?.requestContext ?? options?.requestContext;
+            const policy =
+              inherited?.policy ?? (await this.resolveToolPolicy({ requestContext, runId: options?.runId }));
+            return executeToolWithPolicy(
+              original,
+              toolKey,
+              input,
+              withToolPolicyInvocation(options, { policy, toolName: toolKey, requestContext }),
+              policy,
+              requestContext,
+            );
+          }),
+        },
+      });
+    }
     tools[toolKey] = tool;
 
     // If the background-task manager has already initialized, register the

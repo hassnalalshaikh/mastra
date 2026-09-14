@@ -1427,6 +1427,7 @@ export class ProcessorRunner {
           processorOrWorkflow,
           {
             phase: 'inputStep',
+            toolPolicy: args.toolPolicy,
             messages: processableMessages,
             messageList,
             stepNumber,
@@ -1488,6 +1489,7 @@ export class ProcessorRunner {
       const currentSystemMessages = messageList.getSystemMessages();
 
       const inputData = {
+        toolPolicy: args.toolPolicy,
         messages: processableMessages,
         stepNumber,
         steps,

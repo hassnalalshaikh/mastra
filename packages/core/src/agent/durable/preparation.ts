@@ -1,3 +1,5 @@
+import { ToolPolicyError } from '../../tools/tool-policy';
+import { getPreparedToolPolicy, setPreparedToolPolicy } from '../../tools/tool-policy-execution';
 import type { AgentBackgroundConfig } from '../../background-tasks/types';
 import type { MastraLanguageModel } from '../../llm/model/shared.types';
 import type { IMastraLogger } from '../../logger';
@@ -115,6 +117,7 @@ function getInitialSignalEchoes(messageList: MessageList): CreatedAgentSignal[] 
  */
 interface DurablePreparationAgent {
   id: string;
+  getToolPolicy?(): import('../../tools/tool-policy').ToolPolicy | undefined;
   name?: string;
   getDefaultOptions(opts: { requestContext: RequestContext }): AgentExecutionOptions | Promise<AgentExecutionOptions>;
   getInstructions(opts: { requestContext: RequestContext }): AgentInstructions | Promise<AgentInstructions>;
@@ -138,6 +141,7 @@ interface DurablePreparationAgent {
     delegation?: DelegationConfig;
     methodType?: AgentMethodType;
     inputProcessors?: InputProcessorOrWorkflow[];
+    resumeMessageList?: MessageList;
   }): Promise<Record<string, CoreTool>>;
   listConfiguredInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]>;
   listInputProcessors(
@@ -182,6 +186,7 @@ export interface PreparationResult<_OUTPUT = undefined> {
 export interface PreparationOptions<OUTPUT = undefined> {
   /** Already-processed native input used only to rebuild a saved run's runtime resources. */
   resumeMessageListState?: SerializedMessageListState;
+  decliningToolCall?: boolean;
   /** The agent instance (wrapped agent — used for config resolution: tools, model, instructions, memory) */
   agent: Agent<string, any, OUTPUT>;
   /** User messages to process */
@@ -245,6 +250,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     durableAgentId,
     durableAgentName,
     resumeMessageListState,
+    decliningToolCall,
   } = options;
 
   // Public-facing identity: use the durable wrapper's ID/name for all
@@ -531,9 +537,17 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       delegation: execOptions?.delegation,
       methodType,
       inputProcessors: configuredInputProcessors,
+      resumeMessageList: resumeMessageListState ? messageList : undefined,
     });
   } catch (error) {
-    logger?.warn?.(`[DurableAgent] Error converting tools: ${error}`);
+    if (decliningToolCall && error instanceof ToolPolicyError) {
+      // A denial performs no tool work. Keep every later tool blocked until a
+      // fresh preparation can resolve policy, while allowing the saved denial.
+      setPreparedToolPolicy(tools, () => ({ allowed: false, error: { code: error.code, retryable: error.retryable } }));
+    } else {
+      if (mastra?.getToolPolicy() || typedAgent.getToolPolicy?.()) throw error;
+      logger?.warn?.(`[DurableAgent] Error converting tools: ${error}`);
+    }
   }
 
   // 8. Get model (and model list if configured)
@@ -704,6 +718,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
 
   // 14. Create registry entry for non-serializable state
   const registryEntry: RunRegistryEntry = {
+    toolPolicy: getPreparedToolPolicy(tools),
     mastra,
     tools,
     saveQueueManager,
