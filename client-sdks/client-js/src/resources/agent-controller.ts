@@ -716,6 +716,27 @@ export class AgentControllerSession extends BaseResource {
     return cloned;
   }
 
+  /** Start an edited copy without rebinding this source session handle. */
+  async editMessage(
+    input: {
+      messageId: string;
+      content: string;
+      newThreadId: string;
+      newSessionScope: string;
+    },
+    options?: AgentControllerRequestOptions,
+  ): Promise<CreateAgentControllerThreadResponse> {
+    if (!this.sessionThreadId) throw new Error('Editing requires an exact source thread');
+    const { messageId, ...body } = input;
+    const requestContext = parseClientRequestContext(options?.requestContext);
+    return this.request<CreateAgentControllerThreadResponse>(
+      this.url(
+        `${this.base()}/threads/${encodeURIComponent(this.sessionThreadId)}/messages/${encodeURIComponent(messageId)}/edit`,
+      ),
+      { method: 'POST', body: { ...body, ...(requestContext ? { requestContext } : {}) } },
+    );
+  }
+
   /** List messages for a specific thread. */
   async listMessages(threadId: string, limit?: number): Promise<MastraDBMessage[]> {
     const params = limit != null ? `?limit=${limit}` : '';

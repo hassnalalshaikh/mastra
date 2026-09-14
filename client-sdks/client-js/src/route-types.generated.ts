@@ -20763,6 +20763,55 @@ export interface PostAgentControllerControllerIdSessionsResourceIdMessages_Route
 }
 
 // ============================================================================
+// Route: POST /agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages/:messageId/edit
+// ============================================================================
+export type PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_PathParams = {
+  controllerId: string;
+  resourceId: string;
+  threadId: string;
+  messageId: string;
+};
+
+export type PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_QueryParams =
+  PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
+
+export type PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Body = {
+  content: string;
+  newThreadId: string;
+  newSessionScope: string;
+};
+
+export type PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Response =
+  PostAgentControllerControllerIdSessionsResourceIdThreads_Response;
+
+export type PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Request = Simplify<
+  (PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_PathParams extends never
+    ? {}
+    : { params: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_PathParams }) &
+    (PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_QueryParams extends never
+      ? {}
+      : {} extends PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_QueryParams
+        ? { query?: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_QueryParams }
+        : {
+            query: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_QueryParams;
+          }) &
+    (PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Body extends never
+      ? {}
+      : {} extends PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Body
+        ? { body?: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Body }
+        : { body: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Body })
+>;
+
+export interface PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_RouteContract {
+  pathParams: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_PathParams;
+  queryParams: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_QueryParams;
+  body: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Body;
+  request: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Request;
+  response: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_Response;
+  responseType: 'json';
+}
+
+// ============================================================================
 // Route: POST /agent-controller/:controllerId/sessions/:resourceId/steer
 // ============================================================================
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_PathParams =
@@ -22053,6 +22102,7 @@ export interface RouteTypes {
   'GET /agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages': GetAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessages_RouteContract;
   'GET /agent-controller/:controllerId/sessions/:resourceId/stream': GetAgentControllerControllerIdSessionsResourceIdStream_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/messages': PostAgentControllerControllerIdSessionsResourceIdMessages_RouteContract;
+  'POST /agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages/:messageId/edit': PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/steer': PostAgentControllerControllerIdSessionsResourceIdSteer_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/follow-up': PostAgentControllerControllerIdSessionsResourceIdFollowUp_RouteContract;
   'DELETE /agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId': DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_RouteContract;
@@ -22228,6 +22278,9 @@ export interface Client {
   };
   '/agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages': {
     GET: GetAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessages_RouteContract;
+  };
+  '/agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages/:messageId/edit': {
+    POST: PostAgentControllerControllerIdSessionsResourceIdThreadsThreadIdMessagesMessageIdEdit_RouteContract;
   };
   '/agent-controller/:controllerId/sessions/:resourceId/threads/clone': {
     POST: PostAgentControllerControllerIdSessionsResourceIdThreadsClone_RouteContract;

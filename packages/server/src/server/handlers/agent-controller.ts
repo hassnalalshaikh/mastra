@@ -656,6 +656,65 @@ export const SEND_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
   },
 });
 
+export const EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
+  method: 'POST',
+  path: '/agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages/:messageId/edit',
+  responseType: 'json' as const,
+  pathParamSchema: threadPathParams.extend({ messageId: z.string() }),
+  queryParamSchema: sessionScopeQuerySchema,
+  bodySchema: z.object({
+    content: z.string().trim().min(1),
+    newThreadId: z.string().uuid(),
+    newSessionScope: z.string().min(1).max(512),
+  }),
+  responseSchema: threadResponseSchema,
+  summary: 'Start an edited copy of a conversation',
+  description: 'Keeps the original intact, copies earlier messages and submits the edited message in a new session.',
+  tags: ['AgentController', 'Threads'],
+  requiresAuth: true,
+  requiresPermission: 'agent-controller:execute',
+  handler: async ({
+    mastra,
+    controllerId,
+    resourceId,
+    threadId,
+    messageId,
+    sessionThreadId,
+    content,
+    newThreadId,
+    newSessionScope,
+    requestContext,
+  }) => {
+    try {
+      if (
+        (sessionThreadId && sessionThreadId !== threadId) ||
+        getEffectiveThreadId(requestContext, threadId) !== threadId
+      ) {
+        throw new HTTPException(403, { message: 'The source thread does not match this session' });
+      }
+      const controller = getAgentControllerOrThrow(mastra, controllerId);
+      const thread = await controller.editMessage({
+        resourceId: getEffectiveResourceId(requestContext, resourceId)!,
+        sourceThreadId: threadId,
+        messageId,
+        content,
+        newThreadId,
+        newSessionScope,
+        requestContext,
+      });
+      return {
+        id: thread.id,
+        title: thread.title,
+        resourceId: thread.resourceId,
+        createdAt: thread.createdAt.toISOString(),
+        updatedAt: thread.updatedAt.toISOString(),
+      };
+    } catch (error) {
+      return handleError(error, 'error editing controller message');
+    }
+  },
+});
+
 export const ABORT_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   method: 'POST',
   path: '/agent-controller/:controllerId/sessions/:resourceId/abort',
