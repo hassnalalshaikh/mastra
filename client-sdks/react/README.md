@@ -28,6 +28,23 @@ Voice helpers include browser speech recognition, microphone recording, and Web 
 
 React 19 or newer is required. The package also expects compatible versions of `@mastra/core` and Zod in the consuming application.
 
+## Workflow hooks entry
+
+If your app only needs workflow hooks, import them from the workflow entry to avoid loading the UI components and their syntax-highlighting dependencies:
+
+```tsx
+import {
+  MastraReactProvider,
+  useCreateWorkflowRun,
+  useStreamWorkflow,
+  useCancelWorkflowRun,
+} from '@mastra/react/workflow-hooks';
+```
+
+This entry exports the same provider, client hook, workflow hooks, and workflow types as the root package. Existing hook options and behavior are unchanged. A provider from either entry works with hooks from either entry. Continue importing UI components such as `WorkflowStepFactory` from `@mastra/react`.
+
+To check the built package entries and their public types, run `pnpm build:js` followed by `pnpm test:package` from this directory.
+
 ## Changelog
 
 See the [package changelog](https://github.com/mastra-ai/mastra/blob/main/client-sdks/react/CHANGELOG.md) for version history and release notes.
