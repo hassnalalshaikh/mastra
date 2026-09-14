@@ -1,3 +1,4 @@
+import { ErrorCategory, ErrorDomain, MastraError } from '@mastra/core/error';
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, RequestContext } from '@mastra/core/request-context';
 import { describe, expect, it, vi } from 'vitest';
 import { EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE } from './agent-controller';
@@ -54,6 +55,37 @@ describe('edited conversation route', () => {
     ).rejects.toThrow();
     expect(editMessage).not.toHaveBeenCalled();
   });
+  it.each([400, 404, 409])('preserves native edit refusal status %s', async status => {
+    const editMessage = vi
+      .fn()
+      .mockRejectedValue(
+        new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_NOT_FOUND',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'Edit refused',
+          details: { status },
+        }),
+      );
+    await expect(
+      EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE.handler({
+        ...input,
+        requestContext: new RequestContext(),
+        mastra: { getAgentController: () => ({ editMessage }) },
+      } as never),
+    ).rejects.toMatchObject({ status });
+  });
+  it('keeps unexpected storage failures as server errors', async () => {
+    const editMessage = vi.fn().mockRejectedValue(new Error('Storage unavailable'));
+    await expect(
+      EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE.handler({
+        ...input,
+        requestContext: new RequestContext(),
+        mastra: { getAgentController: () => ({ editMessage }) },
+      } as never),
+    ).rejects.toMatchObject({ status: 500 });
+  });
+
   it('requires authentication and the native execute permission', () => {
     expect(EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE.requiresAuth).toBe(true);
     expect(EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE.requiresPermission).toBe('agent-controller:execute');

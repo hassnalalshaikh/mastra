@@ -26,6 +26,20 @@ describe('edited conversation client command', () => {
     await source.state();
     expect(fetch.mock.calls[1][0]).toContain('sessionThreadId=source');
   });
+  it.each([400, 404, 409])('does not retry an edit rejected with %s', async status => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(Response.json({ error: 'Edit refused' }, { status })));
+    vi.stubGlobal('fetch', fetch);
+    const source = new MastraClient({ baseUrl: 'http://localhost:4111' })
+      .getAgentController('chat')
+      .session('owner', 'source', { threadId: 'source' });
+    await expect(
+      source.editMessage({ messageId: 'missing', content: 'Corrected', newThreadId: 'new', newSessionScope: 'new' }),
+    ).rejects.toThrow('Edit refused');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects unbound session handles before making a request', async () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
