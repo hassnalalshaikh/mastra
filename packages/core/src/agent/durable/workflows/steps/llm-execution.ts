@@ -44,6 +44,7 @@ import { ChunkFrom } from '../../../../stream/types';
 import { withToolPayloadTransformProviderMetadata } from '../../../../tools/payload-transform';
 import { findProviderToolByName, inferProviderExecuted } from '../../../../tools/provider-tool-utils';
 import type { ToolToConvert } from '../../../../tools/tool-builder/builder';
+import { filterToolsByPolicy } from '../../../../tools/tool-policy-execution';
 import { isMastraTool } from '../../../../tools/toolchecks';
 import type { CoreTool } from '../../../../tools/types';
 import { createMastraProxy, makeCoreTool } from '../../../../utils';
@@ -565,6 +566,10 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 : undefined;
 
             const registryEntry = globalRunRegistry.get(runId);
+            const toolPolicy =
+              registryEntry && 'toolPolicy' in registryEntry
+                ? registryEntry.toolPolicy
+                : await mastra?.getAgentById(agentId)?.resolveToolPolicy({ requestContext, runId });
             const executionAbortSignal = registryEntry?.abortSignal ?? abortSignal;
             const baseInputProcessors = registryEntry?.inputProcessors ?? resolvedInputProcessors ?? [];
             // Use `llmRequestInputProcessors` (uncombined) because combined
@@ -602,6 +607,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
               try {
                 const processInputStepResult = await runner.runProcessInputStep({
                   llmRequestProcessorIds: ProcessorRunner.getLLMRequestProcessorIds(llmRequestInputProcessors),
+                  toolPolicy,
                   messageList,
                   stepNumber: stepIndex,
                   steps: inputData.accumulatedSteps ?? [],
@@ -764,6 +770,15 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 throw error;
               }
             }
+
+            currentTools = await filterToolsByPolicy(
+              currentTools,
+              toolPolicy,
+              registryEntry?.requestContext ?? requestContext,
+            );
+            if (currentActiveTools)
+              currentActiveTools = currentActiveTools.filter((name: string) => !!currentTools?.[name]);
+            if (registryEntry) registryEntry.tools = currentTools as any;
 
             // ── Signal echo & pre-run drain ───────────────────────────────
             // Mirror the non-durable llm-execution-step:

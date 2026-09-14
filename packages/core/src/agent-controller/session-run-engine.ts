@@ -908,8 +908,13 @@ export class SessionRunEngine {
         };
 
         if (policy === 'allow') {
-          await this.#session.approveToolCall({ toolCallId, requestContext, ...binding });
-          break;
+          try {
+            await this.#session.approveToolCall({ toolCallId, requestContext, ...binding });
+            break;
+          } catch (error) {
+            if (getErrorFromUnknown(error).name !== 'ToolDependencyError') throw error;
+            this.#session.emit({ type: 'error', error: getErrorFromUnknown(error) });
+          }
         }
 
         if (policy === 'deny') {
@@ -928,58 +933,67 @@ export class SessionRunEngine {
           }
         }
 
-        const approvalPromise = this.#session.approval.arm({
-          toolName,
-          toolCallId,
-          threadId: binding.threadId,
-          runId: binding.runId,
-        });
-        this.#session.emit({
-          type: 'tool_approval_required',
-          threadId: state.threadId,
-          toolCallId,
-          toolName,
-          args: toolArgs,
-        });
-
-        const approval = await approvalPromise;
-
-        // A gated `session.abort()` releases a parked gate as a decline and
-        // defers the stream/signal teardown to us, so the decline can still be
-        // driven through the (live) agent run and persist an `output-denied`
-        // result. Claim that captured origin to detect it: the session's abort
-        // flag is not a usable proxy for "this run was aborted while parked",
-        // because it is shared across run generations and threads — a successor
-        // run's abort (or one scoped to another thread) would otherwise cancel
-        // this parked gate's continuation.
-        const deferredAbortOrigin = this.#session.takeDeferredAbortOrigin();
-        const deferredAbort = deferredAbortOrigin !== undefined;
-
-        if (!deferredAbort && approval.decision === 'approve') {
-          await this.#session.approveToolCall({
+        while (true) {
+          const approvalPromise = this.#session.approval.arm({
+            toolName,
             toolCallId,
-            requestContext: approval.requestContext ?? requestContext,
-            ...binding,
+            threadId: binding.threadId,
+            runId: binding.runId,
           });
-        } else {
-          await this.#session.declineToolCall({
+          this.#session.emit({
+            type: 'tool_approval_required',
+            threadId: state.threadId,
             toolCallId,
-            requestContext: approval.requestContext ?? requestContext,
-            ...binding,
-            declineContext: deferredAbort
-              ? { reason: ABORTED_BY_USER_REASON, message: ABORTED_BY_USER_REASON }
-              : approval.declineContext,
+            toolName,
+            args: toolArgs,
           });
-        }
 
-        if (deferredAbort) {
-          // The denial chunk the agent emits for this decline can never reach
-          // us: we are blocking the consumer loop that would read it, and the
-          // teardown below ends the loop. Settle the call locally so the
-          // display state shows the denied result instead of a call stuck
-          // mid-flight.
-          this.settleToolCallAsDenied(state, { toolCallId, toolName, args: toolArgs });
-          this.#session.completeDeferredAbort(deferredAbortOrigin);
+          const approval = await approvalPromise;
+
+          // A gated `session.abort()` releases a parked gate as a decline and
+          // defers the stream/signal teardown to us, so the decline can still be
+          // driven through the (live) agent run and persist an `output-denied`
+          // result. Claim that captured origin to detect it: the session's abort
+          // flag is not a usable proxy for "this run was aborted while parked",
+          // because it is shared across run generations and threads — a successor
+          // run's abort (or one scoped to another thread) would otherwise cancel
+          // this parked gate's continuation.
+          const deferredAbortOrigin = this.#session.takeDeferredAbortOrigin();
+          const deferredAbort = deferredAbortOrigin !== undefined;
+
+          try {
+            if (!deferredAbort && approval.decision === 'approve') {
+              await this.#session.approveToolCall({
+                toolCallId,
+                requestContext: approval.requestContext ?? requestContext,
+                ...binding,
+              });
+            } else {
+              await this.#session.declineToolCall({
+                toolCallId,
+                requestContext: approval.requestContext ?? requestContext,
+                ...binding,
+                declineContext: deferredAbort
+                  ? { reason: ABORTED_BY_USER_REASON, message: ABORTED_BY_USER_REASON }
+                  : approval.declineContext,
+              });
+            }
+          } catch (error) {
+            if (getErrorFromUnknown(error).name !== 'ToolDependencyError' || deferredAbort) throw error;
+            this.#session.emit({ type: 'error', error: getErrorFromUnknown(error) });
+            continue;
+          }
+
+          if (deferredAbort) {
+            // The denial chunk the agent emits for this decline can never reach
+            // us: we are blocking the consumer loop that would read it, and the
+            // teardown below ends the loop. Settle the call locally so the
+            // display state shows the denied result instead of a call stuck
+            // mid-flight.
+            this.settleToolCallAsDenied(state, { toolCallId, toolName, args: toolArgs });
+            this.#session.completeDeferredAbort(deferredAbortOrigin);
+          }
+          break;
         }
         break;
       }
