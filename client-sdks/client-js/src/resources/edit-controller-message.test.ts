@@ -26,7 +26,7 @@ describe('edited conversation client command', () => {
     await source.state();
     expect(fetch.mock.calls[1][0]).toContain('sessionThreadId=source');
   });
-  it.each([400, 404, 409])('does not retry an edit rejected with %s', async status => {
+  it.each([400, 404, 409, 500])('does not retry an edit rejected with %s', async status => {
     const fetch = vi
       .fn()
       .mockImplementation(() => Promise.resolve(Response.json({ error: 'Edit refused' }, { status })));

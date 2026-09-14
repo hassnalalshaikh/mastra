@@ -729,7 +729,9 @@ export class AgentControllerSession extends BaseResource {
     if (!this.sessionThreadId) throw new Error('Editing requires an exact source thread');
     const { messageId, ...body } = input;
     const requestContext = parseClientRequestContext(options?.requestContext);
-    return this.request<CreateAgentControllerThreadResponse>(
+    // A lost response may follow an accepted edit. Preserve the first failure
+    // instead of replaying this mutating command against its saved target.
+    return new BaseResource({ ...this.options, retries: 0 }).request<CreateAgentControllerThreadResponse>(
       this.url(
         `${this.base()}/threads/${encodeURIComponent(this.sessionThreadId)}/messages/${encodeURIComponent(messageId)}/edit`,
       ),
