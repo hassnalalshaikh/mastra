@@ -85,6 +85,7 @@ import {
   resolveCurrentSpan,
   resolveObservabilityContext,
 } from '../observability';
+import type { ProcessInputStepArgs } from '../processors';
 import type {
   ErrorProcessorOrWorkflow,
   InputProcessorOrWorkflow,
@@ -123,6 +124,13 @@ import { createTool } from '../tools';
 import { createWebSearchProviderTool, isWebSearchTool, normalizeWebSearchProvider } from '../tools/builtin/web-search';
 import { normalizeToolPayloadTransformPolicy } from '../tools/payload-transform';
 import type { ToolToConvert } from '../tools/tool-builder/builder';
+import type { ToolPolicy } from '../tools/tool-policy';
+import {
+  combineToolPolicies,
+  executeToolWithPolicy,
+  markPolicyExecutor,
+  setPreparedToolPolicy,
+} from '../tools/tool-policy-execution';
 import { isMastraTool, isProviderTool } from '../tools/toolchecks';
 import type {
   CoreTool,
@@ -372,10 +380,13 @@ type ModelFallbacks = {
 type ResolvedModelSelection = MastraModelConfig | ModelFallbacks;
 
 type ProcessorLoadedToolsProvider = {
+  restoreStateForExecution?: (args: ProcessInputStepArgs) => Promise<void>;
   getLoadedToolsForRequestContext?: (args: {
     requestContext: RequestContext;
     tools?: Record<string, unknown>;
     includeMetaTools?: boolean;
+    stepArgs?: ProcessInputStepArgs;
+    toolPolicy?: ToolPolicy;
   }) => Record<string, ToolToConvert> | Promise<Record<string, ToolToConvert>>;
 };
 
@@ -707,6 +718,7 @@ export class Agent<
   #defaultNetworkOptions: DynamicArgument<NetworkOptions, TRequestContext>;
   #tools: DynamicArgument<TTools, TRequestContext>;
   #hooks?: ToolHooks;
+  #toolPolicy?: ToolPolicy;
   #scorers: DynamicArgument<MastraScorers, TRequestContext>;
   #agents: DynamicArgument<Record<string, SubAgent<string, TRequestContext>>, TRequestContext>;
   #voice: DynamicArgument<MastraVoice, TRequestContext>;
@@ -852,6 +864,7 @@ export class Agent<
 
     this.#tools = config.tools || ({} as TTools);
     this.#hooks = config.hooks;
+    this.#toolPolicy = config.toolPolicy;
     this.#pubsub = config.pubsub;
 
     if (config.mastra) {
@@ -2063,6 +2076,10 @@ export class Agent<
         if (typeof toolProvider.getLoadedToolsForRequestContext === 'function') {
           (step as ProcessorLoadedToolsProvider).getLoadedToolsForRequestContext =
             toolProvider.getLoadedToolsForRequestContext.bind(processor);
+        }
+        if (typeof toolProvider.restoreStateForExecution === 'function') {
+          (step as ProcessorLoadedToolsProvider).restoreStateForExecution =
+            toolProvider.restoreStateForExecution.bind(processor);
         }
         if (processor.computeStateSignal) {
           stateSignalProcessors.push(processor);
@@ -4535,6 +4552,8 @@ export class Agent<
    */
   private async listInputProcessorLoadedTools({
     processors,
+    resumeMessageList,
+    preparedPolicy,
     runId,
     resourceId,
     threadId,
@@ -4548,6 +4567,8 @@ export class Agent<
     ...rest
   }: {
     processors: InputProcessorOrWorkflow[];
+    resumeMessageList?: MessageList;
+    preparedPolicy?: ToolPolicy;
     /**
      * Tools already resolved for this request. A processor that made a
      * request-scoped tool searchable needs them to rebuild its executor here,
@@ -4566,6 +4587,24 @@ export class Agent<
   } & Partial<ObservabilityContext>) {
     const observabilityContext = resolveObservabilityContext(rest);
     const convertedProcessorTools: Record<string, CoreTool> = {};
+    const stepArgs = resumeMessageList
+      ? ({
+          requestContext,
+          messageList: resumeMessageList,
+          messages: resumeMessageList.get.all.db(),
+          stepNumber: 0,
+          tools,
+          toolPolicy: preparedPolicy,
+          agent: this,
+        } as unknown as ProcessInputStepArgs)
+      : undefined;
+    const restore = async (processor: unknown): Promise<void> => {
+      if (isProcessorWorkflow(processor)) {
+        for (const child of listProcessorWorkflowChildren(processor)) await restore(child);
+      }
+      if (stepArgs) await (processor as ProcessorLoadedToolsProvider).restoreStateForExecution?.(stepArgs);
+    };
+    if (stepArgs) for (const processor of processors) await restore(processor);
 
     const collectLoadedTools = async (processor: InputProcessorOrWorkflow | unknown) => {
       if (isProcessorWorkflow(processor)) {
@@ -4584,6 +4623,8 @@ export class Agent<
         requestContext,
         tools,
         includeMetaTools: true,
+        stepArgs,
+        toolPolicy: preparedPolicy,
       });
       if (!loadedTools || Object.keys(loadedTools).length === 0) {
         return;
@@ -6653,6 +6694,7 @@ export class Agent<
     backgroundTaskEnabled?: boolean;
     backgroundTaskPolicy?: AgentExecutionOptionsBase<any>['backgroundTaskPolicy'];
     model?: MastraLanguageModel | MastraLegacyLanguageModel;
+    resumeMessageList?: MessageList;
   }): Promise<Record<string, CoreTool>> {
     const requestContext = options.requestContext ?? new RequestContext();
     const defaultOptions = await this.getDefaultOptions({ requestContext });
@@ -6691,6 +6733,7 @@ export class Agent<
       backgroundTaskEnabled: options.backgroundTaskEnabled,
       backgroundTaskPolicy: mergedOptions.backgroundTaskPolicy,
       model: options.model,
+      resumeMessageList: options.resumeMessageList,
     });
   }
 
@@ -6713,6 +6756,7 @@ export class Agent<
     backgroundTaskEnabled,
     backgroundTaskPolicy,
     inputProcessors,
+    resumeMessageList,
     hooks,
     model,
     ...rest
@@ -6734,9 +6778,11 @@ export class Agent<
       allowDelegationDispatch: boolean;
     };
     inputProcessors?: InputProcessorOrWorkflow[];
+    resumeMessageList?: MessageList;
     hooks?: ToolHooks;
     model?: MastraLanguageModel | MastraLegacyLanguageModel;
   } & Partial<ObservabilityContext>): Promise<Record<string, CoreTool>> {
+    const preparedPolicy = await this.resolveToolPolicy({ requestContext, runId });
     const observabilityContext = resolveObservabilityContext(rest);
     let mastraProxy = undefined;
     const logger = this.logger;
@@ -6906,6 +6952,8 @@ export class Agent<
 
     const inputProcessorLoadedTools = await this.listInputProcessorLoadedTools({
       processors: configuredInputProcessors,
+      resumeMessageList,
+      preparedPolicy,
       tools: requestResolvedTools,
       runId,
       resourceId,
@@ -6925,7 +6973,10 @@ export class Agent<
     };
 
     const formattedTools = this.formatTools(allTools);
-    return this.wrapToolsWithHooks(formattedTools, this.resolveToolHooks(hooks));
+    return setPreparedToolPolicy(
+      await this.wrapToolsWithHooks(formattedTools, this.resolveToolHooks(hooks), requestContext, preparedPolicy),
+      preparedPolicy,
+    );
   }
 
   /**
@@ -6947,20 +6998,56 @@ export class Agent<
     return deepMerge(this.#hooks as Record<string, unknown>, runHooks as Record<string, unknown>) as ToolHooks;
   }
 
-  private wrapToolsWithHooks(tools: Record<string, CoreTool>, hooks?: ToolHooks): Record<string, CoreTool> {
-    if (!hooks?.beforeToolCall && !hooks?.afterToolCall) return tools;
+  private async wrapToolsWithHooks(
+    tools: Record<string, CoreTool>,
+    hooks?: ToolHooks,
+    requestContext?: RequestContext,
+    preparedPolicy?: ToolPolicy,
+  ): Promise<Record<string, CoreTool>> {
+    const toolPolicy = preparedPolicy ?? this.getToolPolicy();
+    if (!hooks?.beforeToolCall && !hooks?.afterToolCall && !toolPolicy) return tools;
 
+    if (toolPolicy) {
+      tools = { ...tools };
+      for (const [toolName, tool] of Object.entries(tools)) {
+        if (typeof tool.execute === 'function') continue;
+        const decision = await toolPolicy({ toolName, requestContext, phase: 'active', hasExecute: false });
+        if (!decision.allowed) delete tools[toolName];
+      }
+    }
     return Object.fromEntries(
-      Object.entries(tools).map(([toolName, tool]) => [toolName, this.wrapToolWithHooks(toolName, tool, hooks)]),
+      Object.entries(tools).map(([toolName, tool]) => [
+        toolName,
+        this.wrapToolWithHooks(toolName, tool, hooks ?? {}, requestContext, toolPolicy),
+      ]),
     );
   }
 
-  private wrapToolWithHooks(toolName: string, tool: CoreTool, hooks: ToolHooks): CoreTool {
+  /** Mandatory configured tool policy. Per-run hooks cannot replace it. */
+  getToolPolicy(): ToolPolicy | undefined {
+    const globalPolicy = this.#mastra?.getToolPolicy();
+    return combineToolPolicies(typeof globalPolicy === 'function' ? globalPolicy : undefined, this.#toolPolicy);
+  }
+
+  public async resolveToolPolicy(args: {
+    requestContext?: RequestContext;
+    runId?: string;
+  }): Promise<ToolPolicy | undefined> {
+    return combineToolPolicies(await this.#mastra?.resolveToolPolicy({ ...args, agentId: this.id }), this.#toolPolicy);
+  }
+
+  private wrapToolWithHooks(
+    toolName: string,
+    tool: CoreTool,
+    hooks: ToolHooks,
+    requestContext?: RequestContext,
+    preparedPolicy?: ToolPolicy,
+  ): CoreTool {
     if (typeof tool.execute !== 'function') return tool;
 
     return {
       ...tool,
-      execute: async (input: unknown, context: MastraToolInvocationOptions) => {
+      execute: markPolicyExecutor(async (input: unknown, context: MastraToolInvocationOptions) => {
         const hookContext = {
           toolName,
           input,
@@ -6977,7 +7064,14 @@ export class Agent<
 
         let output: unknown;
         try {
-          output = await tool.execute!(input, context);
+          output = await executeToolWithPolicy(
+            tool,
+            toolName,
+            input,
+            context,
+            preparedPolicy ?? this.getToolPolicy(),
+            context?.requestContext ?? requestContext,
+          );
         } catch (error) {
           await hooks.afterToolCall?.({ ...hookContext, output, error });
           throw error;
@@ -6985,7 +7079,7 @@ export class Agent<
 
         await hooks.afterToolCall?.({ ...hookContext, output });
         return output;
-      },
+      }),
     };
   }
 

@@ -16,6 +16,7 @@ import {
   withToolPayloadTransformProviderMetadata,
 } from '../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
+import { executeToolWithPolicy } from '../../../tools/tool-policy-execution';
 import { getToolTitle } from '../../../tools/tool-title';
 import type { MastraToolInvocationOptions } from '../../../tools/types';
 import { resolveToolOutputValidationSchema, validateToolOutput } from '../../../tools/validation';
@@ -100,6 +101,8 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
   agentVersionId,
   mastra,
   requireToolApproval: requireToolApprovalFromFactory,
+  toolPolicy,
+  requestContext: policyRequestContext,
   actor,
   mcp,
 }: OuterLLMRun<Tools, OUTPUT>) {
@@ -1056,31 +1059,38 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
                     abortSignal: opts?.abortSignal ?? options?.abortSignal,
                     execute: background =>
-                      resolvedTool.execute!(bgArgs, {
-                        ...toolOptions,
-                        isBackgroundTask: true,
-                        background,
-                        [BACKGROUND_WORK_CONTEXT]: {
-                          originRunId: runId,
-                          originToolCallId: inputData.toolCallId,
-                          taskId,
-                          invocationKind: isAgentTool ? 'agent' : 'tool',
-                          disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
-                        },
-                        ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
-                        // Framework-resolved delegated run id recovered from persisted
-                        // suspension state (#23739) — never the model-authored one.
-                        suspendedToolRunId: opts?.suspendedToolRunId,
-                        suspend: async (data?: unknown, options?: SuspendOptions) => {
-                          await toolOptions.suspend?.(data, options);
-                          return opts?.suspend?.(data, options);
-                        },
-                        outputWriter: async (chunk: any) => {
-                          await opts?.onProgress?.(chunk);
-                          return toolOptions.outputWriter?.(chunk);
-                        },
-                        abortSignal: opts?.abortSignal ?? options?.abortSignal,
-                      } as any),
+                      executeToolWithPolicy(
+                        resolvedTool,
+                        toolKey ?? inputData.toolName,
+                        bgArgs,
+                        {
+                          ...toolOptions,
+                          isBackgroundTask: true,
+                          background,
+                          [BACKGROUND_WORK_CONTEXT]: {
+                            originRunId: runId,
+                            originToolCallId: inputData.toolCallId,
+                            taskId,
+                            invocationKind: isAgentTool ? 'agent' : 'tool',
+                            disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
+                          },
+                          ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
+                          // Framework-resolved delegated run id recovered from persisted
+                          // suspension state (#23739) — never the model-authored one.
+                          suspendedToolRunId: opts?.suspendedToolRunId,
+                          suspend: async (data?: unknown, options?: SuspendOptions) => {
+                            await toolOptions.suspend?.(data, options);
+                            return opts?.suspend?.(data, options);
+                          },
+                          outputWriter: async (chunk: any) => {
+                            await opts?.onProgress?.(chunk);
+                            return toolOptions.outputWriter?.(chunk);
+                          },
+                          abortSignal: opts?.abortSignal ?? options?.abortSignal,
+                        } as any,
+                        toolPolicy,
+                        policyRequestContext ?? requestContext,
+                      ),
                     onCancelError: error => logger?.warn('Failed to cancel adopted background operation', error),
                   });
 
@@ -1366,6 +1376,15 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           toolCallId: inputData.toolCallId,
           toolName: inputData.toolName,
           abortSignal,
+          execute: (toolArgs, executionOptions) =>
+            executeToolWithPolicy(
+              tool,
+              toolKey ?? inputData.toolName,
+              toolArgs,
+              executionOptions as MastraToolInvocationOptions,
+              toolPolicy,
+              policyRequestContext ?? requestContext,
+            ),
           // The tool asked to suspend or bail and then swallowed the throw. Its return value
           // is the return value of a call that was never supposed to complete here, so bail
           // before it is published: `onOutput` is a side effect the foreach will produce

@@ -1167,6 +1167,11 @@ export class SessionStream {
     return this.#subscription === subscription ? this.#agent : null;
   }
 
+  /** Agent owning the current stream, independent of the selected chat mode. */
+  getCurrentAgent(): Agent | null {
+    return this.#agent;
+  }
+
   /** Whether a subscription is currently open. */
   isOpen(): boolean {
     return this.#subscription !== null;
@@ -4547,7 +4552,7 @@ export class Session<TState = unknown> {
     } catch (error) {
       const err = getErrorFromUnknown(error);
       this.emit({ type: 'error', error: err });
-      await this.finishAgentRun('error');
+      if (err.name !== 'ToolDependencyError') await this.finishAgentRun('error');
     }
   }
 
@@ -4769,12 +4774,15 @@ export class Session<TState = unknown> {
     // originating agent so another mode's agent cannot reclaim one by run id.
     // An explicit, authorized run-handoff would be required to transfer ownership.
     const agent =
-      this.machinery.getRunScope(suspension.runId)?.get(SUSPENDED_RUN_AGENT_KEY) ?? this.machinery.getAgent();
+      this.machinery.getRunScope(suspension.runId)?.get(SUSPENDED_RUN_AGENT_KEY) ??
+      this.stream.getCurrentAgent() ??
+      this.machinery.getAgent();
 
     // Remove before resuming so a re-suspend during the resumed run can
     // re-register the same toolCallId without being clobbered by this cleanup.
     // Drop the matching display-state entry too so the UI stops rendering the
     // resolved prompt while any other parked suspensions stay visible.
+    const pendingDisplay = this.displayState.get().pendingSuspensions.get(toolCallId);
     this.suspensions.delete({ toolCallId });
     this.displayState.deletePendingSuspension(toolCallId);
 
@@ -4813,6 +4821,12 @@ export class Session<TState = unknown> {
         },
       });
       await resumedSubscriptionBoundary.promise;
+    } catch (error) {
+      if (getErrorFromUnknown(error).name === 'ToolDependencyError') {
+        this.suspensions.register({ toolCallId, ...suspension });
+        if (pendingDisplay) this.emit({ type: 'tool_suspended', ...pendingDisplay });
+      }
+      throw error;
     } finally {
       resumedSubscriptionBoundary.cancel();
       await this.thread.ensureSubscription(threadId, undefined, requestContext);

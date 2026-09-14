@@ -10,6 +10,7 @@ import { resolveObservabilityContext } from '../../../observability';
 import { RequestContext } from '../../../request-context';
 import { MastraModelOutput } from '../../../stream';
 import type { RequireToolApproval, ToolPayloadTransformPolicy } from '../../../tools';
+import { getPreparedToolPolicy } from '../../../tools/tool-policy-execution';
 import { createStep } from '../../../workflows/workflow';
 import type { Workspace } from '../../../workspace/workspace';
 import type { SaveQueueManager } from '../../save-queue';
@@ -110,6 +111,7 @@ export function createStreamStep<OUTPUT = undefined>({
         returnScorerData,
         ...resolveObservabilityContext(observabilityContext),
         requireToolApproval,
+        toolPolicy: getPreparedToolPolicy(loopOptions.tools),
         toolCallConcurrency,
         eagerToolExecution,
         resumeContext,

@@ -61,6 +61,7 @@ import {
 } from '../../../tools/payload-transform';
 import { findProviderToolByName, inferProviderExecuted } from '../../../tools/provider-tool-utils';
 import type { ToolToConvert } from '../../../tools/tool-builder/builder';
+import { filterToolsByPolicy } from '../../../tools/tool-policy-execution';
 import { withToolTitle } from '../../../tools/tool-title';
 import { getNeedsApprovalFn, getProviderToolName, isMastraTool, isProviderTool } from '../../../tools/toolchecks';
 import { createMastraProxy, makeCoreTool } from '../../../utils';
@@ -1209,6 +1210,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
   messageId: messageIdPassed,
   runId,
   tools,
+  toolPolicy,
   toolChoice,
   activeTools,
   messageList,
@@ -1648,6 +1650,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
               llmRequestProcessorIds: ProcessorRunner.getLLMRequestProcessorIds(
                 getRequestInputProcessors({ inputProcessors, llmRequestInputProcessors }),
               ),
+              toolPolicy,
               messageList,
               stepNumber: inputData.output?.steps?.length || 0,
               ...createObservabilityContext(stepTracingContext),
@@ -1804,6 +1807,10 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
             throw error;
           }
         }
+
+        currentStep.tools = await filterToolsByPolicy(currentStep.tools, toolPolicy, requestContext);
+        if (currentStep.activeTools)
+          currentStep.activeTools = currentStep.activeTools.filter(name => !!currentStep.tools?.[name]);
 
         // Publish activeTools to the run scope so toolCallStep can enforce them.
         writeScoped(
