@@ -49,6 +49,20 @@ const toolSearch = new ToolSearchProcessor({
             isOptional: false,
           },
           {
+            name: 'deferredTools',
+            type: '(args: { requestContext?: RequestContext }) => Promise<Record<string, DeferredTool>>',
+            description:
+              'Fetch searchable tool IDs and descriptions when discovery or restoration needs them. Each entry resolves its full Tool only when selected. An unloaded text response does not call this function.',
+            isOptional: true,
+          },
+          {
+            name: 'deferredFilter',
+            type: '(args: Omit<ToolSearchFilterArgs, "tool"> & { tool: DeferredTool }) => boolean | Promise<boolean>',
+            description:
+              'Optional visibility and activation policy for deferred metadata. The ordinary filter receives full tools only. A thrown error denies the tool.',
+            isOptional: true,
+          },
+          {
             name: 'includeResolvedTools',
             type: 'boolean',
             description:
@@ -241,6 +255,44 @@ Each request is indexed on its own, so a tool loaded by one caller never resolve
 
 This option applies to every tool resolved for the request, including memory, workspace, skill, and browser tools. Only the `search_tools` and `load_tool` meta-tools stay in the prompt, so any tool the agent relies on implicitly must be found through search before it can be called.
 
+## Defer remote schemas
+
+Use `deferredTools` when preparing a remote tool library requires network calls or schema conversion. Its entries contain an `id`, `description`, and `resolve` function. The object key must equal the ID and must not collide with another tool or the search/load meta-tools.
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {},
+  deferredTools: async ({ requestContext }) => ({
+    listMessages: {
+      id: 'listMessages',
+      description: 'List messages in the caller mailbox',
+      resolve: async () =>
+        createTool({
+          id: 'listMessages',
+          description: 'List messages in the caller mailbox',
+          inputSchema: z.object({ limit: z.number().int().positive() }),
+          execute: async ({ limit }) => ({ owner: requestContext?.get('userId'), limit }),
+        }),
+    },
+  }),
+  search: { autoLoad: true, topK: 1 },
+})
+```
+
+The metadata catalog is read on search, explicit load, or restoration of a previously loaded deferred tool. It is scoped to a model step. Resolving one entry must return its complete tool with the same ID, input schema, approval requirement, and executor. Mastra then uses its existing validation, approval, and execution path.
+
+Use `deferredFilter` for metadata visibility. `filter` keeps its existing full-tool contract and runs after a deferred entry resolves. Tool dependency policy runs before resolution and at execution. Search without automatic loading does not resolve schemas; automatic loading resolves only allowed matches.
+
+Each later step rebuilds deferred entries with the current request context. Before executing a deferred tool, Mastra rereads its metadata and reauthorizes the original binding. It retains the exact activated validator, transforms, and executor together. A changed account binding, model-visible input contract, or approval requirement blocks execution; a refreshed definition never replaces an already-approved executor. This also checks access when approval resumes a captured executor. Do not share credential-bound executors across requests. A failed schema resolution fails explicit loading instead of recording success. A previously loaded entry that can no longer resolve is withheld from that step, so an unrelated text reply can continue. Metadata catalog failures still fail preparation when restoration needs that catalog.
+
+For registered provider connections, pass the result of `deferStoredToolProviders` from `@mastra/core/tool-provider` through `deferredTools`. It preserves connection suffixes and resolves only the selected slug through the registered provider. Supply every authorized slug and its description in the stored provider configuration; the helper does not enumerate the provider catalog itself.
+
+Use a stable `binding` string when one tool name can address different execution targets. `deferStoredToolProviders` supplies it from the original provider and account pin. A deferred executor cannot cross request-context instances; restored runs rebuild their own tools.
+
 ## Extended usage example
 
 ```typescript title="src/mastra/agents/dynamic-tools-agent.ts"
@@ -366,31 +418,37 @@ const agent = new Agent({
 Use `createToolSkillPolicy` to require skill instructions before a tool can be activated or executed. Keep dependency rules separate from tool definitions. Configure one mandatory policy on `Mastra` for all registered agents, delegated agents, and registered server tools.
 
 ```typescript
-import { Agent } from '@mastra/core/agent';
-import { Mastra } from '@mastra/core/mastra';
-import { SkillSearchProcessor, ToolSearchProcessor, createToolSkillPolicy } from '@mastra/core/processors';
+import { Agent } from '@mastra/core/agent'
+import { Mastra } from '@mastra/core/mastra'
+import {
+  SkillSearchProcessor,
+  ToolSearchProcessor,
+  createToolSkillPolicy,
+} from '@mastra/core/processors'
 
 const toolPolicy = createToolSkillPolicy({
   generate_image: ['image-generation'],
   edit_image: ['image-generation', 'image-editing'],
   create_artifact: ({ phase, input }) =>
-    phase === 'execute' && (input as { type?: string })?.type === 'mini_app' ? ['mini-app-builder'] : [],
-});
+    phase === 'execute' && (input as { type?: string })?.type === 'mini_app'
+      ? ['mini-app-builder']
+      : [],
+})
 
-const skillSearch = new SkillSearchProcessor({ workspace, trackReadiness: true });
+const skillSearch = new SkillSearchProcessor({ workspace, trackReadiness: true })
 const toolSearch = new ToolSearchProcessor({
   tools: allTools,
   search: { autoLoad: true },
   storage: 'context',
-});
+})
 const agent = new Agent({
   id: 'creative-agent',
   name: 'Creative agent',
   instructions: 'Use the available tools to complete the request.',
   model: '__GATEWAY_OPENAI_MODEL__',
   inputProcessors: [skillSearch, toolSearch],
-});
-const mastra = new Mastra({ agents: { agent }, toolPolicy });
+})
+const mastra = new Mastra({ agents: { agent }, toolPolicy })
 ```
 
 Rules use the tool names exposed to the model. An array requires every listed skill. A function can require skills for a specific server tool operation; return an empty array for operations that don't need a skill. Don't place dependencies on the discovery or loading tools, since that would block recovery.
@@ -421,7 +479,7 @@ const mastra = new Mastra({
     resolve: async ({ requestContext, agentId, runId }) =>
       createToolSkillPolicy(await readAuthorizedRules({ requestContext, agentId, runId })),
   },
-});
+})
 ```
 
 Mastra resolves this once per native preparation and keeps the callback with that run. Every new preparation and warm or cold resume resolves fresh rules; direct registered tool calls resolve once per call. Controller auto-approvals can cause a separate native resume for each tool, so one conversation may resolve more than once. A single activation scan never resolves the rules per tool. Resolver failure stops execution. A saved decline can still settle without granting tool execution, and Stop uses native cancellation. The resolver reads product configuration only; SkillSearchProcessor remains the skill-loading authority.
@@ -433,12 +491,12 @@ A blocked resume leaves its original saved call paused. Native Controller Sessio
 A configuration resolver can report a safe, structured problem using the public error type:
 
 ```typescript
-import { ToolPolicyError } from '@mastra/core/tools';
+import { ToolPolicyError } from '@mastra/core/tools'
 
 throw new ToolPolicyError(
   { code: 'REQUIRED_SKILL_UNAVAILABLE', missingSkills: ['image-generation'], retryable: false },
   { message: 'The required published skill is unavailable.' },
-);
+)
 ```
 
 Unexpected resolver errors become `TOOL_POLICY_UNAVAILABLE` with `retryable: true`. Their original cause stays private. Tools remain blocked until a fresh preparation succeeds.
