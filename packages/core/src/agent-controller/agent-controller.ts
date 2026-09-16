@@ -243,6 +243,8 @@ export class AgentController<TState = {}> {
   readonly #sessionBrowserOwners = new WeakMap<MastraBrowser, Set<Session<TState>>>();
   readonly #sessionOwnedBrowsers = new WeakMap<Session<TState>, MastraBrowser>();
   readonly #borrowedBrowsers = new WeakSet<MastraBrowser>();
+  readonly #browserReleases = new WeakMap<MastraBrowser, { pending: boolean; promise: Promise<void> }>();
+  readonly #failedSessionCleanup = new Map<string, Session<TState>>();
   private availableModelsCache: AvailableModel[] | null = null;
   private availableModelsCacheTime: number = 0;
   readonly #instructions?: string;
@@ -560,6 +562,11 @@ export class AgentController<TState = {}> {
       let pendingDeletion = this.#deletionsInProgress.get(registryKey);
       if (pendingDeletion) await pendingDeletion;
 
+      if (this.#failedSessionCleanup.has(registryKey)) {
+        await this.deleteSession({ resourceId: effectiveResourceId, scope });
+        continue;
+      }
+
       const existing = this.#sessionsByResource.get(registryKey);
       if (existing) {
         const session = await existing;
@@ -736,6 +743,12 @@ export class AgentController<TState = {}> {
       browserToConnect = await browserToConnect({ requestContext, mastra: this.getMastra() });
     }
 
+    // Do not hand a closing browser to a new owner or static borrower. A failed
+    // release remains an admission barrier until the owning session retries it.
+    while (browserToConnect && this.#browserReleases.has(browserToConnect)) {
+      await this.#browserReleases.get(browserToConnect)!.promise;
+    }
+
     const session = this.#wireSession(
       new Session({
         resourceId: effectiveResourceId,
@@ -807,7 +820,10 @@ export class AgentController<TState = {}> {
       await this.#notifySessionCreated(session);
       return session;
     } catch (error) {
+      const registryKey = sessionRegistryKey(effectiveResourceId, overrides?.scope);
+      this.#failedSessionCleanup.set(registryKey, session);
       await this.#releaseSessionBrowser(session);
+      this.#failedSessionCleanup.delete(registryKey);
       throw error;
     }
   }
@@ -816,12 +832,34 @@ export class AgentController<TState = {}> {
     const browser = this.#sessionOwnedBrowsers.get(session);
     const owners = browser && this.#sessionBrowserOwners.get(browser);
     if (!browser || !owners?.has(session)) return;
-    if (owners.size === 1 && !this.#borrowedBrowsers.has(browser)) await browser.close();
-    owners.delete(session);
-    this.#sessionOwnedBrowsers.delete(session);
-    session.browser = undefined;
-    if (owners.size === 0) {
-      this.#sessionBrowserOwners.delete(browser);
+    const detach = () => {
+      owners.delete(session);
+      this.#sessionOwnedBrowsers.delete(session);
+      session.browser = undefined;
+      if (owners.size === 0) this.#sessionBrowserOwners.delete(browser);
+    };
+    if (owners.size > 1 || this.#borrowedBrowsers.has(browser)) {
+      detach();
+      return;
+    }
+    const existingRelease = this.#browserReleases.get(browser);
+    if (existingRelease?.pending) {
+      await existingRelease.promise;
+      return;
+    }
+    const release = {
+      pending: true,
+      promise: Promise.resolve().then(async () => {
+        await browser.close();
+        detach();
+        this.#browserReleases.delete(browser);
+      }),
+    };
+    this.#browserReleases.set(browser, release);
+    try {
+      await release.promise;
+    } finally {
+      release.pending = false;
     }
   }
 
@@ -848,14 +886,20 @@ export class AgentController<TState = {}> {
     if (this.#deletionsInProgress.has(registryKey)) return false;
 
     const pending = this.#sessionsByResource.get(registryKey);
-    if (!pending) return false;
+    if (!pending && !this.#failedSessionCleanup.has(registryKey)) return false;
 
     // Track the deletion by registry key and set it synchronously, before any
     // await, so a concurrent createSession that resumes from `await existing`
     // sees the flag and waits instead of returning a session being torn down.
     const deletion: { tolerantPromise?: Promise<void> } = {};
     const deletionPromise = (async () => {
-      const session = await pending;
+      const session = pending
+        ? await pending.catch(error => {
+            const failed = this.#failedSessionCleanup.get(registryKey);
+            if (!failed) throw error;
+            return failed;
+          })
+        : await Promise.resolve(this.#failedSessionCleanup.get(registryKey)!);
       this.#sessionsBeingDeleted.add(session);
       // tolerantPromise is set synchronously below before this microtask runs.
       this.#sessionDeletionPromises.set(session, deletion.tolerantPromise!);
@@ -872,6 +916,7 @@ export class AgentController<TState = {}> {
       try {
         await session.thread.clearAndReleaseLock();
       } finally {
+        this.#failedSessionCleanup.delete(registryKey);
         // Notify inside the finally: even when lock release fails the session
         // is deregistered for good, and listeners mirror the registry.
         await this.#dropSessionFromRegistry(registryKey, session);
