@@ -112,6 +112,7 @@ const KNOWN_AGENT_CONTROLLER_EVENT_TYPES = new Set<string>(
     agent_end: true,
     message_start: true,
     message_update: true,
+    text_delta: true,
     message_end: true,
     state_changed: true,
     tool_input_start: true,
