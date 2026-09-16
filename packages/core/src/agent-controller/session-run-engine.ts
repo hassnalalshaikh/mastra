@@ -5,6 +5,7 @@ import type {
   MastraProviderMetadata,
   MastraToolInvocationPart,
 } from '../agent/message-list/state/types';
+import { getToolCompletion, withToolCompletionMetadata } from '../agent/message-list/tool-completion';
 import { TripWire } from '../agent/trip-wire';
 import type { AgentThreadSubscription } from '../agent/types';
 import { getErrorFromUnknown } from '../error';
@@ -76,6 +77,7 @@ type StreamChunk =
   | StreamPayloadChunk<'tool-call-delta'>
   | StreamPayloadChunk<'tool-call-input-streaming-end'>
   | StreamPayloadChunk<'tool-call'>
+  | StreamPayloadChunk<'tool-execution-start'>
   | StreamPayloadChunk<'tool-result'>
   | StreamPayloadChunk<'tool-error'>
   | StreamPayloadChunk<'tool-output-denied'>
@@ -344,19 +346,50 @@ export class SessionRunEngine {
    * Fold a `tool-result`/`tool-error` chunk into the invocation part and
    * notify — an errored tool must reach a terminal state or clients spin forever.
    */
-  private applyToolOutcome(
+  private async applyToolOutcome(
     state: StreamState,
     outcome: {
       toolCallId: string;
       toolName: string;
       result: unknown;
       isError: boolean;
+      preliminary?: boolean;
+      messageId?: string;
+      runId?: string;
       providerMetadata?: MastraProviderMetadata;
     },
-  ): void {
-    const { toolCallId, toolName, result, isError, providerMetadata } = outcome;
-    const toolIndex = state.toolPartById.get(toolCallId);
-    const existing = toolIndex !== undefined ? state.currentMessage.content.parts[toolIndex] : undefined;
+  ): Promise<void> {
+    const { toolCallId, toolName, result, isError } = outcome;
+    if (outcome.preliminary) {
+      this.#session.emit({ type: 'tool_update', toolCallId, partialResult: result, preliminary: true });
+      return;
+    }
+    const providerMetadata = getToolCompletion(outcome.providerMetadata)
+      ? outcome.providerMetadata
+      : withToolCompletionMetadata(outcome.providerMetadata, state.runId ?? undefined);
+    const completion = getToolCompletion(providerMetadata)!;
+    let targetMessage = state.currentMessage;
+    if (outcome.messageId && outcome.messageId !== targetMessage.id) {
+      const storage = await this.#machinery.getMessageStorage?.();
+      const found = storage ? await storage.listMessagesById({ messageIds: [outcome.messageId] }) : undefined;
+      const source = found?.messages.find(message => message.id === outcome.messageId);
+      if (
+        !source ||
+        source.role !== 'assistant' ||
+        source.threadId !== this.#session.thread.getId() ||
+        source.resourceId !== this.#session.identity.getResourceId()
+      ) {
+        throw new Error('Tool result source message is unavailable or belongs to another conversation');
+      }
+      targetMessage = structuredClone(source);
+    }
+    const toolIndex =
+      targetMessage === state.currentMessage
+        ? state.toolPartById.get(toolCallId)
+        : targetMessage.content.parts.findIndex(
+            part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === toolCallId,
+          );
+    const existing = toolIndex !== undefined ? targetMessage.content.parts[toolIndex] : undefined;
     if (existing && existing.type === 'tool-invocation') {
       existing.toolInvocation = Object.assign(existing.toolInvocation, {
         state: 'result' as const,
@@ -381,16 +414,20 @@ export class SessionRunEngine {
       if (providerMetadata) {
         toolInvocationPart.providerMetadata = providerMetadata;
       }
-      state.currentMessage.content.parts.push(toolInvocationPart);
+      targetMessage.content.parts.push(toolInvocationPart);
     }
     this.#session.emit({
       type: 'tool_end',
+      runId: outcome.runId ?? state.runId ?? undefined,
+      toolName,
+      messageId: targetMessage.id,
+      completedAt: completion.completedAt,
       toolCallId,
       result,
       isError,
       ...(providerMetadata ? { providerMetadata } : {}),
     });
-    this.#session.emit({ type: 'message_update', message: state.currentMessage });
+    this.#session.emit({ type: 'message_update', message: targetMessage });
   }
 
   private abortForOmFailure({ operationType, stage, error }: { operationType: string; stage: string; error: string }) {
@@ -626,13 +663,35 @@ export class SessionRunEngine {
         break;
       }
 
+      case 'tool-execution-start': {
+        const payload = getPayload(chunk);
+        const invocation = getRecord(payload.args);
+        const toolCallId = getString(invocation?.toolCallId);
+        const toolName = getString(invocation?.toolName);
+        const runId = state.runId ?? getString(payload.runId);
+        if (toolCallId && toolName && runId) {
+          const displayed = this.#session.displayState.get().activeTools.get(toolCallId);
+          this.#session.emit({
+            type: 'tool_execution_start',
+            runId,
+            toolCallId,
+            toolName,
+            args: displayed?.args ?? {},
+          });
+        }
+        break;
+      }
+
       case 'tool-result': {
         const toolResult = getPayload(chunk);
-        this.applyToolOutcome(state, {
+        await this.applyToolOutcome(state, {
           toolCallId: getString(toolResult.toolCallId) ?? '',
+          messageId: getString(toolResult.messageId),
+          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
           toolName: getString(toolResult.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'output-available', toolResult.result),
           isError: getBoolean(toolResult.isError, false),
+          preliminary: getBoolean(toolResult.preliminary, false),
           providerMetadata: isProviderMetadata(toolResult.providerMetadata) ? toolResult.providerMetadata : undefined,
         });
         break;
@@ -641,8 +700,10 @@ export class SessionRunEngine {
       case 'tool-error': {
         const toolError = getPayload(chunk);
         // Error instances JSON-serialize to `{}`; keep the message so failure text survives SSE + persistence.
-        this.applyToolOutcome(state, {
+        await this.applyToolOutcome(state, {
           toolCallId: getString(toolError.toolCallId) ?? '',
+          messageId: getString(toolError.messageId),
+          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
           toolName: getString(toolError.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'error', getErrorFromUnknown(toolError.error).message),
           isError: true,
@@ -681,7 +742,17 @@ export class SessionRunEngine {
           state.currentMessage.content.parts.push({ type: 'tool-invocation', toolInvocation });
         }
 
-        this.#session.emit({ type: 'tool_end', toolCallId, result: reason, isError: false, denied: true });
+        this.#session.emit({
+          type: 'tool_end',
+          toolCallId,
+          runId: state.runId ?? undefined,
+          toolName,
+          messageId: state.currentMessage.id,
+          completedAt: new Date().toISOString(),
+          result: reason,
+          isError: false,
+          denied: true,
+        });
         this.#session.emit({ type: 'message_update', message: state.currentMessage });
         break;
       }

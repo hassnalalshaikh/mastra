@@ -238,8 +238,16 @@ describe('SessionRunEngine — MastraDBMessage contract', () => {
     expect(toolPart.toolInvocation.state).toBe('result');
     expect(toolPart.toolInvocation.result).toBe('boom');
     expect(toolPart.toolInvocation.isError).toBe(true);
-    expect(events).toContainEqual({ type: 'tool_end', toolCallId: 'tc1', result: 'boom', isError: true });
-    expect(events.filter(event => event.type === 'message_update').length).toBe(updatesBefore + 1);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_end',
+        toolCallId: 'tc1',
+        result: 'boom',
+        isError: true,
+        completedAt: expect.any(String),
+      }),
+    );
+    expect(events.filter(event => event.type === 'message_update').length).toBe(updatesBefore + 2);
   });
 
   it('Given a denied tool call, When the denial chunk arrives, Then the invocation reaches output-denied state', async () => {
@@ -276,13 +284,15 @@ describe('SessionRunEngine — MastraDBMessage contract', () => {
       args: { path: 'a.ts' },
       approval: { id: 'approval-1', approved: false, reason: 'Not allowed' },
     });
-    expect(events).toContainEqual({
-      type: 'tool_end',
-      toolCallId: 'tc1',
-      result: 'Not allowed',
-      isError: false,
-      denied: true,
-    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_end',
+        toolCallId: 'tc1',
+        result: 'Not allowed',
+        isError: false,
+        denied: true,
+      }),
+    );
   });
 
   it('Given a tool-error carrying an Error instance, When it folds, Then the failure message survives JSON serialization', async () => {
@@ -636,4 +646,92 @@ describe('SessionRunEngine — MastraDBMessage contract', () => {
     expect(messageEnd?.message.content.metadata?.stopReason).toBe('error');
     expect(events).toContainEqual({ type: 'agent_end', reason: 'error' });
   });
+});
+
+describe('truthful native tool lifecycle', () => {
+  it('preparation stays distinct from execution and the terminal outcome keeps run identity', async () => {
+    const { engine, session, events } = createHarness();
+    const state = engine.createStreamState('run-exact');
+    const ctx = requestContext();
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tool-call', payload: { toolCallId: 'task', toolName: 'work', args: { visible: true } } }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('running');
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'tool-execution-start',
+        payload: { runId: 'run-exact', args: { toolCallId: 'task', toolName: 'work', args: { visible: true } } },
+      }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('executing');
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tool-result', payload: { toolCallId: 'task', toolName: 'work', result: 'done' } }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('completed');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_end',
+        runId: 'run-exact',
+        toolCallId: 'task',
+        toolName: 'work',
+        messageId: state.currentMessage.id,
+        completedAt: expect.any(String),
+        isError: false,
+      }),
+    );
+  });
+
+  it('cancelled active work has one failed outcome, never a successful completion', async () => {
+    const { session, events } = createHarness();
+    session.emit({ type: 'tool_execution_start', runId: 'run-cancel', toolCallId: 'task', toolName: 'work', args: {} });
+    await session.finishAgentRun('aborted');
+    await session.finishAgentRun('aborted');
+    const outcomes = events.filter(event => event.type === 'tool_end');
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ toolCallId: 'task', isError: true, cancelled: true });
+  });
+});
+
+it('a background dispatch stays active and announces only its real final result', async () => {
+  const { engine, session, events } = createHarness();
+  const state = engine.createStreamState('background-run');
+  const ctx = requestContext();
+  await engine.processStreamChunk(
+    state,
+    chunk({ type: 'tool-call', payload: { toolCallId: 'bg', toolName: 'work', args: {} } }),
+    ctx,
+  );
+  await engine.processStreamChunk(
+    state,
+    chunk({
+      type: 'tool-execution-start',
+      payload: { runId: 'background-run', args: { toolCallId: 'bg', toolName: 'work' } },
+    }),
+    ctx,
+  );
+  await engine.processStreamChunk(
+    state,
+    chunk({
+      type: 'tool-result',
+      payload: { toolCallId: 'bg', toolName: 'work', result: 'Dispatched', preliminary: true },
+    }),
+    ctx,
+  );
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(0);
+  await session.finishAgentRun('complete');
+  session.emit({ type: 'agent_start' });
+  expect(session.displayState.get().activeTools.get('bg')).toMatchObject({ status: 'executing', background: true });
+  await engine.processStreamChunk(
+    state,
+    chunk({ type: 'tool-result', payload: { toolCallId: 'bg', toolName: 'work', result: 'Actual result' } }),
+    ctx,
+  );
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(1);
+  expect(session.displayState.get().activeTools.get('bg')).toMatchObject({ status: 'completed', background: false });
 });

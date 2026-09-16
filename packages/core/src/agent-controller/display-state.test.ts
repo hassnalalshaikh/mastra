@@ -424,7 +424,7 @@ describe('tool lifecycle', () => {
     );
 
     // DB-native: tool call + result collapse into a single tool-invocation part.
-    expect(result.message.content.parts).toEqual([
+    expect(result.message.content.parts).toMatchObject([
       {
         type: 'tool-invocation',
         toolInvocation: {
@@ -525,7 +525,7 @@ describe('tool lifecycle', () => {
       new RequestContext(),
     );
 
-    expect(result.message.content.parts).toEqual([
+    expect(result.message.content.parts).toMatchObject([
       {
         type: 'tool-invocation',
         toolInvocation: {

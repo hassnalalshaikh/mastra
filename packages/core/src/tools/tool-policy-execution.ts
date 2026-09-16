@@ -1,7 +1,8 @@
-import { consumeBuilderValidatedInput, markBuilderValidatedInput } from './builder-validation-context';
 import type { RequestContext } from '../request-context';
 import type { StandardSchemaWithJSON } from '../schema';
+import { consumeBuilderValidatedInput, markBuilderValidatedInput } from './builder-validation-context';
 import { captureToolInput, restoreToolInput } from './resumable-input';
+import { notifyToolExecutionStart, TOOL_EXECUTION_START } from './tool-execution-events';
 import type { ToolPolicy } from './tool-policy';
 import type { MastraToolInvocationOptions } from './types';
 import { validateToolInput } from './validation';
@@ -9,6 +10,10 @@ import { validateToolInput } from './validation';
 /** Native-only invocation metadata; never serialized or passed to user callbacks. */
 export const TOOL_EXECUTION_POLICY = Symbol('mastra.toolExecutionPolicy');
 const ACCEPTS_EXECUTION_POLICY = Symbol('mastra.acceptsExecutionPolicy');
+const policyRejections = new WeakSet<object>();
+export function isToolPolicyRejection(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && policyRejections.has(value);
+}
 
 type PolicyInvocation = {
   policy: ToolPolicy;
@@ -24,15 +29,22 @@ export function markPolicyExecutor<T extends Function>(execute: T): T {
   return execute;
 }
 
+export function isPolicyExecutor(execute: Function | undefined): boolean {
+  return Boolean(execute && (execute as any)[ACCEPTS_EXECUTION_POLICY]);
+}
+
 export async function checkExecutionPolicy(options: ToolPolicyInvocationOptions | undefined, input: unknown) {
   const invocation = options?.[TOOL_EXECUTION_POLICY];
-  return invocation?.policy({
+  const decision = await invocation?.policy({
     toolName: invocation.toolName,
     requestContext: invocation.requestContext,
     phase: 'execute',
     hasExecute: true,
     input,
   });
+  if (decision?.allowed === false && decision.error && typeof decision.error === 'object')
+    policyRejections.add(decision.error);
+  return decision;
 }
 
 /** All agent dispatch paths use this after selecting the final tool instance. */
@@ -50,7 +62,12 @@ export async function executeToolWithPolicy(
 ): Promise<any> {
   if (!tool.execute) return;
   policy ??= options?.[TOOL_EXECUTION_POLICY]?.policy;
-  if (!policy) return tool.execute(input, options);
+  if (!policy) {
+    if (isPolicyExecutor(tool.execute)) return tool.execute(input, options);
+    await notifyToolExecutionStart(options, input);
+    const { [TOOL_EXECUTION_START]: _start, ...publicOptions } = options ?? {};
+    return tool.execute(input, publicOptions);
+  }
   // Preserve the native run's authoritative context through builder/context copies.
   const invocation = options?.[TOOL_EXECUTION_POLICY] ?? { policy, toolName, requestContext };
   const policyOptions = withToolPolicyInvocation(options, invocation);
@@ -73,7 +90,8 @@ export async function executeToolWithPolicy(
   const decision = await checkExecutionPolicy(policyOptions, accepted);
   if (decision?.allowed === false) return decision.error;
   captureToolInput(options, accepted, { toolName, toolCallId: options?.toolCallId });
-  const { [TOOL_EXECUTION_POLICY]: _policy, ...publicOptions } = options ?? {};
+  await notifyToolExecutionStart(options, accepted);
+  const { [TOOL_EXECUTION_POLICY]: _policy, [TOOL_EXECUTION_START]: _start, ...publicOptions } = options ?? {};
   return tool.execute(accepted, publicOptions);
 }
 

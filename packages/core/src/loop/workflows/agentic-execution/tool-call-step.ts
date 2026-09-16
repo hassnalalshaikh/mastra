@@ -21,10 +21,13 @@ import {
 } from '../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../tools/resumable-input';
+import { executionStartHook } from '../../../tools/tool-execution-events';
 import { executeToolWithPolicy } from '../../../tools/tool-policy-execution';
+import { isToolPolicyRejection } from '../../../tools/tool-policy-execution';
 import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import type { MastraToolInvocationOptions, ToolApprovalContext } from '../../../tools/types';
 import { noopObserve } from '../../../tools/types';
+import { isValidationError } from '../../../tools/validation';
 import { ensureSerializable } from '../../../utils';
 import type { SuspendOptions } from '../../../workflows/step';
 import { createStep } from '../../../workflows/workflow';
@@ -724,6 +727,16 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             : resumeData;
 
         const toolOptions: MastraToolInvocationOptions = {
+          ...executionStartHook(async () => {
+            const chunk = {
+              type: 'tool-execution-start' as const,
+              runId,
+              from: ChunkFrom.AGENT,
+              payload: { runId, args: { toolCallId: inputData.toolCallId, toolName: inputData.toolName } },
+            };
+            safeEnqueue(controller, chunk);
+            await options?.onChunk?.(chunk);
+          }),
           abortSignal: options?.abortSignal,
           toolCallId: inputData.toolCallId,
           // Pass all messages (input + response + memory) so sub-agents (agent-* tools) receive
@@ -1129,6 +1142,22 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   backgroundChunkTransformQueue = backgroundChunkTransformQueue
                     .then(async () => {
                       const bgRunId = chunk.payload.runId;
+                      const completedMessage = messageList.get.all
+                        .db()
+                        .find(message =>
+                          message.content.parts.some(
+                            part =>
+                              part.type === 'tool-invocation' &&
+                              part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+                          ),
+                        );
+                      const completedPart = completedMessage?.content.parts.find(
+                        part =>
+                          part.type === 'tool-invocation' &&
+                          part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+                      );
+                      const completedMetadata =
+                        completedPart?.type === 'tool-invocation' ? completedPart.providerMetadata : undefined;
                       const replayKey = `${bgRunId}:${chunk.payload.toolCallId}`;
                       if (
                         (bgRunId !== runId || (bgRunId === runId && workflowResumeData != null)) &&
@@ -1145,7 +1174,8 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                                 toolCallId: chunk.payload.toolCallId,
                                 toolName: chunk.payload.toolName,
                                 args: inputData.args,
-                                providerMetadata: inputData.providerMetadata as ProviderMetadata | undefined,
+                                providerMetadata:
+                                  completedMetadata ?? (inputData.providerMetadata as ProviderMetadata | undefined),
                                 providerExecuted: inputData.providerExecuted,
                               },
                             },
@@ -1168,7 +1198,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                                 toolName: chunk.payload.toolName,
                                 args: inputData.args,
                                 result: chunk.payload.result,
-                                providerMetadata: inputData.providerMetadata as ProviderMetadata | undefined,
+                                providerMetadata:
+                                  completedMetadata ?? (inputData.providerMetadata as ProviderMetadata | undefined),
+                                messageId: completedMessage?.id,
                                 providerExecuted: inputData.providerExecuted,
                               },
                             },
@@ -1189,7 +1221,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                                 toolName: chunk.payload.toolName,
                                 error: chunk.payload.error,
                                 args: inputData.args,
-                                providerMetadata: inputData.providerMetadata as ProviderMetadata | undefined,
+                                providerMetadata:
+                                  completedMetadata ?? (inputData.providerMetadata as ProviderMetadata | undefined),
+                                messageId: completedMessage?.id,
                                 providerExecuted: inputData.providerExecuted,
                               },
                             },
@@ -1480,6 +1514,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
 
               // Return placeholder result so the LLM can continue
               return {
+                preliminary: true,
                 result: `Background task started. Task ID: ${task.id}. The tool "${inputData.toolName}" is running in the background. You will be notified when it completes.`,
                 ...inputData,
                 ...(approvalGrant ?? {}),
@@ -1513,7 +1548,12 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           }
         }
 
-        return { result, ...inputData, ...(approvalGrant ?? {}) };
+        return {
+          result,
+          ...inputData,
+          isError: isToolPolicyRejection(rawResult) || isValidationError(rawResult),
+          ...(approvalGrant ?? {}),
+        };
       } catch (error) {
         // Re-throw FGA authorization errors instead of swallowing them
         const suspensionError = findToolSuspensionError(error);

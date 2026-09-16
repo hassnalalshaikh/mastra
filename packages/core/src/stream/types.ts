@@ -214,6 +214,8 @@ export interface ToolCallPayload<TArgs = unknown, TOutput = unknown> {
 }
 
 export interface ToolResultPayload<TResult = unknown, TArgs = unknown> {
+  preliminary?: boolean;
+  messageId?: string;
   toolCallId: string;
   toolName: string;
   result: TResult;
@@ -340,6 +342,7 @@ export interface StepFinishPayload<Tools extends ToolSet = ToolSet, OUTPUT = und
 }
 
 export interface ToolErrorPayload {
+  messageId?: string;
   id?: string;
   providerMetadata?: ProviderMetadata;
   toolCallId: string;
@@ -351,6 +354,7 @@ export interface ToolErrorPayload {
 
 /** Terminal stream payload when a requireApproval tool call is declined. */
 export interface ToolOutputDeniedPayload {
+  providerMetadata?: ProviderMetadata;
   toolCallId: string;
   toolName: string;
   args?: Record<string, unknown>;
@@ -712,7 +716,7 @@ interface ToolExecutionStartPayload {
   args: Record<string, unknown> & {
     toolName?: string;
     toolCallId?: string;
-    args?: Record<string, unknown>; // The actual tool arguments are nested here
+    args?: unknown; // The actual validated tool arguments are nested here
     selectionReason?: string;
     __mastraMetadata?: MastraMetadata;
     // Other inputData fields spread here

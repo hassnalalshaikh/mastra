@@ -41,6 +41,7 @@ import type {
   UIMessageWithMetadata,
   SerializedMessageListState,
 } from './state';
+import { getToolCompletion, withToolCompletionMetadata } from './tool-completion';
 import type { AIV5Type, AIV5ResponseMessage, AIV6Type, MessageInput, MessageListInput } from './types';
 import { ensureGeminiCompatibleMessages } from './utils/provider-compat';
 import { stampPart } from './utils/stamp-part';
@@ -1374,7 +1375,16 @@ export class MessageList {
       ...(originalPart.providerExecuted !== undefined && inputPartWithMeta.providerExecuted === undefined
         ? { providerExecuted: originalPart.providerExecuted }
         : {}),
-      ...(mergedProviderMetadata !== undefined ? { providerMetadata: mergedProviderMetadata } : {}),
+      ...(['result', 'output-error', 'output-denied'].includes(inputPart.toolInvocation.state) &&
+      inputPart.providerMetadata?.mastra?.toolExecutionPending !== true
+        ? {
+            providerMetadata: getToolCompletion(inputPart.providerMetadata)
+              ? mergedProviderMetadata
+              : withToolCompletionMetadata(mergedProviderMetadata),
+          }
+        : mergedProviderMetadata !== undefined
+          ? { providerMetadata: mergedProviderMetadata }
+          : {}),
     };
     this.lastCreatedAt = Math.max(this.lastCreatedAt || 0, Date.now());
     this.updateLastCreatedAt(msg);

@@ -6,6 +6,8 @@ import { toStandardSchema } from '../schema';
 import type { PublicSchema, StandardSchemaWithJSON, InferPublicSchema } from '../schema';
 import type { SuspendOptions } from '../workflows';
 import { consumeBuilderValidatedInput } from './builder-validation-context';
+import { notifyToolExecutionStart, TOOL_EXECUTION_START } from './tool-execution-events';
+import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from './tool-policy-execution';
 import type {
   McpMetadata,
   MCPToolProperties,
@@ -16,7 +18,6 @@ import type {
   ToolPayloadTransform,
 } from './types';
 import { validateToolInput, validateToolOutput, validateToolSuspendData, validateRequestContext } from './validation';
-import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from './tool-policy-execution';
 
 /**
  * Marker to identify Mastra tools even when `instanceof` fails.
@@ -582,7 +583,9 @@ export class Tool<
         // Call the original execute with validated input and organized context
         const decision = await checkExecutionPolicy(context, data);
         if (decision?.allowed === false) return decision.error as any;
+        await notifyToolExecutionStart(context, data);
         delete organizedContext[TOOL_EXECUTION_POLICY];
+        delete organizedContext[TOOL_EXECUTION_START];
         const output = await originalExecute(data as any, organizedContext);
 
         if (suspendData) {

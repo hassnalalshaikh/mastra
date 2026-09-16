@@ -2,6 +2,8 @@ import type { IMastraLogger } from '../../logger';
 import type { MemoryConfigInternal } from '../../memory';
 import type { MastraMemory } from '../../memory/memory';
 import type { MessageList } from '../message-list';
+import { getToolCompletion } from '../message-list/tool-completion';
+import { indexToolCompletions } from '../message-list/tool-completion-index';
 
 export class SaveQueueManager {
   private logger?: IMastraLogger;
@@ -110,7 +112,15 @@ export class SaveQueueManager {
   private async persistUnsavedMessages(messageList: MessageList, memoryConfig?: MemoryConfigInternal) {
     const memory = this.memory;
     if (!memory) return;
-    await messageList.persistUnsavedMessages(messages => memory.saveMessages({ messages, memoryConfig }));
+    await messageList.persistUnsavedMessages(async messages => {
+      await memory.saveMessages({ messages, memoryConfig });
+      const hasCompletion = messages.some(message =>
+        message.content.parts.some(part => part.type === 'tool-invocation' && getToolCompletion(part.providerMetadata)),
+      );
+      if (!hasCompletion) return;
+      const store = await memory.storage?.getStore('threadState');
+      if (store) await indexToolCompletions(store, messages);
+    });
   }
 
   /**

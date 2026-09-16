@@ -1,6 +1,7 @@
 import type { StepResult, ToolSet } from '@internal/ai-sdk-v5';
 import { z } from 'zod/v4';
 import type { MastraDBMessage, MessageList } from '../../../agent/message-list';
+import { withToolCompletionMetadata } from '../../../agent/message-list/tool-completion';
 import { sanitizeToolName } from '../../../agent/message-list/utils/tool-name';
 import { TripWire } from '../../../agent/trip-wire';
 import { createObservabilityContext, EntityType, SpanType } from '../../../observability';
@@ -17,7 +18,17 @@ import { findProviderToolByName } from '../../../tools/provider-tool-utils';
 import { createStep } from '../../../workflows/workflow';
 import { readScoped, writeScoped } from '../../run-scope-access';
 import type { RunScopeContext } from '../../run-scope-access';
-import { DELEGATION_BAILED_KEY, STEP_TOOLS_KEY, TOOL_PAYLOAD_TRANSFORM_KEY } from '../../run-scope-keys';
+import {
+  DELEGATION_BAILED_KEY,
+  STEP_TOOLS_KEY,
+  TOOL_PAYLOAD_TRANSFORM_KEY,
+  SAVE_QUEUE_MANAGER_KEY,
+  MEMORY_CONFIG_KEY,
+  THREAD_ID_KEY,
+  MEMORY_KEY,
+  RESOURCE_ID_KEY,
+  THREAD_EXISTS_KEY,
+} from '../../run-scope-keys';
 import type { OuterLLMRun } from '../../types';
 import { deserializeToolError } from '../errors';
 import { llmIterationOutputSchema, toolCallOutputSchema } from '../schema';
@@ -87,6 +98,36 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
 
   // Helper function to process a chunk through output processors and enqueue it.
   // Returns the processed chunk, or null if the chunk was blocked by a processor.
+  async function flushCommittedToolResult(chunk: ChunkType<OUTPUT>): Promise<void> {
+    if (chunk.type !== 'tool-result' && chunk.type !== 'tool-error' && chunk.type !== 'tool-output-denied') return;
+    const source = rest.messageList.get.all
+      .db()
+      .find(message =>
+        message.content.parts.some(
+          part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+        ),
+      );
+    if (source && chunk.type !== 'tool-output-denied') {
+      chunk.payload.messageId = source.id;
+      const part = source.content.parts.find(
+        part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+      );
+      if (part?.type === 'tool-invocation') chunk.payload.providerMetadata = part.providerMetadata;
+    }
+    const manager = readScoped(scopeCtx, SAVE_QUEUE_MANAGER_KEY, 'saveQueueManager');
+    const threadId = readScoped(scopeCtx, THREAD_ID_KEY, 'threadId');
+    const memoryConfig = readScoped(scopeCtx, MEMORY_CONFIG_KEY, 'memoryConfig');
+    if (!manager || !threadId || memoryConfig?.readOnly) return;
+    const memory = readScoped(scopeCtx, MEMORY_KEY, 'memory');
+    const resourceId = readScoped(scopeCtx, RESOURCE_ID_KEY, 'resourceId');
+    if (memory && resourceId && !readScoped(scopeCtx, THREAD_EXISTS_KEY, 'threadExists')) {
+      if (!(await memory.getThreadById({ threadId })))
+        await memory.createThread({ threadId, resourceId, memoryConfig });
+      writeScoped(scopeCtx, THREAD_EXISTS_KEY, 'threadExists', true);
+    }
+    await manager.flushMessages(rest.messageList, threadId, memoryConfig);
+  }
+
   async function processAndEnqueueChunk(chunk: ChunkType<OUTPUT>): Promise<ChunkType<OUTPUT> | null> {
     if (processorRunner && rest.processorStates) {
       const {
@@ -124,6 +165,7 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
       }
 
       if (processed) {
+        await flushCommittedToolResult(processed as ChunkType<OUTPUT>);
         rest.controller.enqueue(processed as ChunkType<OUTPUT>);
       }
 
@@ -151,6 +193,7 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
       return processed ? (processed as ChunkType<OUTPUT>) : null;
     } else {
       // No processor runner, just enqueue the chunk directly
+      await flushCommittedToolResult(chunk);
       rest.controller.enqueue(chunk);
       return chunk;
     }
@@ -349,6 +392,15 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
         },
         phase: 'output-available' | 'error' | 'approval',
       ): Promise<ChunkType<OUTPUT>> {
+        if (chunk.type === 'tool-result' || chunk.type === 'tool-error' || chunk.type === 'tool-output-denied') {
+          const preliminary = chunk.type === 'tool-result' && chunk.payload.preliminary;
+          chunk.payload.providerMetadata = preliminary
+            ? {
+                ...chunk.payload.providerMetadata,
+                mastra: { ...chunk.payload.providerMetadata?.mastra, toolExecutionPending: true },
+              }
+            : withToolCompletionMetadata(chunk.payload.providerMetadata as ProviderMetadata, rest.runId);
+        }
         const stepTools = readScoped(scopeCtx, STEP_TOOLS_KEY, 'stepTools') as ToolSet | undefined;
         const tool =
           stepTools?.[toolCall.toolName] ||
@@ -423,9 +475,6 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
               { ...toolCall, error: reifiedError },
               'error',
             );
-            const processed = await processAndEnqueueChunk(chunk);
-            if (processed) await rest.options?.onChunk?.(processed);
-
             rest.messageList.updateToolInvocation({
               type: 'tool-invocation' as const,
               toolInvocation: {
@@ -445,12 +494,14 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
               )
                 ? {
                     providerMetadata: withToolPayloadTransformProviderMetadata(
-                      toolCall.providerMetadata as ProviderMetadata,
+                      (chunk as { payload: { providerMetadata?: ProviderMetadata } }).payload.providerMetadata,
                       chunk.metadata,
                     ) as ProviderMetadata,
                   }
                 : {}),
             });
+            const processed = await processAndEnqueueChunk(chunk);
+            if (processed) await rest.options?.onChunk?.(processed);
           }
         }
 
@@ -503,6 +554,8 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                   toolCallId: toolCall.toolCallId,
                   toolName: toolCall.toolName,
                   result: toolCall.result,
+                  preliminary: toolCall.preliminary,
+                  isError: toolCall.isError,
                   providerMetadata: chunkProviderMetadata,
                   providerExecuted: toolCall.providerExecuted,
                 },
@@ -545,11 +598,15 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                   toolName: sanitizeToolName(toolCall.toolName),
                   args: toolCall.args,
                   result: (chunk as { payload: { result: unknown } }).payload.result,
+                  isError: toolCall.isError,
                   // Preserve the approval decision for an approved approval-gated tool in a mixed
                   // turn (one tool errored, another approved) so it round-trips on recall too.
                   ...(toolCall.approval ? { approval: toolCall.approval } : {}),
                 },
-                ...(withToolPayloadTransformProviderMetadata(providerMetadata, chunk.metadata)
+                ...(withToolPayloadTransformProviderMetadata(
+                  (chunk as { payload: { providerMetadata?: ProviderMetadata } }).payload.providerMetadata,
+                  chunk.metadata,
+                )
                   ? {
                       providerMetadata: withToolPayloadTransformProviderMetadata(
                         providerMetadata,
@@ -666,6 +723,8 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                 toolCallId: toolCall.toolCallId,
                 toolName: toolCall.toolName,
                 result: toolCall.result,
+                preliminary: toolCall.preliminary,
+                isError: toolCall.isError,
                 providerMetadata: chunkProviderMetadata,
                 providerExecuted: toolCall.providerExecuted,
               },
@@ -708,14 +767,18 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                 toolName: sanitizeToolName(toolCall.toolName),
                 args: toolCall.args,
                 result: (chunk as { payload: { result: unknown } }).payload.result,
+                isError: toolCall.isError,
                 // Preserve the approval decision for an approved approval-gated tool so it
                 // round-trips on recall as `approval: { approved: true }`.
                 ...(toolCall.approval ? { approval: toolCall.approval } : {}),
               },
-              ...(withToolPayloadTransformProviderMetadata(providerMetadata, chunk.metadata)
+              ...(withToolPayloadTransformProviderMetadata(
+                (chunk as { payload: { providerMetadata?: ProviderMetadata } }).payload.providerMetadata,
+                chunk.metadata,
+              )
                 ? {
                     providerMetadata: withToolPayloadTransformProviderMetadata(
-                      providerMetadata,
+                      (chunk as { payload: { providerMetadata?: ProviderMetadata } }).payload.providerMetadata,
                       chunk.metadata,
                     ) as ProviderMetadata,
                   }

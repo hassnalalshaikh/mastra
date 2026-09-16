@@ -5,6 +5,7 @@ import { APICallError } from '@internal/ai-sdk-v5';
 import type { CallSettings, StepResult, ToolChoice, ToolSet } from '@internal/ai-sdk-v5';
 import type { StructuredOutputOptions } from '../../../agent';
 import type { MessageList } from '../../../agent/message-list';
+import { withToolCompletionMetadata } from '../../../agent/message-list/tool-completion';
 import { TripWire } from '../../../agent/trip-wire';
 import { isSupportedLanguageModel, supportedLanguageModelSpecifications } from '../../../agent/utils';
 import { ErrorCategory, ErrorDomain, MastraError } from '../../../error';
@@ -55,8 +56,8 @@ import {
   withToolPayloadTransformProviderMetadata,
 } from '../../../tools/payload-transform';
 import { findProviderToolByName, inferProviderExecuted } from '../../../tools/provider-tool-utils';
-import { filterToolsByPolicy } from '../../../tools/tool-policy-execution';
 import type { ToolToConvert } from '../../../tools/tool-builder/builder';
+import { filterToolsByPolicy } from '../../../tools/tool-policy-execution';
 import { getProviderToolName, isMastraTool, isProviderTool } from '../../../tools/toolchecks';
 import { createMastraProxy, makeCoreTool } from '../../../utils';
 import { createStep } from '../../../workflows/workflow';
@@ -1052,6 +1053,7 @@ async function processOutputStream<OUTPUT = undefined>({
           // post-processor-mutated) value. For same-stream results no matching
           // part exists yet — updateToolInvocation returns false and
           // buildMessagesFromChunks handles the merge.
+          chunk.payload.providerMetadata = withToolCompletionMetadata(chunk.payload.providerMetadata, chunk.runId);
           messageList.updateToolInvocation({
             type: 'tool-invocation',
             toolInvocation: {

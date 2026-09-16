@@ -21,6 +21,7 @@ import type { ChunkType } from '../../../../stream/types';
 import { ChunkFrom } from '../../../../stream/types';
 import { findProviderToolByName } from '../../../../tools/provider-tool-utils';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../../tools/resumable-input';
+import { executionStartHook } from '../../../../tools/tool-execution-events';
 import { executeToolWithPolicy } from '../../../../tools/tool-policy-execution';
 import { PUBSUB_SYMBOL } from '../../../../workflows/constants';
 import type { SuspendOptions } from '../../../../workflows/step';
@@ -955,6 +956,15 @@ export function createDurableToolCallStep() {
       const toolAbortSignal = registryEntry?.abortSignal;
 
       const toolOptions = {
+        ...executionStartHook(async () => {
+          if (pubsub)
+            await emitChunkEvent(pubsub, runId, {
+              type: 'tool-execution-start',
+              runId,
+              from: ChunkFrom.AGENT,
+              payload: { runId, args: { toolCallId, toolName } },
+            });
+        }),
         toolCallId,
         messages: [],
         workspace,
@@ -1416,6 +1426,7 @@ export function createDurableToolCallStep() {
               return {
                 ...typedInput,
                 args: cleanedArgs,
+                preliminary: true,
                 result: `Background task started. Task ID: ${task.id}. The tool "${toolName}" is running in the background. You will be notified when it completes.`,
                 ...(approvalGrant ?? {}),
               };

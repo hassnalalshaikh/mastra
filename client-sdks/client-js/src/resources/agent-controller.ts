@@ -119,6 +119,7 @@ const KNOWN_AGENT_CONTROLLER_EVENT_TYPES = new Set<string>(
     tool_input_delta: true,
     tool_input_end: true,
     tool_start: true,
+    tool_execution_start: true,
     tool_update: true,
     shell_output: true,
     command_exit: true,

@@ -36,7 +36,13 @@ import { getSuspensionWaitingFor } from '../../workflows/step';
 import { markBuilderValidatedInput } from '../builder-validation-context';
 import { captureToolInput, restoreToolInput, TOOL_INPUT_STATE } from '../resumable-input';
 import { ToolStream } from '../stream';
-import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from '../tool-policy-execution';
+import { notifyToolExecutionStart, TOOL_EXECUTION_START } from '../tool-execution-events';
+import {
+  checkExecutionPolicy,
+  isPolicyExecutor,
+  markPolicyExecutor,
+  TOOL_EXECUTION_POLICY,
+} from '../tool-policy-execution';
 import type {
   CoreTool,
   McpMetadata,
@@ -608,12 +614,16 @@ export class CoreToolBuilder extends MastraBase {
           const {
             [TOOL_INPUT_STATE]: _toolInputState,
             [TOOL_EXECUTION_POLICY]: _toolPolicy,
+            [TOOL_EXECUTION_START]: _executionStart,
             ...publicOptions
           } = execOptions;
           // Handle Vercel tools (AI SDK tools)
           result = await executeWithContext({
             span: toolSpan,
-            fn: async () => tool?.execute?.(args, publicOptions as ToolExecutionOptions),
+            fn: async () => {
+              await notifyToolExecutionStart(execOptions, args);
+              return tool?.execute?.(args, publicOptions as ToolExecutionOptions);
+            },
           });
         } else {
           // Handle Mastra tools - wrap mastra instance with tracing context for context propagation
@@ -650,6 +660,7 @@ export class CoreToolBuilder extends MastraBase {
             ...(execOptions[TOOL_EXECUTION_POLICY]
               ? { [TOOL_EXECUTION_POLICY]: execOptions[TOOL_EXECUTION_POLICY] }
               : {}),
+            ...(execOptions[TOOL_EXECUTION_START] ? { [TOOL_EXECUTION_START]: execOptions[TOOL_EXECUTION_START] } : {}),
             actor: execOptions.actor,
             // Workspace for file operations and command execution
             // Execution-time workspace (from prepareStep/processInputStep) takes precedence over build-time workspace
@@ -762,6 +773,10 @@ export class CoreToolBuilder extends MastraBase {
               // createExecute already validated (or restored) this input even
               // when the provider needs no compatibility layer.
               markBuilderValidatedInput(toolContext);
+              if (!isPolicyExecutor(tool?.execute)) {
+                await notifyToolExecutionStart(execOptions, args);
+                delete toolContext[TOOL_EXECUTION_START];
+              }
               return tool?.execute?.(args, toolContext);
             },
           });

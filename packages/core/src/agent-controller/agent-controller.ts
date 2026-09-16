@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { Agent } from '../agent';
 import { MessageList } from '../agent/message-list';
 import type { MastraDBMessage, MastraMessageContentV2 } from '../agent/message-list/state/types';
+import type { ToolCompletionIndexEntry } from '../agent/message-list/tool-completion-index';
+import { TOOL_COMPLETION_INDEX_TYPE, TOOL_COMPLETION_INDEX_LIMIT } from '../agent/message-list/tool-completion-index';
 import { isUserAuthoredMessage, mastraDBMessageToSignal } from '../agent/signals';
 import type { ActiveThreadRun } from '../agent/thread-stream-runtime';
 import type { AgentInstructions, ToolsInput, ToolsetsInput } from '../agent/types';
@@ -25,6 +27,7 @@ import { Workspace } from '../workspace/workspace';
 
 import { Session } from './session';
 import type { ThreadDataStore } from './session';
+import { projectCompletedToolMessages } from './tool-completion-display';
 import {
   askUserTool,
   createSubagentTool,
@@ -1409,18 +1412,33 @@ export class AgentController<TState = {}> {
 
     const memoryStorage = await this.getMemoryStorage();
 
-    if (limit) {
+    if (limit && limit <= TOOL_COMPLETION_INDEX_LIMIT) {
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        throw new RangeError(`Message display limit must be between 1 and ${TOOL_COMPLETION_INDEX_LIMIT}`);
+      }
+      const indexStore = await this.#resolveStorage()?.getStore('threadState');
+      const entries =
+        (await indexStore?.getState<ToolCompletionIndexEntry[]>({ threadId, type: TOOL_COMPLETION_INDEX_TYPE })) ?? [];
       const result = await memoryStorage.listMessages({
         threadId,
         perPage: limit,
         page: 0,
         orderBy: { field: 'createdAt', direction: 'DESC' },
+        // Explicit source IDs keep a new completion visible even when its call
+        // predates the ordinary message page. Index reads are always bounded.
+        include: entries.map(entry => ({
+          id: entry.messageId,
+          threadId,
+          withPreviousMessages: 0,
+          withNextMessages: 0,
+        })),
       });
-      return result.messages.map(msg => this.convertToControllerMessage(msg)).reverse();
+      const unique = [...new Map(result.messages.map(message => [message.id, message])).values()];
+      return projectCompletedToolMessages(unique.map(msg => this.convertToControllerMessage(msg))).slice(-limit);
     }
-
     const result = await memoryStorage.listMessages({ threadId, perPage: false });
-    return result.messages.map(msg => this.convertToControllerMessage(msg));
+    const rows = projectCompletedToolMessages(result.messages.map(msg => this.convertToControllerMessage(msg)));
+    return limit ? rows.slice(-limit) : rows;
   }
 
   private async queryFirstUserMessages({ threadIds }: { threadIds: string[] }): Promise<Map<string, MastraDBMessage>> {

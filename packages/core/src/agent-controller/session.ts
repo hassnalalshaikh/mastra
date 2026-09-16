@@ -33,6 +33,7 @@ import { safeStringify } from '../utils';
 import { Workspace } from '../workspace';
 
 import { SessionRunEngine } from './session-run-engine';
+import { projectCompletedToolMessages } from './tool-completion-display';
 import type { TaskItemSnapshot } from './tools';
 import { createEmptyTokenUsage, defaultDisplayState, defaultOMProgressState } from './types';
 import type {
@@ -490,7 +491,7 @@ export class SessionThread {
     if (!this.#store) return [];
     // Only expose messages for threads this session owns.
     await this.#requireOwnedThread({ threadId });
-    return this.#store.listMessages({ threadId, limit });
+    return projectCompletedToolMessages(await this.#store.listMessages({ threadId, limit }));
   }
 
   /** List messages for the session's active thread (empty when not bound). */
@@ -2458,7 +2459,7 @@ export class SessionDisplayState {
       // ── Agent lifecycle ────────────────────────────────────────────────
       case 'agent_start':
         ds.isRunning = true;
-        ds.activeTools = new Map();
+        ds.activeTools = new Map([...ds.activeTools].filter(([, tool]) => tool.background));
         ds.toolInputBuffers = new Map();
         ds.currentMessage = null;
         ds.pendingApproval = null;
@@ -2478,8 +2479,12 @@ export class SessionDisplayState {
           ds.pendingSuspensions.clear();
         }
         // Mark any still-running tools as errored (handles abort mid-run)
-        for (const [, tool] of ds.activeTools) {
-          if (tool.status === 'running' || tool.status === 'streaming_input') {
+        for (const [toolCallId, tool] of ds.activeTools) {
+          if (
+            (tool.status === 'running' || tool.status === 'executing' || tool.status === 'streaming_input') &&
+            !tool.background &&
+            !(event.reason === 'suspended' && ds.pendingSuspensions.has(toolCallId))
+          ) {
             tool.status = 'error';
           }
         }
@@ -2543,9 +2548,21 @@ export class SessionDisplayState {
         break;
       }
 
+      case 'tool_execution_start': {
+        ds.activeTools.set(event.toolCallId, {
+          ...ds.activeTools.get(event.toolCallId),
+          name: event.toolName,
+          args: event.args,
+          status: 'executing',
+          runId: event.runId,
+        });
+        break;
+      }
+
       case 'tool_update': {
         const tool = ds.activeTools.get(event.toolCallId);
         if (tool) {
+          if (event.preliminary) tool.background = true;
           tool.partialResult =
             typeof event.partialResult === 'string' ? event.partialResult : safeStringify(event.partialResult);
         }
@@ -2556,6 +2573,7 @@ export class SessionDisplayState {
         const endedTool = ds.activeTools.get(event.toolCallId);
         if (endedTool) {
           endedTool.status = event.isError ? 'error' : 'completed';
+          endedTool.background = false;
           endedTool.result = event.result;
           endedTool.isError = event.isError;
         }
@@ -2914,7 +2932,14 @@ export class SessionBus {
         this.#lastWorkspaceEvents.push(event);
       }
     }
-    this.#displayState?.apply(event);
+    const projected =
+      event.type === 'message_start' || event.type === 'message_update' || event.type === 'message_end'
+        ? projectCompletedToolMessages([event.message]).map(message => ({ ...event, message }))
+        : undefined;
+    // Synthetic completion rows are transcript rows, not a new current assistant answer.
+    // Fold the original row once and only project the additional rows to subscribers.
+    const original = projected?.find(item => item.message.id === (event as { message: MastraDBMessage }).message.id);
+    this.#displayState?.apply(original ?? event);
 
     // A pending snapshot describes state that predates this event, so it must
     // reach listeners before the event itself does. Flushing here also means a
@@ -2923,7 +2948,11 @@ export class SessionBus {
       this.#flushDisplayState();
     }
 
-    this.#dispatch(event);
+    if (projected) {
+      for (const item of projected) this.#dispatch(item);
+    } else {
+      this.#dispatch(event);
+    }
 
     if (event.type === 'display_state_changed' || !this.#displayState) return;
 
@@ -3272,6 +3301,25 @@ export class Session<TState = unknown> {
     reason: NonNullable<Extract<AgentControllerEvent, { type: 'agent_end' }>['reason']>,
     isCurrent?: () => boolean,
   ): Promise<void> {
+    if (reason === 'aborted' || reason === 'error') {
+      const state = this.displayState.get();
+      for (const [toolCallId, tool] of state.activeTools) {
+        if (tool.background) continue;
+        if (tool.status !== 'running' && tool.status !== 'executing' && tool.status !== 'streaming_input') continue;
+        if (isCurrent && !isCurrent()) return;
+        this.emit({
+          type: 'tool_end',
+          toolCallId,
+          toolName: tool.name,
+          runId: tool.runId ?? this.getCurrentRunId() ?? undefined,
+          messageId: state.currentMessage?.id,
+          completedAt: new Date().toISOString(),
+          result: reason === 'aborted' ? 'Tool execution was cancelled' : 'The run ended before this tool completed',
+          isError: true,
+          cancelled: reason === 'aborted',
+        });
+      }
+    }
     const event = { type: 'agent_end', reason } as const;
     for (const listener of this.#beforeAgentEndListeners) {
       if (isCurrent && !isCurrent()) return;
