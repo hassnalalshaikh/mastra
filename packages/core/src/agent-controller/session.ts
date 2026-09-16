@@ -2605,6 +2605,7 @@ export class SessionDisplayState {
           args: event.args,
           suspendPayload: event.suspendPayload,
           resumeSchema: event.resumeSchema,
+          waitingFor: event.waitingFor ?? 'user',
         });
         break;
 
@@ -3438,6 +3439,7 @@ export class Session<TState = unknown> {
         toolName: call.toolName,
         args: call.args,
         suspendPayload: call.suspendPayload,
+        waitingFor: call.waitingFor ?? 'user',
       });
     }
     const approvals = pending.filter(({ call }) => call.requiresApproval);

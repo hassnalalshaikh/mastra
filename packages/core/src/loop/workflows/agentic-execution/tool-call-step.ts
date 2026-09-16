@@ -21,8 +21,8 @@ import {
 } from '../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../tools/resumable-input';
-import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import { executeToolWithPolicy } from '../../../tools/tool-policy-execution';
+import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import type { MastraToolInvocationOptions, ToolApprovalContext } from '../../../tools/types';
 import { noopObserve } from '../../../tools/types';
 import { ensureSerializable } from '../../../utils';
@@ -64,6 +64,7 @@ type AddToolMetadataOptions = {
   parentToolName?: string;
   parentArgs?: unknown;
   resumeSchema: string;
+  waitingFor?: 'user' | 'external';
   suspendedToolRunId?: string;
   metadata?: Record<string, unknown>;
 } & (
@@ -178,6 +179,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         parentArgs,
         suspendPayload,
         resumeSchema,
+        waitingFor,
         type,
         suspendedToolRunId,
         metadata: toolStateTransformMetadata,
@@ -219,7 +221,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           // from `runId` directly; legacy entries with `parentRunId` keep working.
           runId,
           ...(suspendedToolRunId && suspendedToolRunId !== runId ? { delegatedRunId: suspendedToolRunId } : {}),
-          ...(type === 'suspension' ? { suspendPayload: transformedSuspendPayload } : {}),
+          ...(type === 'suspension'
+            ? { suspendPayload: transformedSuspendPayload, waitingFor: waitingFor ?? 'user' }
+            : {}),
           resumeSchema,
           ...(toolStateTransformMetadata ? { metadata: toolStateTransformMetadata } : {}),
         };
@@ -855,6 +859,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     suspendPayload,
                     args: inputData.args,
                     resumeSchema: options?.resumeSchema,
+                    waitingFor: options?.waitingFor ?? 'user',
                   },
                 },
                 'suspend',
@@ -873,6 +878,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     suspendedToolRunId: options?.runId,
                     type: 'suspension',
                     resumeSchema: options?.resumeSchema,
+                    waitingFor: options?.waitingFor ?? 'user',
                     metadata: suspensionChunk.metadata,
                   });
                 },
@@ -885,6 +891,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
               return await suspend(
                 {
                   toolCallSuspended: suspendPayload,
+                  waitingFor: options?.waitingFor ?? 'user',
                   __mastraToolInput: acceptedInput,
                   toolApprovalPolicy,
                   toolApprovalContext,

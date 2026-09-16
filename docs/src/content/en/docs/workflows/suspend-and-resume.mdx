@@ -11,6 +11,17 @@ Workflows can be paused at any step to collect additional data or wait for API c
 
 ## Pausing a workflow with `suspend()`
 
+Set `waitingFor: 'external'` when a service callback supplies the resume data:
+
+```typescript
+await suspend({ requestId }, { resumeLabel: 'callback', waitingFor: 'external' })
+```
+
+The native suspended step result stores `waitingFor` alongside `suspendPayload`.
+Omitting the option means `'user'`; older snapshots without this field also mean
+`'user'`. This label does not schedule work, resume a step, or change approval
+checks. Use the same native resume API when the callback arrives.
+
 Use `suspend()` to pause workflow execution at a specific step. You can define a suspend condition in the step’s `execute` block using values from `resumeData`.
 
 - If the condition isn’t met, the workflow pauses and returns `suspend()`.

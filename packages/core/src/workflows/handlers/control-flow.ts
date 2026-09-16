@@ -238,6 +238,7 @@ export async function executeParallel(
     execResults = {
       status: 'suspended',
       suspendPayload: hasSuspended.suspendPayload,
+      waitingFor: hasSuspended.waitingFor ?? 'user',
       ...(hasSuspended.suspendOutput ? { suspendOutput: hasSuspended.suspendOutput } : {}),
     };
   } else if (abortController?.signal?.aborted) {
@@ -562,6 +563,7 @@ export async function executeConditional(
     execResults = {
       status: 'suspended',
       suspendPayload: hasSuspended.suspendPayload,
+      waitingFor: hasSuspended.waitingFor ?? 'user',
       ...(hasSuspended.suspendOutput ? { suspendOutput: hasSuspended.suspendOutput } : {}),
       suspendedAt: hasSuspended.suspendedAt,
     };
@@ -1068,6 +1070,7 @@ export async function executeForeach(
         foreachIndexObj[k] = {
           status: result.status,
           suspendPayload: result.suspendPayload,
+          waitingFor: result.waitingFor ?? 'user',
           suspendedAt: result.suspendedAt,
         };
       }
@@ -1190,6 +1193,7 @@ export async function executeForeach(
         foreachIndexObj[k] = {
           status: prevItemResult.status,
           suspendPayload: prevItemResult.suspendPayload,
+          waitingFor: prevItemResult.waitingFor ?? 'user',
           suspendedAt: prevItemResult.suspendedAt,
         };
       }
@@ -1387,6 +1391,7 @@ export async function executeForeach(
       ...(foreachIndexObj[foreachIndex].suspendOutput
         ? { suspendOutput: foreachIndexObj[foreachIndex].suspendOutput }
         : {}),
+      waitingFor: foreachIndexObj[foreachIndex].waitingFor ?? 'user',
       suspendPayload: {
         ...foreachIndexObj[foreachIndex].suspendPayload,
         __workflow_meta: {

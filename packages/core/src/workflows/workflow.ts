@@ -2944,6 +2944,7 @@ export class Workflow<
           },
           {
             resumeLabel: Object.keys(res.resumeLabels ?? {}),
+            waitingFor: (stepResult as { waitingFor?: 'user' | 'external' })?.waitingFor ?? 'user',
           },
         );
       }

@@ -32,10 +32,11 @@ import { safeStringify } from '../../utils';
 import { isZodObject, safeExtendZodObject } from '../../utils/zod-utils';
 
 import type { SuspendOptions } from '../../workflows';
+import { getSuspensionWaitingFor } from '../../workflows/step';
 import { markBuilderValidatedInput } from '../builder-validation-context';
-import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from '../tool-policy-execution';
 import { captureToolInput, restoreToolInput, TOOL_INPUT_STATE } from '../resumable-input';
 import { ToolStream } from '../stream';
+import { checkExecutionPolicy, markPolicyExecutor, TOOL_EXECUTION_POLICY } from '../tool-policy-execution';
 import type {
   CoreTool,
   McpMetadata,
@@ -668,6 +669,7 @@ export class CoreToolBuilder extends MastraBase {
             ...createObservabilityContext({ currentSpan: toolSpan }),
             abortSignal: execOptions.abortSignal,
             suspend: (args: any, suspendOptions?: SuspendOptions) => {
+              getSuspensionWaitingFor(suspendOptions);
               suspendData = args;
               const newSuspendOptions = {
                 ...(suspendOptions ?? {}),

@@ -19,7 +19,7 @@ import type { DynamicArgument } from '../../types';
 import { PUBSUB_SYMBOL, STREAM_FORMAT_SYMBOL } from '../constants';
 import type { DefaultExecutionEngine } from '../default';
 import type { Step, SuspendOptions } from '../step';
-import { getStepResult } from '../step';
+import { getStepResult, getSuspensionWaitingFor } from '../step';
 import type {
   ExecutionContext,
   OutputWriter,
@@ -319,7 +319,7 @@ export async function executeStep(
         timeTravelSteps = timeTravel.steps[0] === step.id ? timeTravel.steps.slice(1) : [];
       }
 
-      let suspended: { payload: any } | undefined;
+      let suspended: { payload: any; waitingFor: 'user' | 'external' } | undefined;
       let bailed: { payload: any } | undefined;
       const contextMutations: {
         suspendedPaths: Record<string, number[]>;
@@ -371,6 +371,7 @@ export async function executeStep(
         getInitData: () => stepResults?.input as any,
         getStepResult: getStepResult.bind(null, stepResults),
         suspend: async (suspendPayload?: any, suspendOptions?: SuspendOptions): Promise<void> => {
+          const waitingFor = getSuspensionWaitingFor(suspendOptions);
           const { suspendData, validationError: suspendValidationError } = await validateStepSuspendData({
             suspendData: suspendPayload,
             step,
@@ -400,7 +401,7 @@ export async function executeStep(
             }
           }
 
-          suspended = { payload: suspendData };
+          suspended = { payload: suspendData, waitingFor };
         },
         bail: (result: any) => {
           bailed = { payload: result };
@@ -505,6 +506,7 @@ export async function executeStep(
       execResults = {
         status: 'suspended',
         suspendPayload: durableResult.suspended.payload,
+        waitingFor: durableResult.suspended.waitingFor,
         ...(durableResult.output ? { suspendOutput: durableResult.output } : {}),
         suspendedAt: Date.now(),
       };

@@ -13,7 +13,18 @@ import type { Workflow } from './workflow';
 
 export type SuspendOptions = {
   resumeLabel?: string | string[];
+  /** Who supplies resume data. Defaults to 'user'. */
+  waitingFor?: 'user' | 'external';
 } & Record<string, any>;
+
+/** @internal Resolve and validate the shared tool/workflow suspension option. */
+export function getSuspensionWaitingFor(options?: SuspendOptions): 'user' | 'external' {
+  const waitingFor = options?.waitingFor ?? 'user';
+  if (waitingFor !== 'user' && waitingFor !== 'external') {
+    throw new Error('Suspension waitingFor must be user or external');
+  }
+  return waitingFor;
+}
 
 // Create a unique symbol that only exists at the type level
 declare const SuspendBrand: unique symbol;

@@ -1,12 +1,4 @@
-import type { ProcessInputStepArgs } from '../processors';
 import { randomUUID } from 'node:crypto';
-import type { ToolPolicy } from '../tools/tool-policy';
-import {
-  combineToolPolicies,
-  executeToolWithPolicy,
-  markPolicyExecutor,
-  setPreparedToolPolicy,
-} from '../tools/tool-policy-execution';
 import type { UIMessage } from '@internal/ai-sdk-v4';
 import type { ModelMessage } from '@internal/ai-sdk-v5';
 import { wrapSchemaWithNullTransform } from '@mastra/schema-compat';
@@ -93,6 +85,7 @@ import {
   resolveCurrentSpan,
   resolveObservabilityContext,
 } from '../observability';
+import type { ProcessInputStepArgs } from '../processors';
 import type {
   ErrorProcessorOrWorkflow,
   InputProcessorOrWorkflow,
@@ -129,6 +122,13 @@ import { createTool } from '../tools';
 import { createWebSearchProviderTool, isWebSearchTool, normalizeWebSearchProvider } from '../tools/builtin/web-search';
 import { normalizeToolPayloadTransformPolicy } from '../tools/payload-transform';
 import type { ToolToConvert } from '../tools/tool-builder/builder';
+import type { ToolPolicy } from '../tools/tool-policy';
+import {
+  combineToolPolicies,
+  executeToolWithPolicy,
+  markPolicyExecutor,
+  setPreparedToolPolicy,
+} from '../tools/tool-policy-execution';
 import { isMastraTool, isProviderTool } from '../tools/toolchecks';
 import type {
   CoreTool,
@@ -357,6 +357,8 @@ export interface AgentRunToolCall {
   toolApprovalContext?: import('./tool-approval-context').ToolApprovalContext;
   /** The tool-defined suspend payload when the tool itself called `suspend()`. */
   suspendPayload?: unknown;
+  /** Who supplies resume data for a tool suspension. Defaults to 'user'. */
+  waitingFor?: 'user' | 'external';
 }
 
 /**
@@ -6974,6 +6976,7 @@ export class Agent<
           toolName: payload.toolName,
           requiresApproval: false,
           suspendPayload: payload.toolCallSuspended,
+          waitingFor: payload.waitingFor === 'external' ? 'external' : 'user',
           ...(payload.toolApprovalPolicy === 'manual' || payload.toolApprovalPolicy === 'auto'
             ? {
                 toolApprovalPolicy: payload.toolApprovalPolicy as 'manual' | 'auto',

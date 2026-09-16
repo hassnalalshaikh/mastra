@@ -805,6 +805,7 @@ export class SessionRunEngine {
           args: suspArgs,
           suspendPayload: suspPayload,
           resumeSchema: suspResumeSchema,
+          waitingFor: getPayload(chunk).waitingFor === 'external' ? 'external' : 'user',
         });
 
         break;

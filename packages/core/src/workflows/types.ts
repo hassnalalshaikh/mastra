@@ -112,6 +112,8 @@ export type StepFailure<P, R, S, T> = {
 
 export type StepSuspended<P, S, T> = {
   status: 'suspended';
+  /** Who supplies resume data. Missing on older snapshots means 'user'. */
+  waitingFor?: 'user' | 'external';
   payload: P;
   suspendPayload?: S;
   suspendOutput?: T;

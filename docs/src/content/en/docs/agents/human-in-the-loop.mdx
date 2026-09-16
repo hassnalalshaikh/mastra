@@ -13,6 +13,20 @@ Agents sometimes require the same [human-in-the-loop (HITL)](/docs/workflows/hum
 
 ## When to use human-in-the-loop
 
+Tools waiting for a service callback can distinguish that wait from a question
+for the user:
+
+```typescript
+await context.agent.suspend({ requestId }, { waitingFor: 'external' })
+```
+
+The option defaults to `'user'`. It is preserved in native suspension events,
+saved tool metadata, `listSuspendedRuns`, and Session `pendingSuspensions`.
+It does not change approval checks or allow a second independent run on the
+same thread. A same-agent message accepted while suspended is queued into the
+existing run and is processed after that run resumes; its delivery receipt is
+not a separate task-completion receipt.
+
 - **Destructive or irreversible actions** such as deleting records or sending emails, or alternatively processing payments.
 - **Cost-heavy operations** like calling expensive third-party APIs where you want to verify arguments first.
 - **Conditional confirmation** where a tool starts executing and then discovers it needs the user to confirm or supply extra data before finishing.

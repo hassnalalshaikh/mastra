@@ -12,7 +12,7 @@ import { executeWithContext } from '../../observability/utils';
 import { ToolStream } from '../../tools/stream';
 import { PUBSUB_SYMBOL, STREAM_FORMAT_SYMBOL } from '../constants';
 import { runAgentEntry, runMappingEntry, runToolEntry } from '../entry-executors';
-import { getStepResult } from '../step';
+import { getStepResult, getSuspensionWaitingFor } from '../step';
 import type { InnerOutput, LoopConditionFunction, SuspendOptions } from '../step';
 import { getEntryComponent, getEntryId, getEntrySchemas } from '../step-entry';
 import type { SingleStepEntry, StepFlowEntry, StepResult } from '../types';
@@ -89,7 +89,7 @@ export class StepExecutor extends MastraBase {
     // Use provided abortController or create a new one for backwards compatibility
     const abortController = params.abortController ?? new AbortController();
 
-    let suspended: { payload: any } | undefined;
+    let suspended: { payload: any; waitingFor: 'user' | 'external' } | undefined;
     let bailed: { payload: any } | undefined;
     const startedAt = Date.now();
     const { inputData, validationError } = await validateStepInput({
@@ -199,6 +199,7 @@ export class StepExecutor extends MastraBase {
               getInitData: () => stepResults?.input as any,
               getStepResult: getStepResult.bind(this, stepResults),
               suspend: async (suspendPayload: unknown, suspendOptions?: SuspendOptions): Promise<InnerOutput> => {
+                const waitingFor = getSuspensionWaitingFor(suspendOptions);
                 const { suspendData, validationError } = await validateStepSuspendData({
                   suspendData: suspendPayload,
                   step: schemas,
@@ -221,6 +222,7 @@ export class StepExecutor extends MastraBase {
                   }
                 }
                 suspended = {
+                  waitingFor,
                   payload: {
                     ...suspendData,
                     __workflow_meta: {
@@ -290,6 +292,7 @@ export class StepExecutor extends MastraBase {
         finalResult = {
           ...baseStepInfo,
           status: 'suspended',
+          waitingFor: suspended.waitingFor,
           suspendedAt: endedAt,
           ...(stepOutput ? { suspendOutput: stepOutput } : {}),
           __state: finalState,
