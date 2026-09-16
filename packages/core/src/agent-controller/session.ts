@@ -2893,6 +2893,12 @@ export class SessionBus {
   }
 
   emit(event: AgentControllerEvent): void {
+    // Incremental consumers observe this event without changing the display
+    // snapshot or forcing a per-token flush of its coalesced message updates.
+    if (event.type === 'text_delta') {
+      this.#dispatch(event);
+      return;
+    }
     if (
       event.type === 'workspace_status_changed' ||
       event.type === 'workspace_ready' ||
@@ -3992,6 +3998,31 @@ export class Session<TState = unknown> {
       ifActive,
       ifIdle: { ...ifIdle, streamOptions: streamOptions as any },
     });
+  }
+
+  /**
+   * Send a user message, including files, and return its exact delivery receipt.
+   * Uses the same file conversion as sendMessage without waiting for the run to
+   * finish. Conversion may throw before delivery; accepted rejects on routing
+   * or stream setup failure. Subscribe before sending to observe early output.
+   */
+  sendMessageWithReceipt({
+    content,
+    files,
+    tracingContext,
+    tracingOptions,
+    requestContext,
+  }: {
+    content: string;
+    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    tracingContext?: TracingContext;
+    tracingOptions?: TracingOptions;
+    requestContext?: RequestContext;
+  }): ReturnType<Session['sendSignal']> {
+    return this.sendSignal(
+      { content: this.createMessageInput({ content, files }), tracingContext, tracingOptions, requestContext },
+      { requireDelivery: true },
+    );
   }
 
   /**

@@ -799,6 +799,8 @@ export type AgentControllerEvent =
   | { type: 'agent_end'; reason?: 'complete' | 'aborted' | 'error' | 'suspended' }
   | { type: 'message_start'; message: MastraDBMessage }
   | { type: 'message_update'; message: MastraDBMessage }
+  /** Forward-only assistant text, excluding reasoning and tool payloads. */
+  | { type: 'text_delta'; runId: string; messageId: string; textDelta: string }
   | { type: 'message_end'; message: MastraDBMessage }
   | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown }
   | { type: 'tool_approval_required'; toolCallId: string; toolName: string; args: unknown }

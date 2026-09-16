@@ -48,6 +48,7 @@ function streamTurn() {
   for (let i = 0; i < DELTA_COUNT; i++) {
     message.content.parts[0]!.text += 'token ';
     session.emit({ type: 'message_update', message: message as any });
+    session.emit({ type: 'text_delta', runId: 'run-1', messageId: 'm1', textDelta: 'token ' });
   }
   session.emit({ type: 'message_end', message: message as any });
   session.emit({ type: 'agent_end', reason: 'complete' });

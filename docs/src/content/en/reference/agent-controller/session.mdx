@@ -152,7 +152,26 @@ unsubscribe()
 
 Returns: `() => void`
 
+The forward-only `text_delta` event contains `{ type: 'text_delta', runId, messageId, textDelta }`. It emits assistant text as the native stream processes it, before the run finishes. It excludes reasoning, tool input, and tool results. Each event contains only the new text, not the accumulated message. Subscribe before sending and match `runId` to the accepted command's run. Early events can arrive before the receipt resolves. These events aren't replayed and don't replace the display snapshot or terminal events. Generated text doesn't establish speech playback or successful tool execution.
+
 ### Messages and run control
+
+#### `sendMessageWithReceipt({ content, files?, requestContext?, tracingContext?, tracingOptions? })`
+
+Send a user message with the same file conversion as `sendMessage`, and return an immediate delivery handle instead of waiting for the run to finish. Text and JSON attachments are included as fenced text; binary attachments remain file parts. JSON content is document text and isn't parsed as JSON.
+
+```typescript
+const delivery = session.sendMessageWithReceipt({
+  content: 'Summarize the notes.',
+  files: [{ data: 'Meeting notes', mediaType: 'text/plain', filename: 'notes.txt' }],
+})
+const accepted = await delivery.accepted
+console.log(delivery.id, accepted.runId, accepted.action)
+```
+
+Returns the same `{ id, type, accepted }` handle as `sendSignal`. The `accepted` promise waits for the actual routing decision with `requireDelivery: true` and resolves to `{ accepted: true, runId?, action? }`. Check the action and run ID when your caller requires delivery into a running agent. Acceptance isn't completion. Use session events to observe the run's result.
+
+File conversion can throw before a signal is sent. Routing and stream setup failures reject `accepted`. The method doesn't retry. Existing `sendMessage` behavior is unchanged.
 
 #### `sendMessage({ content, files?, requestContext? })`
 

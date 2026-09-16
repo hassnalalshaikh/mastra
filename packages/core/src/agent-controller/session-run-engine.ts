@@ -224,6 +224,8 @@ async function abortDeadline(run: Session['run'], guard: AbortSignal, graceMs: n
 }
 
 type StreamState = {
+  /** Identity of this stream, independent of later session run changes. */
+  runId?: string | null;
   currentMessage: MastraDBMessage;
   lastFinishedMessage?: MastraDBMessage;
   isSuspended: boolean;
@@ -326,8 +328,9 @@ export class SessionRunEngine {
     state.toolPartById.clear();
   }
 
-  createStreamState(): StreamState {
+  createStreamState(runId: string | null = this.#session.run.getRunId()): StreamState {
     return {
+      runId,
       currentMessage: this.createEmptyAssistantMessage(),
       isSuspended: false,
       textContentById: new Map<string, { index: number; text: string }>(),
@@ -491,6 +494,7 @@ export class SessionRunEngine {
     requestContext: RequestContext,
     agent: Agent = this.#machinery.getAgent(),
   ): Promise<{ message: MastraDBMessage; suspended?: boolean } | undefined> {
+    state.runId ??= chunk.runId ?? this.#session.run.getRunId();
     if ('runId' in chunk && chunk.runId) {
       this.#session.run.setRunId({ runId: chunk.runId });
     }
@@ -524,12 +528,21 @@ export class SessionRunEngine {
       case 'text-delta': {
         const textState = state.textContentById.get(getString(getPayload(chunk).id) ?? '');
         if (textState) {
-          textState.text += getString(getPayload(chunk).text) ?? '';
+          const textDelta = getString(getPayload(chunk).text) ?? '';
+          textState.text += textDelta;
           const textContent = state.currentMessage.content.parts[textState.index];
           if (textContent && textContent.type === 'text') {
             textContent.text = textState.text;
           }
           this.#session.emit({ type: 'message_update', message: state.currentMessage });
+          if (textDelta && state.runId && (!chunk.runId || chunk.runId === state.runId)) {
+            this.#session.emit({
+              type: 'text_delta',
+              runId: state.runId,
+              messageId: state.currentMessage.id,
+              textDelta,
+            });
+          }
         }
         break;
       }
@@ -1295,7 +1308,7 @@ export class SessionRunEngine {
 
         if (!currentRun) {
           const runId = ('runId' in chunk ? chunk.runId : undefined) ?? subscription.activeRunId();
-          currentRun = this.createStreamState();
+          currentRun = this.createStreamState(runId ?? null);
           this.#session.run.nextOperation();
           this.#session.run.ensureAbortController();
           this.#session.run.setRunId({ runId });
