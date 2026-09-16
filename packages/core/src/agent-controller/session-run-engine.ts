@@ -358,7 +358,9 @@ export class SessionRunEngine {
       runId?: string;
       providerMetadata?: MastraProviderMetadata;
     },
+    isCurrent: () => boolean,
   ): Promise<void> {
+    if (!isCurrent()) return;
     const { toolCallId, toolName, result, isError } = outcome;
     if (outcome.preliminary) {
       this.#session.emit({ type: 'tool_update', toolCallId, partialResult: result, preliminary: true });
@@ -371,7 +373,9 @@ export class SessionRunEngine {
     let targetMessage = state.currentMessage;
     if (outcome.messageId && outcome.messageId !== targetMessage.id) {
       const storage = await this.#machinery.getMessageStorage?.();
+      if (!isCurrent()) return;
       const found = storage ? await storage.listMessagesById({ messageIds: [outcome.messageId] }) : undefined;
+      if (!isCurrent()) return;
       const source = found?.messages.find(message => message.id === outcome.messageId);
       if (
         !source ||
@@ -686,31 +690,39 @@ export class SessionRunEngine {
 
       case 'tool-result': {
         const toolResult = getPayload(chunk);
-        await this.applyToolOutcome(state, {
-          toolCallId: getString(toolResult.toolCallId) ?? '',
-          messageId: getString(toolResult.messageId),
-          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
-          toolName: getString(toolResult.toolName) ?? '',
-          result: getDisplayTransform(chunk.metadata, 'output-available', toolResult.result),
-          isError: getBoolean(toolResult.isError, false),
-          preliminary: getBoolean(toolResult.preliminary, false),
-          providerMetadata: isProviderMetadata(toolResult.providerMetadata) ? toolResult.providerMetadata : undefined,
-        });
+        await this.applyToolOutcome(
+          state,
+          {
+            toolCallId: getString(toolResult.toolCallId) ?? '',
+            messageId: getString(toolResult.messageId),
+            runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
+            toolName: getString(toolResult.toolName) ?? '',
+            result: getDisplayTransform(chunk.metadata, 'output-available', toolResult.result),
+            isError: getBoolean(toolResult.isError, false),
+            preliminary: getBoolean(toolResult.preliminary, false),
+            providerMetadata: isProviderMetadata(toolResult.providerMetadata) ? toolResult.providerMetadata : undefined,
+          },
+          isCurrent,
+        );
         break;
       }
 
       case 'tool-error': {
         const toolError = getPayload(chunk);
         // Error instances JSON-serialize to `{}`; keep the message so failure text survives SSE + persistence.
-        await this.applyToolOutcome(state, {
-          toolCallId: getString(toolError.toolCallId) ?? '',
-          messageId: getString(toolError.messageId),
-          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
-          toolName: getString(toolError.toolName) ?? '',
-          result: getDisplayTransform(chunk.metadata, 'error', getErrorFromUnknown(toolError.error).message),
-          isError: true,
-          providerMetadata: isProviderMetadata(toolError.providerMetadata) ? toolError.providerMetadata : undefined,
-        });
+        await this.applyToolOutcome(
+          state,
+          {
+            toolCallId: getString(toolError.toolCallId) ?? '',
+            messageId: getString(toolError.messageId),
+            runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
+            toolName: getString(toolError.toolName) ?? '',
+            result: getDisplayTransform(chunk.metadata, 'error', getErrorFromUnknown(toolError.error).message),
+            isError: true,
+            providerMetadata: isProviderMetadata(toolError.providerMetadata) ? toolError.providerMetadata : undefined,
+          },
+          isCurrent,
+        );
         break;
       }
 

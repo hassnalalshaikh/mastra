@@ -2,6 +2,7 @@ import { MockLanguageModelV2 } from '@internal/ai-sdk-v5/test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Agent } from '../../agent';
 import { RequestContext } from '../../request-context';
+import { InMemoryStore } from '../../storage/mock';
 import { Workspace } from '../../workspace';
 import { LocalFilesystem } from '../../workspace/filesystem/local-filesystem';
 import type { SessionMachinery } from '../session';
@@ -69,104 +70,144 @@ describe('SessionRunEngine — abort deadline', () => {
     vi.useRealTimers();
   });
 
-  it.each(['iterator', 'decline-resolve', 'decline-reject'] as const)(
-    'opens a fresh stream after steering times out and ignores late %s work',
-    async lateWork => {
-      vi.useFakeTimers();
-      const { agent, engine, events, machinery, session } = createHarness();
-      session.thread.connect(undefined, session);
-      let releaseOld!: () => void;
-      const oldBlocked = new Promise<void>(resolve => {
-        releaseOld = resolve;
-      });
-      const decline = vi.spyOn(session, 'declineToolCall').mockImplementation(async () => {
-        await oldBlocked;
-        if (lateWork === 'decline-reject') throw new Error('late decline failure');
-      });
-      const oldSubscription = {
-        stream: (async function* () {
-          yield chunk({ type: 'text-start', runId: 'old-run', payload: { id: 'old-text' } });
-          if (lateWork !== 'iterator') {
-            yield chunk({
-              type: 'tool-call-approval',
-              runId: 'old-run',
-              payload: {
-                toolCallId: 'old-tool',
-                toolName: 'write_file',
-                args: {},
-                toolApprovalPolicy: 'manual',
-              },
-            });
-          }
-          await oldBlocked;
-          yield chunk({ type: 'text-delta', runId: 'old-run', payload: { id: 'old-text', text: 'stale output' } });
-        })(),
-        activeRunId: () => 'old-run',
-        abort: () => true,
-        unsubscribe: vi.fn(),
-      };
-      let finishNext!: () => void;
-      const nextBlocked = new Promise<void>(resolve => {
-        finishNext = resolve;
-      });
-      const nextSubscription = {
-        stream: (async function* () {
-          yield chunk({ type: 'text-start', runId: 'next-run', payload: { id: 'next-text' } });
+  it.each([
+    'iterator',
+    'decline-resolve',
+    'decline-reject',
+    ...(['tool-result', 'tool-error'] as const).flatMap(type =>
+      ['storage', 'message'].flatMap(stage => ['resolve', 'reject'].map(ending => `${type}-${stage}-${ending}`)),
+    ),
+  ] as const)('opens a fresh stream after steering times out and ignores late %s work', async lateWork => {
+    vi.useFakeTimers();
+    const { agent, engine, events, machinery, session } = createHarness();
+    session.thread.connect(undefined, session);
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>(resolve => {
+      releaseOld = resolve;
+    });
+    const decline = vi.spyOn(session, 'declineToolCall').mockImplementation(async () => {
+      await oldBlocked;
+      if (lateWork === 'decline-reject') throw new Error('late decline failure');
+    });
+    const storage = await new InMemoryStore().getStore('memory');
+    const oldMessage = {
+      id: 'old-source',
+      role: 'assistant' as const,
+      type: 'text' as const,
+      createdAt: new Date(),
+      threadId: 'thread-1',
+      resourceId: 'resource-1',
+      content: { format: 2 as const, parts: [] },
+    };
+    const waitForStorage = async () => {
+      await oldBlocked;
+      if (lateWork.endsWith('reject')) throw new Error('late storage failure');
+    };
+    machinery.getMessageStorage = async () => {
+      if (lateWork.includes('-storage-')) await waitForStorage();
+      return storage;
+    };
+    vi.spyOn(storage!, 'listMessagesById').mockImplementation(async () => {
+      if (lateWork.includes('-message-')) await waitForStorage();
+      return { messages: [oldMessage] };
+    });
+    const oldSubscription = {
+      stream: (async function* () {
+        yield chunk({ type: 'text-start', runId: 'old-run', payload: { id: 'old-text' } });
+        if (lateWork.startsWith('decline-')) {
           yield chunk({
-            type: 'text-delta',
-            runId: 'next-run',
-            payload: { id: 'next-text', text: 'steered response' },
+            type: 'tool-call-approval',
+            runId: 'old-run',
+            payload: {
+              toolCallId: 'old-tool',
+              toolName: 'write_file',
+              args: {},
+              toolApprovalPolicy: 'manual',
+            },
           });
-          await nextBlocked;
-          yield chunk({ type: 'finish', runId: 'next-run', payload: { stepResult: { reason: 'stop' } } });
-        })(),
-        activeRunId: () => 'next-run',
-        abort: () => true,
-        unsubscribe: vi.fn(),
-      };
-      const subscribe = vi.fn(async () => nextSubscription);
-      machinery.subscribeToThread = subscribe;
-      const dispatch = vi.spyOn(agent, 'queueMessage').mockReturnValue({
-        accepted: Promise.resolve({ action: 'deliver', runId: 'next-run' }),
-        signal: { type: 'user', contents: 'Change course.' },
-      } as ReturnType<Agent['queueMessage']>);
-      session.stream.attach({
-        subscription: oldSubscription,
-        agent,
-        key: SessionStream.keyFor({ agent, resourceId: 'resource-1', threadId: 'thread-1' }),
-      });
-      const processed = engine.processSubscribedThreadStream(oldSubscription);
-      await vi.advanceTimersByTimeAsync(0);
-      await session.steer({ content: 'Change course.' });
-      await vi.advanceTimersByTimeAsync(5_000);
-      await processed;
+        }
+        if (lateWork.startsWith('tool-')) {
+          yield chunk({
+            type: lateWork.startsWith('tool-result-') ? 'tool-result' : 'tool-error',
+            runId: 'old-run',
+            payload: {
+              toolCallId: 'old-tool',
+              toolName: 'read_file',
+              messageId: 'old-source',
+              result: 'stale output',
+              error: new Error('stale output'),
+            },
+          } as StreamChunk);
+        }
+        await oldBlocked;
+        yield chunk({ type: 'text-delta', runId: 'old-run', payload: { id: 'old-text', text: 'stale output' } });
+      })(),
+      activeRunId: () => 'old-run',
+      abort: () => true,
+      unsubscribe: vi.fn(),
+    };
+    let finishNext!: () => void;
+    const nextBlocked = new Promise<void>(resolve => {
+      finishNext = resolve;
+    });
+    const nextSubscription = {
+      stream: (async function* () {
+        yield chunk({ type: 'text-start', runId: 'next-run', payload: { id: 'next-text' } });
+        yield chunk({
+          type: 'text-delta',
+          runId: 'next-run',
+          payload: { id: 'next-text', text: 'steered response' },
+        });
+        await nextBlocked;
+        yield chunk({ type: 'finish', runId: 'next-run', payload: { stepResult: { reason: 'stop' } } });
+      })(),
+      activeRunId: () => 'next-run',
+      abort: () => true,
+      unsubscribe: vi.fn(),
+    };
+    const subscribe = vi.fn(async () => nextSubscription);
+    machinery.subscribeToThread = subscribe;
+    const dispatch = vi.spyOn(agent, 'queueMessage').mockReturnValue({
+      accepted: Promise.resolve({ action: 'deliver', runId: 'next-run' }),
+      signal: { type: 'user', contents: 'Change course.' },
+    } as ReturnType<Agent['queueMessage']>);
+    session.stream.attach({
+      subscription: oldSubscription,
+      agent,
+      key: SessionStream.keyFor({ agent, resourceId: 'resource-1', threadId: 'thread-1' }),
+    });
+    const processed = engine.processSubscribedThreadStream(oldSubscription);
+    await vi.advanceTimersByTimeAsync(0);
+    await session.steer({ content: 'Change course.' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await processed;
 
-      expect(subscribe).toHaveBeenCalledTimes(1);
-      expect(dispatch).toHaveBeenCalledTimes(1);
-      expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
-      expect(nextSubscription.unsubscribe).not.toHaveBeenCalled();
-      expect(session.followUps.count()).toBe(0);
-      expect(events.filter(event => event.type === 'agent_start')).toHaveLength(2);
-      releaseOld();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
-      expect(JSON.stringify(events)).not.toContain('stale output');
-      expect(events.filter(event => event.type === 'error')).toHaveLength(0);
-      expect(events.filter(event => event.type === 'tool_end')).toHaveLength(0);
-      expect(decline).toHaveBeenCalledTimes(lateWork === 'iterator' ? 0 : 1);
-      expect(session.run.isAbortRequested()).toBe(false);
-      expect(events.filter(event => event.type === 'agent_end')).toEqual([{ type: 'agent_end', reason: 'aborted' }]);
-      finishNext();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(events.filter(event => event.type === 'agent_end')).toEqual([
-        { type: 'agent_end', reason: 'aborted' },
-        { type: 'agent_end', reason: 'complete' },
-      ]);
-      session.stream.detach();
-      dispatch.mockRestore();
-      decline.mockRestore();
-    },
-  );
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
+    expect(nextSubscription.unsubscribe).not.toHaveBeenCalled();
+    expect(session.followUps.count()).toBe(0);
+    expect(events.filter(event => event.type === 'agent_start')).toHaveLength(2);
+    const completedBeforeRelease = events.filter(event => event.type === 'tool_end').length;
+    releaseOld();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('stale output');
+    expect(events.filter(event => event.type === 'error')).toHaveLength(0);
+    expect(events.filter(event => event.type === 'tool_end')).toHaveLength(completedBeforeRelease);
+    expect(decline).toHaveBeenCalledTimes(lateWork.startsWith('decline-') ? 1 : 0);
+    expect(session.run.isAbortRequested()).toBe(false);
+    expect(events.filter(event => event.type === 'agent_end')).toEqual([{ type: 'agent_end', reason: 'aborted' }]);
+    finishNext();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.filter(event => event.type === 'agent_end')).toEqual([
+      { type: 'agent_end', reason: 'aborted' },
+      { type: 'agent_end', reason: 'complete' },
+    ]);
+    session.stream.detach();
+    dispatch.mockRestore();
+    decline.mockRestore();
+  });
 
   it.each(['finish', 'iterator-error', 'chunk-error'] as const)(
     'finalizes once when %s end hooks outlast the abort deadline',
