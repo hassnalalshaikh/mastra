@@ -5,7 +5,10 @@ import { APICallError } from '@internal/ai-sdk-v5';
 import type { CallSettings, StepResult, ToolChoice, ToolSet } from '@internal/ai-sdk-v5';
 import type { StructuredOutputOptions } from '../../../agent';
 import type { MessageList } from '../../../agent/message-list';
-import { withToolCompletionMetadata } from '../../../agent/message-list/tool-completion';
+import {
+  ToolCompletionPersistenceError,
+  withToolCompletionMetadata,
+} from '../../../agent/message-list/tool-completion';
 import { TripWire } from '../../../agent/trip-wire';
 import { isSupportedLanguageModel, supportedLanguageModelSpecifications } from '../../../agent/utils';
 import { ErrorCategory, ErrorDomain, MastraError } from '../../../error';
@@ -90,6 +93,7 @@ import { AgenticRunState } from '../run-state';
 import { llmIterationOutputSchema } from '../schema';
 import { buildMessagesFromChunks } from './build-messages-from-chunks';
 import type { CollectedChunk } from './build-messages-from-chunks';
+import { flushCommittedToolResult } from './llm-mapping-step';
 import type { PendingProviderToolCall } from './provider-tool-spans';
 import { endPendingProviderToolSpan } from './provider-tool-spans';
 import { resolveConfiguredToolCallConcurrency, updateToolCallForeachConcurrency } from './tool-call-concurrency';
@@ -163,6 +167,7 @@ type ProcessOutputStreamResult = {
 type ProcessOutputStreamOptions<OUTPUT = undefined> = {
   tools?: ToolSet;
   runId: string;
+  commitProviderResult?: (chunk: ChunkType, chunks: CollectedChunk[]) => Promise<void>;
   messageId: string;
   includeRawChunks?: boolean;
   messageList: MessageList;
@@ -512,6 +517,7 @@ function buildTripWireBailResponse<OUTPUT = undefined, TOOLS extends ToolSet = T
 
 async function processOutputStream<OUTPUT = undefined>({
   tools,
+  commitProviderResult,
   messageId,
   messageList,
   outputStream,
@@ -1053,7 +1059,15 @@ async function processOutputStream<OUTPUT = undefined>({
           // post-processor-mutated) value. For same-stream results no matching
           // part exists yet — updateToolInvocation returns false and
           // buildMessagesFromChunks handles the merge.
-          chunk.payload.providerMetadata = withToolCompletionMetadata(chunk.payload.providerMetadata, chunk.runId);
+          chunk.payload.providerMetadata = chunk.payload.preliminary
+            ? {
+                ...chunk.payload.providerMetadata,
+                mastra: {
+                  ...(chunk.payload.providerMetadata?.mastra as Record<string, unknown> | undefined),
+                  toolExecutionPending: true,
+                },
+              }
+            : withToolCompletionMetadata(chunk.payload.providerMetadata, chunk.runId);
           messageList.updateToolInvocation({
             type: 'tool-invocation',
             toolInvocation: {
@@ -1085,6 +1099,7 @@ async function processOutputStream<OUTPUT = undefined>({
             pendingProviderToolCallsByToolCallId.delete(chunk.payload.toolCallId);
           }
         }
+        await commitProviderResult?.(chunk as ChunkType, collectedChunks);
         safeEnqueue(controller, chunk);
         break;
       }
@@ -1157,6 +1172,7 @@ function executeStreamWithFallbackModels<T>(
         finalResult = result;
         done = true;
       } catch (err) {
+        if (err instanceof ToolCompletionPersistenceError) throw err;
         // TripWire errors should be re-thrown immediately - they are intentional aborts
         // from processors (e.g., processInputStep) and should not trigger model retries
         if (err instanceof TripWire) {
@@ -1830,6 +1846,24 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
         try {
           const { collectedChunks, toolResultTripwire: streamToolResultTripwire } = await processOutputStream({
             outputStream,
+            commitProviderResult: async (chunk, chunks) => {
+              for (const message of buildMessagesFromChunks({
+                chunks,
+                messageId: currentStep.messageId,
+                tools: currentStep.tools,
+                responseModelMetadata: buildResponseModelMetadata(
+                  runState,
+                  currentStep.model,
+                  modelSpanTracker?.getTracingContext() ?? tracingContext,
+                ),
+              }))
+                messageList.add(message, 'response');
+              try {
+                await flushCommittedToolResult(chunk, messageList, scopeCtx);
+              } catch (error) {
+                throw new ToolCompletionPersistenceError(error);
+              }
+            },
             includeRawChunks,
             tools: currentStep.tools,
             runId,
@@ -1956,6 +1990,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
             }
           }
         } catch (error) {
+          if (error instanceof ToolCompletionPersistenceError) throw error;
           // Force-close any server tool spans opened during the failed stream
           // before abort/error/fallback handling can return or throw.
           cleanupProviderToolSpans(true);

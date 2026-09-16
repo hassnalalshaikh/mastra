@@ -21,3 +21,11 @@ export function getToolCompletion(
   if (typeof completedAt !== 'string' || !Number.isFinite(Date.parse(completedAt))) return;
   return { completedAt, ...(typeof value.runId === 'string' ? { runId: value.runId } : {}) };
 }
+
+/** Storage failure must not trigger another provider execution. */
+export class ToolCompletionPersistenceError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'ToolCompletionPersistenceError';
+  }
+}

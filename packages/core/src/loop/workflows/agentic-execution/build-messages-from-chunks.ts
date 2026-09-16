@@ -58,7 +58,7 @@ export function buildMessagesFromChunks({
     { result: any; args: any; providerMetadata: any; providerExecuted: boolean | undefined; toolName: string }
   >();
   for (const chunk of chunks) {
-    if (chunk.type === 'tool-result' && chunk.payload.result != null) {
+    if (chunk.type === 'tool-result' && 'result' in chunk.payload) {
       const p = chunk.payload as ToolResultPayload;
       toolResults.set(p.toolCallId, {
         result: p.result,

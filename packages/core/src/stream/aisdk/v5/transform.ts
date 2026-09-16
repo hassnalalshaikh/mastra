@@ -288,6 +288,9 @@ export function convertFullStreamChunkToMastra(value: StreamPart, ctx: { runId: 
           toolCallId: value.toolCallId,
           toolName: value.toolName,
           result: value.result,
+          ...(typeof (value as { preliminary?: boolean }).preliminary === 'boolean'
+            ? { preliminary: (value as { preliminary?: boolean }).preliminary }
+            : {}),
           isError: value.isError,
           providerExecuted: value.providerExecuted,
           providerMetadata: value.providerMetadata,

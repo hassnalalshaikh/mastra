@@ -61,6 +61,7 @@ function makeInitData(overrides: Record<string, any> = {}) {
 
 function makeMessageList() {
   return {
+    get: { all: { db: vi.fn().mockReturnValue([]) } },
     updateToolInvocation: vi.fn().mockReturnValue(true),
     updateMessageMetadataByToolCallId: vi.fn().mockReturnValue(true),
     add: vi.fn(),

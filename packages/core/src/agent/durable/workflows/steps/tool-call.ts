@@ -22,13 +22,15 @@ import { ChunkFrom } from '../../../../stream/types';
 import { findProviderToolByName } from '../../../../tools/provider-tool-utils';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../../tools/resumable-input';
 import { executionStartHook } from '../../../../tools/tool-execution-events';
-import { executeToolWithPolicy } from '../../../../tools/tool-policy-execution';
+import { executeToolWithPolicy, isToolPolicyRejection } from '../../../../tools/tool-policy-execution';
+import { isValidationError } from '../../../../tools/validation';
 import { PUBSUB_SYMBOL } from '../../../../workflows/constants';
 import type { SuspendOptions } from '../../../../workflows/step';
 import { createStep } from '../../../../workflows/workflow';
 import { stopGoalActivity } from '../../../goal';
 import { MessageList } from '../../../message-list';
 import type { SerializedMessageListState } from '../../../message-list/state';
+import { withToolCompletionMetadata } from '../../../message-list/tool-completion';
 import type { SaveQueueManager } from '../../../save-queue';
 import { resolveDeclineReason } from '../../../tool-approval';
 import { DurableStepIds } from '../../constants';
@@ -40,7 +42,6 @@ import type {
   AgentSuspendedEventData,
   RunRegistryEntry,
 } from '../../types';
-import { applyToolPayloadTransformToChunk } from '../../utils/apply-tool-payload-transform';
 import { rebuildRunToolsFromMastra, resolveTool, toolRequiresApproval } from '../../utils/resolve-runtime';
 import { serializeError } from '../../utils/serialize-state';
 import { normalizeModelOutput } from './normalize-model-output';
@@ -66,6 +67,8 @@ const durableToolCallInputSchema = z.object({
  */
 const durableToolCallOutputSchema = durableToolCallInputSchema.extend({
   aborted: z.boolean().optional(),
+  preliminary: z.boolean().optional(),
+  isError: z.boolean().optional(),
   result: z.any().optional(),
   modelOutputComputed: z.boolean().optional(),
   error: z
@@ -95,7 +98,7 @@ const durableToolCallOutputSchema = durableToolCallInputSchema.extend({
  * guard on the durable finish path — a readOnly run shouldn't get a thread
  * created or messages written just because it happened to suspend mid-run.
  */
-async function flushMessagesBeforeSuspension({
+export async function flushMessagesBeforeSuspension({
   saveQueueManager,
   messageList,
   memory,
@@ -144,7 +147,7 @@ async function flushMessagesBeforeSuspension({
  *
  * Mirrors the regular agent's `processAndEnqueueChunk` in llm-mapping-step.ts.
  */
-async function processChunkThroughOutputProcessors(
+export async function processChunkThroughOutputProcessors(
   chunk: ChunkType,
   registryEntry: RunRegistryEntry | undefined,
   pubsub: PubSub | undefined,
@@ -220,7 +223,7 @@ async function processChunkThroughOutputProcessors(
  * 2. Checks if approval is required (global or per-tool)
  * 3. If approval required, emits suspended event, persists messages, and suspends
  * 4. Executes the tool with a suspend callback for in-execution suspension
- * 5. Emits tool-result or tool-error chunks via PubSub
+ * 5. Returns results for the mapping step to persist before publishing them
  * 6. Returns the result or error
  *
  * Tool suspension is handled via workflow suspend/resume mechanism:
@@ -489,14 +492,6 @@ export function createDurableToolCallStep() {
                 name: 'ToolNotFoundError',
                 message: `Tool "${toolName}" not found.${availableToolsStr}. Call tools by their exact name only — never add prefixes, namespaces, or colons.`,
               };
-        if (pubsub) {
-          await emitChunkEvent(pubsub, runId, {
-            type: 'tool-error',
-            runId,
-            from: ChunkFrom.AGENT,
-            payload: { toolCallId, toolName, args, error },
-          });
-        }
         return {
           ...typedInput,
           error,
@@ -805,37 +800,6 @@ export function createDurableToolCallStep() {
             approved: false as const,
             reason: resolveDeclineReason(approvalDecision),
           };
-          if (pubsub) {
-            try {
-              const deniedChunk = await applyToolPayloadTransformToChunk(
-                {
-                  type: 'tool-output-denied' as const,
-                  runId,
-                  from: ChunkFrom.AGENT,
-                  payload: { toolCallId, toolName, args, approval },
-                },
-                {
-                  policy: registryEntry?.toolPayloadTransform,
-                  tools: registryEntry?.tools,
-                  logger: logger as any,
-                },
-              );
-              const processed = await processChunkThroughOutputProcessors(
-                deniedChunk as ChunkType,
-                registryEntry,
-                pubsub,
-                runId,
-                initData.agentId,
-                logger,
-                messageList,
-              );
-              if (processed) {
-                await emitChunkEvent(pubsub, runId, processed);
-              }
-            } catch (emitError) {
-              logger?.warn?.(`[DurableAgent] Failed to emit tool-output-denied chunk for ${toolName}: ${emitError}`);
-            }
-          }
           return {
             ...typedInput,
             approval,
@@ -949,7 +913,6 @@ export function createDurableToolCallStep() {
       // emitting a spurious tool-result after tool.execute() returns (the
       // workflow engine's suspend() sets an internal flag but does not throw,
       // so execution continues past the suspend call).
-      let wasSuspended = false;
 
       // Forward abort signal from the run registry so tools can observe
       // cancellation (mirrors the non-durable tool-call-step).
@@ -1037,7 +1000,6 @@ export function createDurableToolCallStep() {
               flush: doFlush,
               isAborted,
               publish: async () => {
-                wasSuspended = true;
                 if (pubsub) {
                   await emitChunkEvent(pubsub, runId, {
                     type: 'tool-call-approval',
@@ -1109,7 +1071,6 @@ export function createDurableToolCallStep() {
               flush: doFlush,
               isAborted,
               publish: async () => {
-                wasSuspended = true;
                 if (pubsub) {
                   await emitChunkEvent(pubsub, runId, {
                     type: 'tool-call-suspended',
@@ -1208,6 +1169,23 @@ export function createDurableToolCallStep() {
                   if (!pubsub) return;
                   try {
                     const bgRunId = chunk.payload.runId;
+                    const source = messageList?.get.all
+                      .db()
+                      .findLast(message =>
+                        message.content.parts.some(
+                          part =>
+                            part.type === 'tool-invocation' &&
+                            part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+                        ),
+                      );
+                    const part = source?.content.parts.find(
+                      part =>
+                        part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+                    );
+                    const outcomeIdentity = {
+                      messageId: source?.id,
+                      providerMetadata: part?.type === 'tool-invocation' ? part.providerMetadata : undefined,
+                    };
                     // Emit tool-call chunk so UIs can render the invocation inline
                     if (bgRunId !== runId || (bgRunId === runId && resumeData)) {
                       void emitChunkEvent(pubsub, bgRunId, {
@@ -1232,6 +1210,7 @@ export function createDurableToolCallStep() {
                           toolName: chunk.payload.toolName,
                           args: cleanedArgs,
                           result: chunk.payload.result,
+                          ...outcomeIdentity,
                         },
                       });
                     } else if (chunk.type === 'background-task-failed') {
@@ -1243,6 +1222,7 @@ export function createDurableToolCallStep() {
                           toolCallId: chunk.payload.toolCallId,
                           toolName: chunk.payload.toolName,
                           error: chunk.payload.error,
+                          ...outcomeIdentity,
                           args: cleanedArgs,
                         },
                       });
@@ -1263,6 +1243,7 @@ export function createDurableToolCallStep() {
                   const updated = messageList.updateToolInvocation(
                     {
                       type: 'tool-invocation',
+                      providerMetadata: withToolCompletionMetadata(undefined, params.runId ?? runId),
                       toolInvocation: {
                         // A failed background task is recorded as `output-error` with the
                         // message in `errorText`; a successful one keeps `state: 'result'`.
@@ -1401,6 +1382,7 @@ export function createDurableToolCallStep() {
               return {
                 ...typedInput,
                 args: cleanedArgs,
+                preliminary: true,
                 result: `Background task restarted. Task ID: ${task.id}. The tool "${toolName}" is running in the background. You will be notified when it completes.`,
               };
             }
@@ -1507,50 +1489,13 @@ export function createDurableToolCallStep() {
           }
         }
 
-        // Emit tool-result chunk (non-fatal — result is returned regardless).
-        // Skip emission when the tool called suspend() — the workflow engine's
-        // suspend() sets a flag but does NOT throw, so execution continues past
-        // the suspend call and tool.execute() returns undefined. Emitting a
-        // tool-result with undefined would produce a spurious entry that
-        // confuses downstream consumers (e.g. MastraModelOutput.toolResults).
-        if (pubsub && !wasSuspended) {
-          try {
-            const resultChunk = await applyToolPayloadTransformToChunk(
-              {
-                type: 'tool-result' as const,
-                runId,
-                from: ChunkFrom.AGENT,
-                payload: { toolCallId, toolName, args, result },
-              },
-              {
-                policy: registryEntry?.toolPayloadTransform,
-                tools: registryEntry?.tools,
-                logger: logger as any,
-              },
-            );
-            // Run through output processors (tripwire/blocking/redaction)
-            const processed = await processChunkThroughOutputProcessors(
-              resultChunk,
-              registryEntry,
-              pubsub,
-              runId,
-              initData.agentId,
-              logger,
-              messageList,
-            );
-            if (processed) {
-              await emitChunkEvent(pubsub, runId, processed);
-            }
-          } catch (emitError) {
-            logger?.warn?.(`[DurableAgent] Failed to emit tool-result chunk for ${toolName}: ${emitError}`);
-          }
-        }
-
+        // The mapping step persists the result and its completion index before publication.
         return {
           ...typedInput,
           providerMetadata,
           result,
           modelOutputComputed,
+          isError: isToolPolicyRejection(result) || isValidationError(result),
           ...(approvalGrant ?? {}),
         };
       } catch (error) {
@@ -1565,40 +1510,6 @@ export function createDurableToolCallStep() {
           throw error;
         }
         const toolError = serializeError(error);
-
-        // Emit tool-error chunk (non-fatal — error result is returned regardless)
-        if (pubsub && !wasSuspended) {
-          try {
-            const errorChunk = await applyToolPayloadTransformToChunk(
-              {
-                type: 'tool-error' as const,
-                runId,
-                from: ChunkFrom.AGENT,
-                payload: { toolCallId, toolName, args, error: toolError },
-              },
-              {
-                policy: registryEntry?.toolPayloadTransform,
-                tools: registryEntry?.tools,
-                logger: logger as any,
-              },
-            );
-            // Run through output processors (tripwire/blocking/redaction)
-            const processed = await processChunkThroughOutputProcessors(
-              errorChunk,
-              registryEntry,
-              pubsub,
-              runId,
-              initData.agentId,
-              logger,
-              messageList,
-            );
-            if (processed) {
-              await emitChunkEvent(pubsub, runId, processed);
-            }
-          } catch (emitError) {
-            logger?.warn?.(`[DurableAgent] Failed to emit tool-error chunk for ${toolName}: ${emitError}`);
-          }
-        }
 
         return {
           ...typedInput,

@@ -33,13 +33,14 @@ import { MastraModelOutput } from '../../../../stream/base/output';
 import type { ChunkType, TextDeltaPayload, ToolCallPayload } from '../../../../stream/types';
 import { ChunkFrom } from '../../../../stream/types';
 import { findProviderToolByName, inferProviderExecuted } from '../../../../tools/provider-tool-utils';
-import { filterToolsByPolicy } from '../../../../tools/tool-policy-execution';
 import type { ToolToConvert } from '../../../../tools/tool-builder/builder';
+import { filterToolsByPolicy } from '../../../../tools/tool-policy-execution';
 import { isMastraTool } from '../../../../tools/toolchecks';
 import type { CoreTool } from '../../../../tools/types';
 import { createMastraProxy, makeCoreTool } from '../../../../utils';
 import { PUBSUB_SYMBOL } from '../../../../workflows/constants';
 import { createStep } from '../../../../workflows/workflow';
+import { ToolCompletionPersistenceError, withToolCompletionMetadata } from '../../../message-list/tool-completion';
 import { TripWire } from '../../../trip-wire';
 import { isSupportedLanguageModel } from '../../../utils';
 import { ensureRemoteAbortListener } from '../../abort-transport';
@@ -49,6 +50,7 @@ import { emitChunkEvent, emitStepStartEvent } from '../../stream-adapter';
 import type { DurableAgenticWorkflowInput, DurableLLMStepOutput, DurableToolCallInput } from '../../types';
 import { applyToolPayloadTransformToChunk } from '../../utils/apply-tool-payload-transform';
 import { resolveRuntimeDependencies, resolveModelFromListEntry } from '../../utils/resolve-runtime';
+import { flushMessagesBeforeSuspension } from './tool-call';
 
 /**
  * Input schema for the durable LLM execution step
@@ -1150,6 +1152,12 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 // any tool-level `transformToolPayload` added or replaced for the
                 // current step is honoured, instead of being silently skipped.
                 const transformTools = currentTools as unknown as Record<string, CoreTool> | undefined;
+                if (rawChunk.type === 'tool-result' && !rawChunk.payload.preliminary) {
+                  rawChunk.payload.providerMetadata = withToolCompletionMetadata(
+                    rawChunk.payload.providerMetadata,
+                    runId,
+                  );
+                }
                 const clientChunk =
                   registryEntry?.toolPayloadTransform || transformTools
                     ? await applyToolPayloadTransformToChunk(rawChunk, {
@@ -1213,6 +1221,48 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                   });
                 }
 
+                // Collect every chunk for post-stream message building and the
+                // processLLMResponse hook. Always collect — reasoning parts
+                // (including empty spans with providerMetadata carrying
+                // OpenAI itemIds) are required to correctly reconstruct the
+                // assistant message and preserve pairing with subsequent
+                // tool-calls (#19365).
+                collectedChunks.push({
+                  type: rawChunk.type,
+                  payload: 'payload' in rawChunk ? rawChunk.payload : undefined,
+                  metadata: (rawChunk as { metadata?: Record<string, unknown> }).metadata,
+                });
+
+                if (rawChunk.type === 'tool-result') {
+                  materializeStreamedMessages();
+                  try {
+                    await flushMessagesBeforeSuspension({
+                      saveQueueManager: registryEntry?.saveQueueManager,
+                      messageList,
+                      memory: registryEntry?.memory,
+                      threadId: typedInput.state.threadId,
+                      resourceId: typedInput.state.resourceId,
+                      memoryConfig: typedInput.state.memoryConfig,
+                      threadExists: typedInput.state.threadExists,
+                      onThreadCreated: () => {
+                        typedInput.state.threadExists = true;
+                      },
+                    });
+                  } catch (error) {
+                    throw new ToolCompletionPersistenceError(error);
+                  }
+                  const source = messageList.get.all
+                    .db()
+                    .findLast(message =>
+                      message.content.parts.some(
+                        part =>
+                          part.type === 'tool-invocation' &&
+                          part.toolInvocation.toolCallId === rawChunk.payload.toolCallId,
+                      ),
+                    );
+                  if (source && clientChunk.type === 'tool-result') clientChunk.payload.messageId = source.id;
+                }
+
                 // Forward every chunk to the client ('finish' was rewritten to 'step-finish' above).
                 // Skip 'error' chunks — they are handled internally by the retry/fallback
                 // logic and must not be emitted to the client stream. When all models are
@@ -1231,18 +1281,6 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                     await emitChunkEvent(pubsub, runId, clientChunk);
                   }
                 }
-
-                // Collect every chunk for post-stream message building and the
-                // processLLMResponse hook. Always collect — reasoning parts
-                // (including empty spans with providerMetadata carrying
-                // OpenAI itemIds) are required to correctly reconstruct the
-                // assistant message and preserve pairing with subsequent
-                // tool-calls (#19365).
-                collectedChunks.push({
-                  type: rawChunk.type,
-                  payload: 'payload' in rawChunk ? rawChunk.payload : undefined,
-                  metadata: (rawChunk as { metadata?: Record<string, unknown> }).metadata,
-                });
 
                 // Process different chunk types — always from the raw chunk so
                 // internal state (tool args, finish reason, usage, metadata) is
@@ -1416,6 +1454,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
               // continues, the deferred result creates the real span in a later invocation.
               cleanupToolObservabilitySpans(!(toolCalls.length > 0 && finishReason !== 'stop'));
             } catch (error) {
+              if (error instanceof ToolCompletionPersistenceError) throw error;
               cleanupToolObservabilitySpans(true);
               logger?.error?.('Error processing LLM stream', { error, runId });
 
@@ -1779,6 +1818,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
             // Success - return the output
             return output;
           } catch (error) {
+            if (error instanceof ToolCompletionPersistenceError) throw error;
             // TripWire errors from processLLMRequest / processLLMResponse are
             // guardrail/cache processor decisions, not model failures. They
             // must not be retried or fall back to the next model.

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Agent } from '../agent';
 import { createDurableAgent } from '../agent/durable';
 import { globalRunRegistry } from '../agent/durable/run-registry';
+import { TOOL_COMPLETION_INDEX_TYPE } from '../agent/message-list/tool-completion-index';
 import { Mastra } from '../mastra';
 import { InMemoryStore } from '../storage';
 import { createTool } from '../tools';
@@ -251,4 +252,104 @@ describe('native suspension waitingFor', () => {
     },
     25_000,
   );
+});
+
+describe('durable completed output delivery', () => {
+  it('commits callback results and the display index before a cold resumed tool_end', async () => {
+    const f = fixture(true, 'external');
+    let runtime = f.build();
+    await runtime.controller.init();
+    let session = await runtime.controller.createSession({
+      resourceId: 'wait-user',
+      threadId: 'wait-thread',
+      ownerId: runtime.controller.id,
+    });
+    await session.state.set({ yolo: true });
+    const receipt = await session.sendMessageWithReceipt({ content: 'Wait.' }).accepted;
+    await expect.poll(() => session.displayState.get().pendingSuspensions.has('wait-1')).toBe(true);
+    await expect.poll(() => session.run.isRunning()).toBe(false);
+    const memory = (await f.storage.getStore('memory'))!;
+    const initial = (await memory.listMessages({ threadId: 'wait-thread', perPage: false })).messages;
+    const original = initial.find(message =>
+      message.content.parts.some(
+        part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === 'wait-1',
+      ),
+    )!;
+    expect(original).toBeDefined();
+    for (let i = 0; i < 30; i++)
+      await session.recordMessage({ id: `later-${i}`, role: 'user', content: `Later voice turn ${i}.` });
+    await runtime.mastra.stopEventEngine();
+    globalRunRegistry.delete(receipt.runId!);
+    runtime = f.build();
+    await runtime.controller.init();
+    session = await runtime.controller.createSession({
+      resourceId: 'wait-user',
+      threadId: 'wait-thread',
+      ownerId: runtime.controller.id,
+    });
+    await session.thread.ensureSubscription('wait-thread');
+    await expect.poll(() => session.displayState.get().pendingSuspensions.has('wait-1')).toBe(true);
+    const threadState = (await f.storage.getStore('threadState'))!;
+    const order: string[] = [];
+    const save = memory.saveMessages.bind(memory);
+    vi.spyOn(memory, 'saveMessages').mockImplementation(async input => {
+      const result = await save(input);
+      if (
+        input.messages.some(message =>
+          message.content.parts.some(
+            part =>
+              part.type === 'tool-invocation' &&
+              part.toolInvocation.toolCallId === 'wait-1' &&
+              part.toolInvocation.state === 'result',
+          ),
+        )
+      )
+        order.push('source');
+      return result;
+    });
+    const set = threadState.setState.bind(threadState);
+    vi.spyOn(threadState, 'setState').mockImplementation(async input => {
+      await set(input);
+      if (input.type === TOOL_COMPLETION_INDEX_TYPE) order.push('index');
+    });
+    const events: AgentControllerEvent[] = [];
+    session.subscribe(event => {
+      events.push(event);
+      if (event.type === 'tool_end' && event.toolCallId === 'wait-1') order.push('end');
+    });
+    // This is the same public command used by an external workflow callback.
+    await runtime.agent.sendStreamResume({
+      threadId: 'wait-thread',
+      resourceId: 'wait-user',
+      runId: receipt.runId!,
+      toolCallId: 'wait-1',
+      resumeData: true,
+    });
+    await expect
+      .poll(() => events.filter(event => event.type === 'tool_end' && event.toolCallId === 'wait-1').length)
+      .toBe(1);
+    expect(order.indexOf('source')).toBeLessThan(order.indexOf('index'));
+    expect(order.indexOf('index')).toBeLessThan(order.indexOf('end'));
+    expect(events.find(event => event.type === 'tool_end')).toMatchObject({
+      runId: receipt.runId,
+      messageId: original.id,
+      result: { accepted: true },
+    });
+    const history = await session.thread.listMessages({ threadId: 'wait-thread', limit: 24 });
+    const resultRow = history.find(message => message.id === `${original.id}:tool-result:wait-1`)!;
+    expect(resultRow).toBeDefined();
+    expect(history.indexOf(resultRow)).toBeGreaterThan(history.findIndex(message => message.id === 'later-29'));
+    expect(JSON.stringify(history).match(/"accepted":true/g)).toHaveLength(1);
+    const raw = (await memory.listMessages({ threadId: 'wait-thread', perPage: false })).messages;
+    expect(raw.find(message => message.id === original.id)?.createdAt).toEqual(original.createdAt);
+    expect(raw.some(message => message.id.includes(':tool-result:'))).toBe(false);
+    await expect.poll(() => f.modelCalls()).toBe(2);
+    expect(JSON.stringify(f.prompts.at(-1)).match(/accepted/g)).toHaveLength(1);
+    expect(
+      raw
+        .flatMap(message => message.content.parts)
+        .filter(part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === 'wait-1'),
+    ).toHaveLength(1);
+    await runtime.mastra.stopEventEngine();
+  }, 25_000);
 });

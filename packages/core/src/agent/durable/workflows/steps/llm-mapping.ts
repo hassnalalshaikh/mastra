@@ -3,9 +3,12 @@ import type { PubSub } from '../../../../events/pubsub';
 import type { Mastra } from '../../../../mastra';
 import { EntityType, SpanType } from '../../../../observability';
 import type { ExportedSpan } from '../../../../observability';
+import type { ChunkType } from '../../../../stream/types';
+import { ChunkFrom } from '../../../../stream/types';
 import { PUBSUB_SYMBOL } from '../../../../workflows/constants';
 import { createStep } from '../../../../workflows/workflow';
 import { MessageList } from '../../../message-list';
+import { getToolCompletion, withToolCompletionMetadata } from '../../../message-list/tool-completion';
 import { DurableStepIds } from '../../constants';
 import { globalRunRegistry } from '../../run-registry';
 import { emitChunkEvent } from '../../stream-adapter';
@@ -15,7 +18,10 @@ import type {
   DurableAgenticExecutionOutput,
   SerializableDurableState,
 } from '../../types';
+import { applyToolPayloadTransformToChunk } from '../../utils/apply-tool-payload-transform';
+import { rebuildRunToolsFromMastra } from '../../utils/resolve-runtime';
 import { normalizeModelOutput } from './normalize-model-output';
+import { flushMessagesBeforeSuspension, processChunkThroughOutputProcessors } from './tool-call';
 
 /** Keep the dependency recovery contract in both model and stored tool output. */
 function toolErrorOutput(error: NonNullable<DurableToolCallOutput['error']>): string | Record<string, unknown> {
@@ -138,7 +144,22 @@ export function createDurableLLMMappingStep() {
 
       // 2. Add tool results to message list
       // Look up tools from the in-process registry for toModelOutput support
-      const registryEntry = globalRunRegistry.get(_runId);
+      let registryEntry = globalRunRegistry.get(_runId);
+      if (!registryEntry?.saveQueueManager && state.threadId && mastra) {
+        const initData = params.getInitData() as any;
+        await rebuildRunToolsFromMastra({
+          messageList,
+          mastra: mastra as Mastra,
+          runId: _runId,
+          agentId: _agentId,
+          state,
+          options: initData?.options ?? {},
+          requestContext,
+          requestContextEntries: initData?.requestContextEntries,
+          logger: (mastra as Mastra)?.getLogger?.(),
+        });
+        registryEntry = globalRunRegistry.get(_runId);
+      }
       const registryTools = registryEntry?.tools;
 
       // Rebuild the MODEL_STEP span early so MAPPING child spans can nest under it
@@ -158,11 +179,42 @@ export function createDurableLLMMappingStep() {
         }
       }
 
+      const alreadyPublishedBackground = new Set<string>();
       if (toolResults.length > 0) {
         for (const toolResult of toolResults) {
+          // A fast background job may finish before this serialized dispatch
+          // acknowledgement reaches mapping. Preserve its committed output.
+          const completed = toolResult.preliminary
+            ? registryEntry?.messageList?.get.all
+                .db()
+                .flatMap(message => message.content.parts)
+                .find(
+                  part =>
+                    part.type === 'tool-invocation' &&
+                    part.toolInvocation.toolCallId === toolResult.toolCallId &&
+                    getToolCompletion(part.providerMetadata),
+                )
+            : undefined;
+          if (completed?.type === 'tool-invocation') {
+            messageList.updateToolInvocation(completed);
+            toolResult.providerMetadata = completed.providerMetadata as any;
+            toolResult.result = 'result' in completed.toolInvocation ? completed.toolInvocation.result : undefined;
+            alreadyPublishedBackground.add(toolResult.toolCallId);
+            continue;
+          }
+          toolResult.providerMetadata = toolResult.preliminary
+            ? {
+                ...toolResult.providerMetadata,
+                mastra: {
+                  ...(toolResult.providerMetadata?.mastra as Record<string, unknown> | undefined),
+                  toolExecutionPending: true,
+                },
+              }
+            : (withToolCompletionMetadata(toolResult.providerMetadata as any, _runId) as any);
           if (isDeniedApproval(toolResult)) {
             messageList.updateToolInvocation({
               type: 'tool-invocation' as const,
+              providerMetadata: toolResult.providerMetadata as any,
               toolInvocation: {
                 state: 'output-denied' as const,
                 toolCallId: toolResult.toolCallId,
@@ -237,14 +289,18 @@ export function createDurableLLMMappingStep() {
             }
           }
 
-          const updated = messageList.updateToolInvocation({
+          toolResult.providerMetadata = providerMetadata as any;
+          const resultPart = {
             type: 'tool-invocation' as const,
             toolInvocation: {
               // A tool error must be recorded as `output-error` with the message in
               // `errorText` so the transcript/adapters read it as a failure rather than
               // a normal result. Successful results keep `state: 'result'` + `result`.
-              ...(toolResult.error
-                ? { state: 'output-error' as const, errorText: toolErrorText(toolResult.error) }
+              ...(toolResult.error || toolResult.isError
+                ? {
+                    state: 'output-error' as const,
+                    errorText: toolResult.error ? toolErrorText(toolResult.error) : JSON.stringify(result),
+                  }
                 : { state: 'result' as const, result }),
               toolCallId: toolResult.toolCallId,
               toolName: toolResult.toolName,
@@ -254,7 +310,8 @@ export function createDurableLLMMappingStep() {
               ...(toolResult.approval ? { approval: toolResult.approval } : {}),
             },
             ...(providerMetadata ? { providerMetadata: providerMetadata as any } : {}),
-          });
+          };
+          const updated = messageList.updateToolInvocation(resultPart);
 
           if (!updated) {
             messageList.add(
@@ -267,13 +324,14 @@ export function createDurableLLMMappingStep() {
                       toolCallId: toolResult.toolCallId,
                       toolName: toolResult.toolName,
                       result,
-                      isError: toolResult.error !== undefined,
+                      isError: toolResult.error !== undefined || toolResult.isError === true,
                     },
                   ],
                 },
               ],
               'response',
             );
+            messageList.updateToolInvocation(resultPart);
           }
         }
       }
@@ -287,6 +345,74 @@ export function createDurableLLMMappingStep() {
       // if the workflow re-suspends on a subsequent iteration.
       if (registryEntry) {
         registryEntry.messageList = messageList;
+      }
+
+      // Commit native memory and the completion index before any terminal outcome is
+      // visible. The durable tool step can finish on a different worker or after a
+      // cold resume; its serialized output is not yet a saved conversation result.
+      const pubsub = (params as any)[PUBSUB_SYMBOL] as PubSub | undefined;
+      if (toolResults.length) {
+        await flushMessagesBeforeSuspension({
+          saveQueueManager: registryEntry?.saveQueueManager,
+          messageList,
+          memory: registryEntry?.memory,
+          threadId: state.threadId,
+          resourceId: state.resourceId,
+          memoryConfig: state.memoryConfig,
+          threadExists: state.threadExists,
+          onThreadCreated: () => {
+            state.threadExists = true;
+          },
+        });
+        if (pubsub) {
+          const logger = (mastra as Mastra | undefined)?.getLogger?.();
+          for (const result of toolResults) {
+            if (result.providerExecuted || alreadyPublishedBackground.has(result.toolCallId)) continue;
+            const source = messageList.get.all
+              .db()
+              .findLast(message =>
+                message.content.parts.some(
+                  part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === result.toolCallId,
+                ),
+              );
+            const payload = {
+              toolCallId: result.toolCallId,
+              toolName: result.toolName,
+              args: result.args,
+              messageId: source?.id,
+              providerMetadata: result.providerMetadata,
+            };
+            const chunk = (
+              isDeniedApproval(result)
+                ? { type: 'tool-output-denied', payload: { ...payload, approval: result.approval } }
+                : result.error
+                  ? { type: 'tool-error', payload: { ...payload, error: result.error } }
+                  : {
+                      type: 'tool-result',
+                      payload: {
+                        ...payload,
+                        result: result.result,
+                        isError: result.isError,
+                        preliminary: result.preliminary,
+                      },
+                    }
+            ) as ChunkType;
+            const transformed = await applyToolPayloadTransformToChunk(
+              { ...chunk, runId: _runId, from: ChunkFrom.AGENT } as ChunkType,
+              { policy: registryEntry?.toolPayloadTransform, tools: registryTools, logger },
+            );
+            const processed = await processChunkThroughOutputProcessors(
+              transformed,
+              registryEntry,
+              pubsub,
+              _runId,
+              _agentId,
+              logger,
+              messageList,
+            );
+            if (processed) await emitChunkEvent(pubsub, _runId, processed);
+          }
+        }
       }
 
       // 3. Determine if we should continue
@@ -362,11 +488,10 @@ export function createDurableLLMMappingStep() {
 
       // Emit the deferred step-finish chunk for intermediate steps.
       // llm-execution defers step-finish emission for tool-calling steps so that
-      // it arrives AFTER tool-result chunks (emitted by tool-call.ts). This
+      // it arrives AFTER committed tool-result chunks (emitted above). This
       // matches the regular agent's chunk ordering which MastraModelOutput
       // relies on for correct step content reconstruction in onStepFinish.
       const deferredChunk = llmOutput.deferredStepFinishChunk as any;
-      const pubsub = (params as any)[PUBSUB_SYMBOL] as PubSub | undefined;
       if (deferredChunk && pubsub) {
         try {
           // Build step content directly from this iteration's data.

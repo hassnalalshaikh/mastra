@@ -57,6 +57,39 @@ function readToolResultFromMessageList(messageList: MessageList, toolCallId: str
   return undefined;
 }
 
+export async function flushCommittedToolResult<OUTPUT>(
+  chunk: ChunkType<OUTPUT>,
+  messageList: MessageList,
+  scopeCtx: RunScopeContext,
+): Promise<void> {
+  if (chunk.type !== 'tool-result' && chunk.type !== 'tool-error' && chunk.type !== 'tool-output-denied') return;
+  const source = messageList.get.all
+    .db()
+    .find(message =>
+      message.content.parts.some(
+        part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+      ),
+    );
+  if (source && chunk.type !== 'tool-output-denied') {
+    chunk.payload.messageId = source.id;
+    const part = source.content.parts.find(
+      part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
+    );
+    if (part?.type === 'tool-invocation') chunk.payload.providerMetadata = part.providerMetadata;
+  }
+  const manager = readScoped(scopeCtx, SAVE_QUEUE_MANAGER_KEY, 'saveQueueManager');
+  const threadId = readScoped(scopeCtx, THREAD_ID_KEY, 'threadId');
+  const memoryConfig = readScoped(scopeCtx, MEMORY_CONFIG_KEY, 'memoryConfig');
+  if (!manager || !threadId || memoryConfig?.readOnly) return;
+  const memory = readScoped(scopeCtx, MEMORY_KEY, 'memory');
+  const resourceId = readScoped(scopeCtx, RESOURCE_ID_KEY, 'resourceId');
+  if (memory && resourceId && !readScoped(scopeCtx, THREAD_EXISTS_KEY, 'threadExists')) {
+    if (!(await memory.getThreadById({ threadId }))) await memory.createThread({ threadId, resourceId, memoryConfig });
+    writeScoped(scopeCtx, THREAD_EXISTS_KEY, 'threadExists', true);
+  }
+  await manager.flushMessages(messageList, threadId, memoryConfig);
+}
+
 export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = undefined>(
   { models, _internal, ...rest }: OuterLLMRun<Tools, OUTPUT>,
   llmExecutionStep: any,
@@ -98,35 +131,6 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
 
   // Helper function to process a chunk through output processors and enqueue it.
   // Returns the processed chunk, or null if the chunk was blocked by a processor.
-  async function flushCommittedToolResult(chunk: ChunkType<OUTPUT>): Promise<void> {
-    if (chunk.type !== 'tool-result' && chunk.type !== 'tool-error' && chunk.type !== 'tool-output-denied') return;
-    const source = rest.messageList.get.all
-      .db()
-      .find(message =>
-        message.content.parts.some(
-          part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
-        ),
-      );
-    if (source && chunk.type !== 'tool-output-denied') {
-      chunk.payload.messageId = source.id;
-      const part = source.content.parts.find(
-        part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === chunk.payload.toolCallId,
-      );
-      if (part?.type === 'tool-invocation') chunk.payload.providerMetadata = part.providerMetadata;
-    }
-    const manager = readScoped(scopeCtx, SAVE_QUEUE_MANAGER_KEY, 'saveQueueManager');
-    const threadId = readScoped(scopeCtx, THREAD_ID_KEY, 'threadId');
-    const memoryConfig = readScoped(scopeCtx, MEMORY_CONFIG_KEY, 'memoryConfig');
-    if (!manager || !threadId || memoryConfig?.readOnly) return;
-    const memory = readScoped(scopeCtx, MEMORY_KEY, 'memory');
-    const resourceId = readScoped(scopeCtx, RESOURCE_ID_KEY, 'resourceId');
-    if (memory && resourceId && !readScoped(scopeCtx, THREAD_EXISTS_KEY, 'threadExists')) {
-      if (!(await memory.getThreadById({ threadId })))
-        await memory.createThread({ threadId, resourceId, memoryConfig });
-      writeScoped(scopeCtx, THREAD_EXISTS_KEY, 'threadExists', true);
-    }
-    await manager.flushMessages(rest.messageList, threadId, memoryConfig);
-  }
 
   async function processAndEnqueueChunk(chunk: ChunkType<OUTPUT>): Promise<ChunkType<OUTPUT> | null> {
     if (processorRunner && rest.processorStates) {
@@ -165,7 +169,7 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
       }
 
       if (processed) {
-        await flushCommittedToolResult(processed as ChunkType<OUTPUT>);
+        await flushCommittedToolResult(processed as ChunkType<OUTPUT>, rest.messageList, scopeCtx);
         rest.controller.enqueue(processed as ChunkType<OUTPUT>);
       }
 
@@ -193,7 +197,7 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
       return processed ? (processed as ChunkType<OUTPUT>) : null;
     } else {
       // No processor runner, just enqueue the chunk directly
-      await flushCommittedToolResult(chunk);
+      await flushCommittedToolResult(chunk, rest.messageList, scopeCtx);
       rest.controller.enqueue(chunk);
       return chunk;
     }

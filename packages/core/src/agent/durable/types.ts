@@ -364,6 +364,10 @@ export interface DurableToolCallInput {
  * Output from a single tool call step
  */
 export interface DurableToolCallOutput extends DurableToolCallInput {
+  /** Dispatch acknowledgement, not a completed result. */
+  preliminary?: boolean;
+  /** Native policy or validation rejection returned as a result. */
+  isError?: boolean;
   /** Canceled before execution; no tool result should be recorded. */
   aborted?: boolean;
   /** Result from tool execution */
