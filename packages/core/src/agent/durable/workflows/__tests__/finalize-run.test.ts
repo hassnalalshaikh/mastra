@@ -170,6 +170,33 @@ describe('runDurableFinishSideEffects', () => {
     expect(generateThreadTitle).toHaveBeenCalledTimes(1);
   });
 
+  it('does not hold the finish back while the title is still being generated', async () => {
+    let finishTitle: () => void = () => {};
+    const generateThreadTitle = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          finishTitle = resolve;
+        }),
+    );
+
+    globalRunRegistry.set('run-1', {
+      isPlaceholder: false,
+      outputProcessors: [],
+      generateThreadTitle,
+    } as unknown as RunRegistryEntry);
+
+    // Resolves although the title call is still pending.
+    const result = await runDurableFinishSideEffects({
+      runId: 'run-1',
+      initData: makeInitData({ threadId: 'thread-1', resourceId: 'resource-1', threadExists: true }),
+      messageListState: makeMessageListState(),
+    });
+
+    expect(result.messageListState).toBeDefined();
+    expect(generateThreadTitle).toHaveBeenCalledTimes(1);
+    finishTitle();
+  });
+
   it.each(['abort', 'aborted'])(
     'preserves final output and persistence without titling a %s result',
     async finishReason => {
