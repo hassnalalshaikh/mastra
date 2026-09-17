@@ -604,7 +604,7 @@ export class MemoryPG extends MemoryStorage {
 
       const limitValue = perPageInput === false ? total : perPage;
       // Select both standard and timezone-aware columns (*Z) for proper UTC timestamp handling
-      const dataQuery = `SELECT id, "resourceId", title, metadata, "createdAt", "createdAtZ", "updatedAt", "updatedAtZ" ${baseQuery} ORDER BY COALESCE("${field}Z", "${field}") ${direction} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      const dataQuery = `SELECT id, "resourceId", title, metadata, "createdAt", "createdAtZ", "updatedAt", "updatedAtZ" ${baseQuery} ORDER BY COALESCE("${field}Z", "${field}") ${direction}, "id" ${direction} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       const rows = await this.#db.client.manyOrNone<StorageThreadType & { createdAtZ: Date; updatedAtZ: Date }>(
         dataQuery,
         [...queryParams, limitValue, offset],
@@ -1108,7 +1108,7 @@ export class MemoryPG extends MemoryStorage {
 
     try {
       const { field, direction } = this.parseOrderBy(orderBy, 'ASC');
-      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}`;
+      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}, "id" ${direction}`;
 
       const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
       const tableName = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
@@ -1306,7 +1306,7 @@ export class MemoryPG extends MemoryStorage {
 
     try {
       const { field, direction } = this.parseOrderBy(orderBy, 'ASC');
-      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}`;
+      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}, "id" ${direction}`;
 
       const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
       const tableName = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
