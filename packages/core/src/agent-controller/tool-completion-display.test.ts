@@ -47,6 +47,21 @@ function history(): MastraDBMessage[] {
 }
 
 describe('native tool completion display', () => {
+  it.each(['result', 'output-error', 'output-denied'] as const)(
+    'keeps a user-suspended tool in place for %s without relying on its name',
+    state => {
+      const input = history();
+      const part = input[0]!.content.parts[1] as MastraToolInvocationPart;
+      part.toolInvocation = { ...part.toolInvocation, state } as MastraToolInvocationPart['toolInvocation'];
+      part.providerMetadata!.mastra!.toolSuspensionWaitingFor = 'user';
+      expect(projectCompletedToolMessages(input)).toEqual(input);
+      const list = new MessageList({ threadId: 'thread', resourceId: 'test-owner' });
+      list.add(input[0]!, 'memory');
+      list.updateToolInvocation({ ...part, providerMetadata: { mastra: { toolCompletion: { completedAt: stamp } } } });
+      expect(projectCompletedToolMessages(list.get.all.db()).map(row => row.id)).toEqual(['old']);
+    },
+  );
+
   it.each(['ask_user', 'submit_plan'])(
     'keeps %s in its original row across live updates and history reads',
     async toolName => {
