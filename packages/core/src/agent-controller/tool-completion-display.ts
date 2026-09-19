@@ -20,6 +20,9 @@ export function projectCompletedToolMessages(messages: MastraDBMessage[]): Mastr
         part.type === 'tool-invocation' &&
         // Human-input tools are conversation checkpoints, not late artifacts.
         // Their answer must update the question in place, including after reload.
+        part.providerMetadata?.mastra?.toolSuspensionWaitingFor !== 'user' &&
+        // Retain compatibility with completed questions saved before wait-kind
+        // metadata was persisted on invocations.
         part.toolInvocation.toolName !== 'ask_user' &&
         part.toolInvocation.toolName !== 'submit_plan' &&
         ['result', 'output-error', 'output-denied'].includes(part.toolInvocation.state)
