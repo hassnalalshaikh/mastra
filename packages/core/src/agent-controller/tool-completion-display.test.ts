@@ -47,30 +47,33 @@ function history(): MastraDBMessage[] {
 }
 
 describe('native tool completion display', () => {
-  it.each(['ask_user', 'submit_plan'])('keeps %s in its original row across live updates and history reads', async toolName => {
-    const input = history();
-    const question = input[0]!;
-    const part = question.content.parts[1] as MastraToolInvocationPart;
-    part.toolInvocation.toolName = toolName;
-    const before = structuredClone(input);
-    expect(projectCompletedToolMessages(input)).toEqual(input);
+  it.each(['ask_user', 'submit_plan'])(
+    'keeps %s in its original row across live updates and history reads',
+    async toolName => {
+      const input = history();
+      const question = input[0]!;
+      const part = question.content.parts[1] as MastraToolInvocationPart;
+      part.toolInvocation.toolName = toolName;
+      const before = structuredClone(input);
+      expect(projectCompletedToolMessages(input)).toEqual(input);
 
-    const storage = new InMemoryStore();
-    const { controller, session } = await createTestSession({ storage });
-    const memory = await storage.getStore('memory');
-    await memory!.saveThread({
-      thread: { id: 'thread', resourceId: 'test-owner', createdAt: new Date(), updatedAt: new Date(), title: 'Test' },
-    });
-    await memory!.saveMessages({ messages: input });
-    const live: MastraDBMessage[] = [];
-    session.subscribe(event => {
-      if (event.type === 'message_update') live.push(event.message);
-    });
-    session.emit({ type: 'message_update', message: question });
-    expect(live).toEqual([question]);
-    expect(await controller.queryThreadMessages({ threadId: 'thread' })).toEqual(input);
-    expect(input).toEqual(before);
-  });
+      const storage = new InMemoryStore();
+      const { controller, session } = await createTestSession({ storage });
+      const memory = await storage.getStore('memory');
+      await memory!.saveThread({
+        thread: { id: 'thread', resourceId: 'test-owner', createdAt: new Date(), updatedAt: new Date(), title: 'Test' },
+      });
+      await memory!.saveMessages({ messages: input });
+      const live: MastraDBMessage[] = [];
+      session.subscribe(event => {
+        if (event.type === 'message_update') live.push(event.message);
+      });
+      session.emit({ type: 'message_update', message: question });
+      expect(live).toEqual([question]);
+      expect(await controller.queryThreadMessages({ threadId: 'thread' })).toEqual(input);
+      expect(input).toEqual(before);
+    },
+  );
 
   it('keeps a question in place while moving a generation from the same message to its completion time', () => {
     const input = history();
