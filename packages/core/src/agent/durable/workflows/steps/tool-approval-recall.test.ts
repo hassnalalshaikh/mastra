@@ -122,6 +122,7 @@ async function runMappingStep(toolResults: unknown[], messageListState = seedMes
     },
     mastra: { getLogger: () => undefined },
     requestContext: new Map(),
+    getInitData: () => makeInitData(),
   });
 
   const recalled = new MessageList({ threadId: THREAD_ID, resourceId: RESOURCE_ID });

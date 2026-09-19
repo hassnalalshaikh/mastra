@@ -235,10 +235,23 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           (message.content?.parts ?? []).some(
             part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === toolCallId,
           );
+        // Keep the native wait kind on the invocation after pending metadata is
+        // removed during resume. Display placement must not depend on tool names.
+        const retainWaitKind = (message: MastraDBMessage) => {
+          if (type !== 'suspension') return;
+          for (const part of message.content.parts) {
+            if (part.type !== 'tool-invocation' || part.toolInvocation.toolCallId !== toolCallId) continue;
+            part.providerMetadata = {
+              ...part.providerMetadata,
+              mastra: { ...part.providerMetadata?.mastra, toolSuspensionWaitingFor: waitingFor ?? 'user' },
+            };
+          }
+        };
 
         const responseMessages = messageList.get.response.db();
         const responseMessage = [...responseMessages].reverse().find(carriesToolCall);
         if (responseMessage?.content) {
+          retainWaitKind(responseMessage);
           const metadata =
             typeof responseMessage.content.metadata === 'object' && responseMessage.content.metadata !== null
               ? (responseMessage.content.metadata as Record<string, any>)
@@ -263,6 +276,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           typeof target.content.metadata === 'object' && target.content.metadata !== null
             ? (target.content.metadata as Record<string, any>)
             : {};
+        retainWaitKind(target);
         const existingEntries = (existingMetadata[metadataKey] ?? {}) as Record<string, any>;
         const updated = messageList.updateMessageMetadataByToolCallId(toolCallId, {
           [metadataKey]: { ...existingEntries, [toolCallId]: entry },

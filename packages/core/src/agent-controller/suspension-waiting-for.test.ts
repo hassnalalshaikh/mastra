@@ -164,6 +164,25 @@ describe('native suspension waitingFor', () => {
       await expect.poll(() => reloaded.displayState.get().pendingSuspensions.size).toBe(0);
       await expect.poll(() => reloaded.run.isRunning()).toBe(false);
       expect(f.received).toEqual([undefined, false]);
+      // A question must stay where it was asked even after cold resume. An
+      // external job still appears at completion, independent of its tool name.
+      const original = messages.find(message =>
+        message.content.parts.some(
+          part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === 'wait-1',
+        ),
+      )!;
+      const completed = await runtime.controller.queryThreadMessages({ threadId: 'wait-thread' });
+      const resultRow = completed.find(message =>
+        message.content.parts.some(
+          part =>
+            part.type === 'tool-invocation' &&
+            part.toolInvocation.toolCallId === 'wait-1' &&
+            part.toolInvocation.state === 'result',
+        ),
+      );
+      expect(resultRow?.id).toBe(expected === 'user' ? original.id : `${original.id}:tool-result:wait-1`);
+      const invocation = resultRow?.content.parts.find(part => part.type === 'tool-invocation');
+      expect(invocation?.providerMetadata?.mastra?.toolSuspensionWaitingFor).toBe(expected);
       await runtime.mastra.stopEventEngine();
     },
     25_000,
