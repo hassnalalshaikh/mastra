@@ -18,6 +18,10 @@ export function projectCompletedToolMessages(messages: MastraDBMessage[]): Mastr
     for (const part of message.content.parts) {
       const completion =
         part.type === 'tool-invocation' &&
+        // Human-input tools are conversation checkpoints, not late artifacts.
+        // Their answer must update the question in place, including after reload.
+        part.toolInvocation.toolName !== 'ask_user' &&
+        part.toolInvocation.toolName !== 'submit_plan' &&
         ['result', 'output-error', 'output-denied'].includes(part.toolInvocation.state)
           ? getToolCompletion(part.providerMetadata)
           : undefined;
