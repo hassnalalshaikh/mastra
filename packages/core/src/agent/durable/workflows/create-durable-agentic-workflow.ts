@@ -162,6 +162,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
       pruneSnapshot: pruneAgentLoopSnapshot,
       validateInputs: false,
       emitStepEvents: false,
+      reuseCompletedStepCheckpoint: true,
       sharePubsub: true,
       // Internal durable-agent execution plumbing — hide workflow spans;
       // the agent/tool/model spans within still surface for users.
@@ -305,6 +306,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
         pruneSnapshot: pruneAgentLoopSnapshot,
         validateInputs: false,
         emitStepEvents: false,
+        reuseCompletedStepCheckpoint: true,
         // Internal durable-agent execution plumbing — see singleIterationWorkflow.
         tracingPolicy: {
           internal: InternalSpans.WORKFLOW,
