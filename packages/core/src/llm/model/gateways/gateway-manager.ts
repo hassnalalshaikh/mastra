@@ -1,5 +1,5 @@
-import pMap from 'p-map';
 import { MastraError } from '../../../error/index.js';
+import { pMap } from '../../../utils/p-map.js';
 import { parseModelRouterId } from '../gateway-resolver.js';
 import type { GatewayAuthRequest, GatewayAuthResult, MastraModelGatewayInterface, ProviderConfig } from './base.js';
 import { findGatewayForModel, getGatewayId, hasAuthCredentials, shouldEnableGateway } from './gateway-helpers.js';
