@@ -943,6 +943,11 @@ export function createDurableToolCallStep() {
         }),
         toolCallId,
         messages: [],
+        // Registry tools bypass CoreToolBuilder and need the native execution context.
+        mastra,
+        agentId: initData.agentId,
+        threadId: state?.threadId,
+        resourceId: state?.resourceId,
         workspace,
         requestContext,
         mcp: registryEntry?.mcp,
