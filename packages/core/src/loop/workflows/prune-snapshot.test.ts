@@ -12,6 +12,7 @@ import { pruneAgentLoopSnapshot } from './prune-snapshot';
 
 function requestEcho() {
   return {
+    headers: { 'x-trace': 'request-1' },
     body: {
       messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(2000) }] }],
       tools: [{ type: 'function', function: { name: 'big', parameters: { blob: 'y'.repeat(2000) } } }],
@@ -45,6 +46,105 @@ function countRequestEchoes(value: unknown): number {
   for (const v of Object.values(record)) n += countRequestEchoes(v);
   return n;
 }
+
+describe('pruneAgentLoopSnapshot nested durable request echoes', () => {
+  it('does not interpret tool arguments or results as native iteration state', () => {
+    const opaque = {
+      llmOutput: { stepResult: stepResult(), metadata: { request: requestEcho() } },
+      lastStepResult: stepResult(),
+    };
+    const snapshot = snapshotWith({
+      'customer-tool': {
+        status: 'suspended',
+        payload: opaque,
+        output: opaque,
+        prevOutput: opaque,
+        suspendPayload: opaque,
+      },
+      'collect-tool-results': { status: 'success', output: { llmOutput: { toolResults: [opaque] } } },
+    });
+    const pruned = pruneAgentLoopSnapshot({ snapshot });
+    for (const side of ['payload', 'output', 'prevOutput', 'suspendPayload']) {
+      expect((pruned.context['customer-tool'] as any)[side]).toEqual(opaque);
+    }
+    expect((pruned.context['collect-tool-results'] as any).output.llmOutput.toolResults).toEqual([opaque]);
+  });
+
+  it.each(['success', 'running', 'suspended', 'paused'])(
+    'prunes known result wrappers in a %s step without changing recovery data',
+    status => {
+      const conversation = { systemMessages: [{ content: 'keep the real instructions' }] };
+      const suspension = { __streamState: { messageList: conversation }, approval: { toolCallId: 'call-1' } };
+      const userData = { request: requestEcho(), lastStepResult: stepResult() };
+      const iteration = {
+        messageListState: conversation,
+        lastStepResult: stepResult(),
+        llmOutput: {
+          stepResult: stepResult(),
+          metadata: { request: requestEcho(), usage: { inputTokens: 10 }, response: { id: 'provider-1' } },
+          toolResults: [userData],
+        },
+      };
+      const snapshot = snapshotWith({
+        'durable-llm-mapping': {
+          status,
+          payload: iteration,
+          output: iteration,
+          prevOutput: iteration,
+          suspendPayload: suspension,
+        },
+      });
+      snapshot.context.input = iteration;
+      const before = structuredClone(snapshot);
+      const pruned = pruneAgentLoopSnapshot({ snapshot });
+      const current = pruned.context['durable-llm-mapping'] as any;
+
+      for (const side of ['payload', 'output', 'prevOutput']) {
+        const value = current[side];
+        if (value.lastStepResult) {
+          expect(value.lastStepResult).toEqual({ ...stepResult(), request: { headers: { 'x-trace': 'request-1' } } });
+          expect(value.lastStepResult.request).not.toHaveProperty('body');
+        }
+        expect(value.llmOutput.stepResult.request).toEqual({ headers: { 'x-trace': 'request-1' } });
+        expect(value.llmOutput.stepResult.totalUsage).toEqual(stepResult().totalUsage);
+        expect(value.llmOutput.metadata).toEqual({
+          request: { headers: { 'x-trace': 'request-1' } },
+          usage: { inputTokens: 10 },
+          response: { id: 'provider-1' },
+        });
+        expect(value.llmOutput.toolResults).toEqual([userData]);
+      }
+      expect(pruned.context.input).toEqual(iteration);
+      if (status !== 'success') expect(current.suspendPayload).toEqual(suspension);
+      expect(snapshot).toEqual(before);
+      expect(pruneAgentLoopSnapshot({ snapshot: pruned })).toEqual(pruned);
+    },
+  );
+
+  it('keeps the active completed output conversation and routing while pruning its request echo', () => {
+    const output = {
+      messageListState: { messages: ['continue from here'] },
+      accumulatedSteps: ['step-1'],
+      lastStepResult: stepResult(),
+    };
+    const snapshot = {
+      status: 'running',
+      activePaths: [0],
+      activeStepsPath: {},
+      completedEntry: true,
+      serializedStepGraph: [{ type: 'step', step: { id: 'durable-goal' } }],
+      context: { input: {}, 'durable-goal': { status: 'success', output } },
+    } as unknown as WorkflowRunState;
+    const pruned = pruneAgentLoopSnapshot({ snapshot });
+    expect((pruned.context['durable-goal'] as any).output).toEqual({
+      ...output,
+      lastStepResult: { ...stepResult(), request: { headers: { 'x-trace': 'request-1' } } },
+    });
+    expect((pruned.context['durable-goal'] as any).output.lastStepResult.request).not.toHaveProperty('body');
+    expect(pruned.activePaths).toEqual(snapshot.activePaths);
+    expect(pruned.completedEntry).toBe(true);
+  });
+});
 
 describe('pruneAgentLoopSnapshot running history', () => {
   it('keeps the active terminal step conversation for restart after an end-phase write', () => {

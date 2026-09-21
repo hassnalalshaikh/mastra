@@ -164,6 +164,40 @@ function stripStepResultRequest<T>(value: T): T {
   return { ...value, stepResult } as T;
 }
 
+const DURABLE_ITERATION_STEPS = new Set([
+  'init-iteration-state',
+  'durable-agentic-execution',
+  'collect-tool-results',
+  'durable-llm-mapping',
+  'durable-agentic-execution-bg-task-check',
+  'durable-agentic-execution-signal-drain',
+  'update-iteration-state',
+  'durable-is-task-complete',
+  'durable-goal',
+]);
+
+function stripDurableRequestBodies<T>(value: T): T {
+  if (!isPlainObject(value)) return value;
+  const pruned: Record<string, any> = { ...value };
+  // The durable loop also carries the same provider result as lastStepResult,
+  // and mapping steps wrap it under llmOutput. Only visit those native fields;
+  // arbitrary tool results and the authoritative workflow input stay intact.
+  if (isPlainObject(pruned.lastStepResult)) pruned.lastStepResult = stripRequestBody(pruned.lastStepResult);
+  if (isPlainObject(pruned.llmOutput)) {
+    const llmOutput = { ...pruned.llmOutput };
+    if (isPlainObject(llmOutput.stepResult)) llmOutput.stepResult = stripRequestBody(llmOutput.stepResult);
+    if (isPlainObject(llmOutput.metadata)) llmOutput.metadata = stripRequestBody(llmOutput.metadata);
+    pruned.llmOutput = llmOutput;
+  }
+  return pruned as T;
+}
+
+function stripRequestBody<T extends Record<string, any>>(value: T): T {
+  if (!isPlainObject(value.request) || !('body' in value.request)) return value;
+  const { body: _body, ...request } = value.request;
+  return { ...value, request };
+}
+
 /**
  * Iteration state the durable agent loop threads through every step as that
  * step's *input*: the full serialized conversation, every step record so far,
@@ -194,13 +228,24 @@ function stripTerminalPayloadState<T>(value: T): T {
 /** Applies the pruning rules to a single serialized step result. */
 function pruneStepResult(
   result: Record<string, any>,
-  { preserveTerminalPayloadState = false }: { preserveTerminalPayloadState?: boolean } = {},
+  {
+    preserveTerminalPayloadState = false,
+    durableIteration = false,
+  }: {
+    preserveTerminalPayloadState?: boolean;
+    durableIteration?: boolean;
+  } = {},
 ): Record<string, any> {
   if (!isPlainObject(result) || typeof result.status !== 'string') return result;
 
   const pruned: Record<string, any> = { ...result };
   pruned.payload = stripStepResultRequest(pruned.payload);
   if ('output' in pruned) pruned.output = stripStepResultRequest(pruned.output);
+  if (durableIteration) {
+    for (const side of ['payload', 'output', 'prevOutput']) {
+      if (side in pruned) pruned[side] = stripDurableRequestBodies(pruned[side]);
+    }
+  }
   pruned.payload = stripHeavyIterationFields(pruned.payload);
   if ('prevOutput' in pruned) pruned.prevOutput = stripHeavyIterationFields(pruned.prevOutput);
 
@@ -407,6 +452,7 @@ export function pruneAgentLoopSnapshot({
     } else {
       context[key] = pruneStepResult(value as Record<string, any>, {
         preserveTerminalPayloadState: activeStepIds.has(key) && key in (snapshot.activeStepsPath ?? {}),
+        durableIteration: DURABLE_ITERATION_STEPS.has(key),
       }) as any;
     }
   }
