@@ -333,6 +333,25 @@ function pruneResultMirror(result: Record<string, any>): Record<string, any> {
  */
 const RUNNING_HISTORY_FIELDS = ['messageListState', 'accumulatedSteps'] as const;
 
+// These native steps carry the iteration's trace and tool descriptions. Older
+// completed copies have no reader: current execution uses its input, and
+// recovery retains context.input and the active continuation below.
+const DURABLE_METADATA_STEPS = new Set([
+  ...DURABLE_ITERATION_STEPS,
+  'map-to-llm-input',
+  'durable-llm-execution',
+  'map-final-output',
+]);
+
+function stripHistoricalDurableMetadata<T>(value: T): T {
+  if (!isPlainObject(value)) return value;
+  const pruned: Record<string, any> = { ...value };
+  delete pruned.agentSpanData;
+  delete pruned.toolsMetadata;
+  if (isPlainObject(pruned.llmOutput)) pruned.llmOutput = stripHistoricalDurableMetadata(pruned.llmOutput);
+  return pruned as T;
+}
+
 function stripRunningHistoryFields<T>(value: T): T {
   if (!isPlainObject(value)) return value;
 
@@ -415,6 +434,11 @@ function pruneRunningHistory(context: WorkflowRunState['context'], activeStepIds
     pruned.payload = stripRunningHistoryFields(pruned.payload);
     if ('output' in pruned) pruned.output = stripRunningHistoryFields(pruned.output);
     if ('prevOutput' in pruned) pruned.prevOutput = stripRunningHistoryFields(pruned.prevOutput);
+    if (DURABLE_METADATA_STEPS.has(key)) {
+      for (const side of ['payload', 'output', 'prevOutput']) {
+        if (side in pruned) pruned[side] = stripHistoricalDurableMetadata(pruned[side]);
+      }
+    }
     context[key] = pruned as any;
   }
 }

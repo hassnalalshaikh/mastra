@@ -47,6 +47,114 @@ function countRequestEchoes(value: unknown): number {
   return n;
 }
 
+describe('historical durable metadata in running snapshots', () => {
+  const metadata = () => ({
+    agentSpanData: { id: 'agent-span', traceId: 'trace', input: 'instructions'.repeat(1000) },
+    toolsMetadata: [{ name: 'save', requireApproval: true, inputSchema: { value: 'schema'.repeat(1000) } }],
+    modelSpanData: { id: 'model-span' },
+    stepSpanData: { id: 'step-span' },
+    stepFinishPayload: { usage: { totalTokens: 9 } },
+    deferredChunks: [{ type: 'text-delta', text: 'kept' }],
+  });
+  const steps = [
+    'init-iteration-state',
+    'map-to-llm-input',
+    'durable-llm-execution',
+    'collect-tool-results',
+    'durable-llm-mapping',
+    'durable-agentic-execution',
+    'durable-agentic-execution-bg-task-check',
+    'durable-agentic-execution-signal-drain',
+    'update-iteration-state',
+    'durable-is-task-complete',
+    'durable-goal',
+    'map-final-output',
+  ];
+  function running(context: Record<string, any>): WorkflowRunState {
+    return {
+      status: 'running',
+      activePaths: [1],
+      activeStepsPath: { current: [1] },
+      context: { input: metadata(), current: { status: 'running', payload: metadata() }, ...context },
+    } as unknown as WorkflowRunState;
+  }
+
+  it.each(steps)('removes only redundant metadata from historical %s', id => {
+    const value = { ...metadata(), llmOutput: metadata(), toolResults: [{ result: metadata() }] };
+    const snapshot = running({ [id]: { status: 'success', payload: value, output: value, prevOutput: value } });
+    const before = structuredClone(snapshot);
+    const pruned = pruneAgentLoopSnapshot({ snapshot });
+    const { agentSpanData: _agent, toolsMetadata: _tools, ...kept } = metadata();
+    for (const side of ['payload', 'output', 'prevOutput']) {
+      expect((pruned.context[id] as any)[side]).toEqual({
+        ...kept,
+        llmOutput: kept,
+        toolResults: [{ result: metadata() }],
+      });
+    }
+    expect(pruned.context.input).toEqual(metadata());
+    expect((pruned.context.current as any).payload).toEqual(metadata());
+    expect(snapshot).toEqual(before);
+    expect(pruneAgentLoopSnapshot({ snapshot: pruned })).toEqual(pruned);
+  });
+
+  it.each(['running', 'success'])('keeps the active %s step metadata', status => {
+    const snapshot = running({ 'durable-goal': { status, payload: metadata(), output: metadata() } });
+    snapshot.activeStepsPath = { 'durable-goal': [1] };
+    const pruned = pruneAgentLoopSnapshot({ snapshot });
+    expect((pruned.context['durable-goal'] as any).payload).toEqual(metadata());
+    expect((pruned.context['durable-goal'] as any).output).toEqual(metadata());
+  });
+
+  it('keeps the completed continuation after its active step entry is removed', () => {
+    const snapshot = running({ 'durable-goal': { status: 'success', output: metadata() } });
+    snapshot.activePaths = [0];
+    snapshot.activeStepsPath = {};
+    snapshot.completedEntry = true;
+    snapshot.serializedStepGraph = [{ type: 'step', step: { id: 'durable-goal' } }] as any;
+    expect((pruneAgentLoopSnapshot({ snapshot }).context['durable-goal'] as any).output).toEqual(metadata());
+  });
+
+  it.each(['suspended', 'paused', 'waiting', 'success', 'failed'])(
+    'does not prune metadata from %s snapshots',
+    status => {
+      const snapshot = running({ 'durable-goal': { status: 'success', output: metadata(), payload: metadata() } });
+      snapshot.status = status as WorkflowRunState['status'];
+      const pruned = pruneAgentLoopSnapshot({ snapshot });
+      expect((pruned.context['durable-goal'] as any).output).toEqual(metadata());
+      expect((pruned.context['durable-goal'] as any).payload).toEqual(metadata());
+    },
+  );
+
+  it.each(['running', 'suspended', 'paused', 'waiting'])('preserves nonterminal %s step metadata', status => {
+    const snapshot = running({
+      'durable-goal': { status, payload: metadata(), output: metadata(), suspendPayload: metadata() },
+    });
+    const pruned = pruneAgentLoopSnapshot({ snapshot });
+    for (const side of ['payload', 'output', 'suspendPayload']) {
+      expect((pruned.context['durable-goal'] as any)[side]).toEqual(metadata());
+    }
+  });
+
+  it('keeps unknown step and opaque parallel tool metadata', () => {
+    const foreachOutput = [
+      { status: 'success', output: metadata() },
+      { status: 'suspended', suspendPayload: metadata() },
+    ];
+    const snapshot = running({
+      'customer-tool': { status: 'success', payload: metadata(), output: metadata(), prevOutput: metadata() },
+      'durable-tool-call': {
+        status: 'suspended',
+        payload: metadata(),
+        suspendPayload: { __workflow_meta: { foreachOutput } },
+      },
+    });
+    const pruned = pruneAgentLoopSnapshot({ snapshot });
+    expect(pruned.context['customer-tool']).toEqual(snapshot.context['customer-tool']);
+    expect(pruned.context['durable-tool-call']).toEqual(snapshot.context['durable-tool-call']);
+  });
+});
+
 describe('pruneAgentLoopSnapshot nested durable request echoes', () => {
   it('does not interpret tool arguments or results as native iteration state', () => {
     const opaque = {
