@@ -82,7 +82,9 @@ describe('durable completion checkpoint round trips', () => {
           completionMs: completionFinishedAt - completionStartedAt,
         }) + '\n',
       );
-      expect(writes.length).toBeLessThanOrEqual(13);
+      // Empty extract/collect/tool/bg/signal routing boundaries may skip their
+      // own running writes; material results still land in a later checkpoint.
+      expect(writes.length).toBeLessThanOrEqual(9);
       const completions = new Set(
         writes.flatMap(w => w.steps.filter(([, status]) => status === 'success').map(([id]) => id)),
       );

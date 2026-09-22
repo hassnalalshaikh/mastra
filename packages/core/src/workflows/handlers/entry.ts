@@ -85,6 +85,32 @@ function getSequentialCheckpointStep(snapshot: WorkflowRunState, index = snapsho
 }
 
 /**
+ * Durable agent empty-routing completions that do not introduce side effects,
+ * tool results, or conversation mutations. When checkpoint reuse is enabled,
+ * their running entry-end writes are redundant: recoverActiveRuns already has a
+ * prior `running` row, and restart re-enters from the last material checkpoint
+ * with the in-memory step graph rebuilt on the next persisted write.
+ *
+ * Never skip LLM execution, real tool calls, mapping, goal, or iteration-state
+ * updates — those carry recovery-authoritative results.
+ */
+function isEmptyDurableRoutingCompletion(
+  stepId: string,
+  stepResult: StepResult<any, any, any, any> | undefined,
+): boolean {
+  if (!stepResult || stepResult.status !== 'success') return false;
+  const output = (stepResult as { output?: unknown }).output;
+  if (stepId === 'extract-tool-calls') return Array.isArray(output) && output.length === 0;
+  if (stepId === 'durable-tool-call') return Array.isArray(output) && output.length === 0;
+  if (stepId === 'collect-tool-results') {
+    if (!output || typeof output !== 'object' || Array.isArray(output)) return false;
+    const toolResults = (output as { toolResults?: unknown }).toolResults;
+    return Array.isArray(toolResults) && toolResults.length === 0;
+  }
+  return stepId === 'durable-agentic-execution-bg-task-check' || stepId === 'durable-agentic-execution-signal-drain';
+}
+
+/**
  * After resuming a single step within a parallel or conditional block, check whether
  * all relevant branch steps are now complete and build the appropriate block-level result.
  *
@@ -350,6 +376,31 @@ export async function persistStepUpdate(
         // Non-cloneable values retain the ordinary start checkpoint.
       }
     }
+
+    if (
+      canReuse &&
+      phase === 'entry-end' &&
+      workflowStatus === 'running' &&
+      stepId &&
+      isEmptyDurableRoutingCompletion(stepId, persistedSnapshot.context[stepId])
+    ) {
+      // Keep the in-memory reuse chain so the next start can also skip, but do
+      // not pay another storage round trip for an empty routing boundary.
+      if (
+        candidate &&
+        persistedSnapshot.context[stepId]?.status === 'success' &&
+        candidate.fingerprint ===
+          checkpointFingerprint(
+            persistedSnapshot.value,
+            persistedSnapshot.requestContext,
+            persistedSnapshot.context[stepId].output,
+          )
+      ) {
+        engine.setCompletedStepCheckpoint(runId, candidate);
+      }
+      return;
+    }
+
     const workflowsStore = await engine.mastra?.getStorage()?.getStore('workflows');
     await workflowsStore?.persistWorkflowSnapshot({
       workflowName: workflowId,
