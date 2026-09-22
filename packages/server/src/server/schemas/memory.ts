@@ -563,6 +563,7 @@ export const updateThreadBodySchema = z.object({
  */
 export const updateWorkingMemoryBodySchema = z.object({
   workingMemory: z.string(),
+  mode: z.enum(['replace', 'merge']).optional(),
   resourceId: z.string().optional(),
   memoryConfig: z.record(z.string(), z.unknown()).optional(),
 });
