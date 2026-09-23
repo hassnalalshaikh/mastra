@@ -5150,7 +5150,11 @@ export class Session<TState = unknown> {
     } finally {
       unsubscribeStart?.();
       resumedSubscriptionBoundary.cancel();
-      if (isCurrent()) await this.thread.ensureSubscription(threadId, this.machinery.getAgent(), false, isCurrent);
+      // A resumed run can suspend again. Keep its owning subscription until the
+      // parked work finishes; rebinding to the selected mode here can replay the
+      // old stream and replace the next question while its answer is claimed.
+      if (isCurrent() && !this.suspensions.hasPending() && !this.approval.isArmed())
+        await this.thread.ensureSubscription(threadId, this.machinery.getAgent(), false, isCurrent);
     }
   }
 

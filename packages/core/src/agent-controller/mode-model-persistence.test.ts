@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { Memory } from '../../../memory/src';
 import { Agent } from '../agent';
 import { InMemoryStore } from '../storage/mock';
 import { MastraLanguageModelV2Mock } from '../test-utils/llm-mock';
@@ -184,7 +185,7 @@ describe('AgentController mode-model persistence across restarts', () => {
   });
 
   it.each([true, false])(
-    'keeps using the plan-mode agent when a resumed submit_plan run suspends again after switching to build (controller storage: %s)',
+    'resumes submit_plan with saved conversation storage and rejects missing storage (controller storage: %s)',
     async hasStorage => {
       let planCalls = 0;
       let buildCalls = 0;
@@ -192,6 +193,7 @@ describe('AgentController mode-model persistence across restarts', () => {
         id: 'plan-agent',
         name: 'plan-agent',
         instructions: 'You plan work.',
+        ...(hasStorage ? { memory: new Memory({ storage, options: { generateTitle: false } }) } : {}),
         model: new MastraLanguageModelV2Mock({
           doStream: async () => {
             planCalls += 1;
@@ -226,6 +228,7 @@ describe('AgentController mode-model persistence across restarts', () => {
         workspace: createMockWorkspace(),
         id: 'test-controller',
         ...(hasStorage ? { storage } : {}),
+        defaultModeId: 'build',
         initialState: { yolo: true } as any,
         modes: [
           { id: 'plan', name: 'Plan', default: true, transitionsTo: 'build', agent: planAgent },
@@ -235,6 +238,7 @@ describe('AgentController mode-model persistence across restarts', () => {
       await controller.init();
       const session = await controller.createSession({ id: 'test-session', ownerId: 'test-owner' });
       await session.thread.create();
+      await session.mode.switch({ modeId: 'plan' });
 
       const events: any[] = [];
       session.subscribe(event => {
@@ -247,19 +251,39 @@ describe('AgentController mode-model persistence across restarts', () => {
       events.length = 0;
       await session.respondToToolSuspension({ toolCallId: suspended.toolCallId, resumeData: { action: 'approved' } });
 
+      if (!hasStorage) {
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: 'error',
+            error: expect.objectContaining({ message: 'Storage is not configured on this AgentController' }),
+          }),
+        );
+        expect(events.some(event => event.type === 'tool_suspended')).toBe(false);
+        expect(planCalls).toBe(1);
+        expect(buildCalls).toBe(0);
+        expect(buildResume).not.toHaveBeenCalled();
+        return;
+      }
+
       const resuspended = events.find(event => event.type === 'tool_suspended');
       expect(resuspended?.toolCallId).toBe('plan-call-2');
       expect(planCalls).toBe(2);
       expect(planResume).toHaveBeenCalledTimes(1);
       expect(buildResume).not.toHaveBeenCalled();
       expect(session.mode.get()).toBe('build');
+      expect(session.stream.getCurrentAgent()).toBe(planAgent);
 
       events.length = 0;
       await session.respondToToolSuspension({ toolCallId: resuspended.toolCallId, resumeData: { action: 'approved' } });
 
-      expect(planCalls).toBe(2);
+      await vi.waitFor(() => expect(events.some(event => event.type === 'agent_end')).toBe(true));
+      expect(planCalls).toBe(3);
       expect(planResume).toHaveBeenCalledTimes(2);
       expect(buildResume).not.toHaveBeenCalled();
+      expect(buildCalls).toBe(0);
+      expect(session.suspensions.hasPending()).toBe(false);
+      expect(session.mode.get()).toBe('build');
+      expect(session.stream.getCurrentAgent()).toBe(buildAgent);
       expect(events.some(event => event.type === 'error')).toBe(false);
     },
   );

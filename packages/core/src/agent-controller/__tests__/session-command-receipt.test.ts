@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import z from 'zod';
+import { Memory } from '../../../../memory/src';
 import { Agent } from '../../agent';
 import { InMemoryStore } from '../../storage';
 import { MastraLanguageModelV2Mock } from '../../test-utils/llm-mock';
@@ -39,6 +40,7 @@ function nativeStream(toolName?: string) {
 
 async function nativeFixture(plan = false) {
   let calls = 0;
+  const storage = new InMemoryStore();
   const confirm = createTool({
     id: 'confirm',
     description: 'Ask for confirmation',
@@ -53,6 +55,7 @@ async function nativeFixture(plan = false) {
     id: 'plan',
     name: 'plan',
     instructions: 'Ask once.',
+    memory: new Memory({ storage, options: { generateTitle: false } }),
     model: new MastraLanguageModelV2Mock({
       doStream: async () => ({ stream: nativeStream(calls++ === 0 ? (plan ? 'submit_plan' : 'confirm') : undefined) }),
     }),
@@ -67,7 +70,7 @@ async function nativeFixture(plan = false) {
   const controller = new AgentController({
     id: 'receipt-native',
     workspace: createMockWorkspace(),
-    storage: new InMemoryStore(),
+    storage,
     initialState: { yolo: true } as any,
     modes: [
       { id: 'plan', name: 'Plan', default: true, agent, ...(plan ? { transitionsTo: 'build' } : {}) },
