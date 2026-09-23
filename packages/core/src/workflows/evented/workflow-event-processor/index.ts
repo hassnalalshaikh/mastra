@@ -492,14 +492,16 @@ export class WorkflowEventProcessor extends EventProcessor {
   }
 
   protected async processWorkflowCancel({ workflowId, runId, prevResult, ...args }: ProcessorArgs) {
-    // Cancel this workflow and all nested child workflows
-    this.cancelRunAndChildren(runId);
-
     const workflowsStore = await this.mastra.getStorage()?.getStore('workflows');
     const currentState = await workflowsStore?.loadWorkflowSnapshot({
       workflowName: workflowId,
       runId,
     });
+
+    if (currentState && ['success', 'failed', 'tripwire', 'bailed', 'skipped'].includes(currentState.status)) return;
+
+    // Cancel only active runs; a delayed command must preserve completed results.
+    this.cancelRunAndChildren(runId);
 
     if (!currentState) {
       this.mastra.getLogger()?.warn('Canceling workflow without loaded state', { workflowId, runId });
@@ -669,7 +671,7 @@ export class WorkflowEventProcessor extends EventProcessor {
       }) ?? true;
 
     if (shouldPersist) {
-      await workflowsStore?.updateWorkflowState({
+      const updated = await workflowsStore?.updateWorkflowState({
         workflowName: workflowId,
         runId,
         opts: {
@@ -677,8 +679,12 @@ export class WorkflowEventProcessor extends EventProcessor {
           result: normalizedPrevResult,
           activePaths: executionPath,
           activeStepsPath: activeStepsPath,
+          ...(finalStatus === 'canceled'
+            ? { expectedStatus: ['pending', 'running', 'waiting', 'suspended', 'paused', 'canceled'] }
+            : {}),
         },
       });
+      if (finalStatus === 'canceled' && workflowsStore && !updated) return;
     } else if (finalStatus !== 'paused') {
       // The run reached a terminal state its workflow opted not to persist
       // (e.g. the durable agentic loop, the internal `executionWorkflow`

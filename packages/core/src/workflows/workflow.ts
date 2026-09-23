@@ -3454,7 +3454,125 @@ export class Run<
    * This aborts any running execution and updates the workflow status to 'canceled' in storage.
    */
   async cancel() {
-    if (['success', 'failed', 'canceled'].includes(this.workflowRunStatus)) return;
+    await this.cancelWithDescendants(new Set(), new Set());
+  }
+
+  /** Cancel only runs named by this run's saved native workflow graph. */
+  private async cancelWithDescendants(visiting: Set<string>, visited: Set<string>): Promise<void> {
+    const key = JSON.stringify([this.workflowId, this.runId]);
+    if (visiting.has(key)) throw new Error('Cyclic nested workflow cancellation link');
+    if (visited.has(key)) return;
+    visiting.add(key);
+    try {
+      const store = await this.mastra?.getStorage()?.getStore('workflows');
+      const record = await store?.getWorkflowRunById({ workflowName: this.workflowId, runId: this.runId });
+      const snapshot: WorkflowRunState | undefined =
+        typeof record?.snapshot === 'string' ? JSON.parse(record.snapshot) : record?.snapshot;
+      if (snapshot) {
+        if (
+          ![
+            'pending',
+            'running',
+            'waiting',
+            'suspended',
+            'paused',
+            'canceled',
+            'success',
+            'failed',
+            'tripwire',
+            'bailed',
+            'skipped',
+          ].includes(snapshot.status)
+        ) {
+          throw new Error('Invalid saved workflow status for cancellation');
+        }
+        this.workflowRunStatus = snapshot.status;
+      }
+      if (['success', 'failed', 'tripwire', 'bailed', 'skipped'].includes(this.workflowRunStatus)) return;
+
+      const children: Array<{ workflow: Workflow; runId: string; resourceId?: string }> = [];
+      if (snapshot) {
+        if (
+          !Array.isArray(snapshot.serializedStepGraph) ||
+          !snapshot.context ||
+          typeof snapshot.context !== 'object' ||
+          Array.isArray(snapshot.context)
+        ) {
+          throw new Error('Invalid saved workflow graph for cancellation');
+        }
+        for (const [stepId, result] of Object.entries(snapshot.context)) {
+          const graphEntry = findStepInGraph(snapshot.serializedStepGraph, stepId);
+          const entry = graphEntry?.type === 'foreach' || graphEntry?.type === 'loop' ? graphEntry.step : graphEntry;
+          const nestedId =
+            entry?.type === 'workflow'
+              ? entry.workflowId
+              : entry?.type === 'step' && entry.step.component === 'WORKFLOW'
+                ? entry.step.id
+                : undefined;
+          if (!nestedId) continue;
+          const workflow = this.workflowSteps[stepId];
+          if (!(workflow instanceof Workflow) || workflow.id !== nestedId) {
+            throw new Error('Saved nested workflow is unavailable for cancellation');
+          }
+          const foreachResults =
+            graphEntry?.type === 'foreach' && !Array.isArray(result)
+              ? result?.suspendPayload?.__workflow_meta?.foreachOutput
+              : undefined;
+          if (foreachResults !== undefined && !Array.isArray(foreachResults)) {
+            throw new Error('Invalid saved nested workflow iteration links');
+          }
+          const invocationResults = foreachResults ?? (Array.isArray(result) ? result : [result]);
+          for (const invocation of invocationResults) {
+            const metadata = invocation?.metadata?.nestedRunId;
+            // Default non-foreach workflows share the parent's run ID. This is
+            // the same native identity rule used by getWorkflowRunSteps.
+            const usesParentId =
+              metadata === undefined && this.workflowEngineType === 'default' && graphEntry?.type !== 'foreach';
+            if (metadata === undefined && !usesParentId) {
+              if (
+                !invocation ||
+                ['pending', 'success', 'failed', 'canceled', 'tripwire', 'bailed', 'skipped'].includes(
+                  invocation.status,
+                )
+              )
+                continue;
+              throw new Error('Saved nested workflow run link is missing');
+            }
+            const ids = usesParentId ? [this.runId] : Array.isArray(metadata) ? metadata : [metadata];
+            for (const runId of ids) {
+              if (typeof runId !== 'string' || !runId.trim()) throw new Error('Invalid saved nested workflow run link');
+              const child = await store!.getWorkflowRunById({ workflowName: nestedId, runId });
+              // A non-persisting default child has no saved run to cancel.
+              if (
+                !child &&
+                usesParentId &&
+                ['success', 'failed', 'canceled', 'tripwire', 'bailed', 'skipped'].includes(invocation.status)
+              )
+                continue;
+              if (!child || (child.resourceId ?? null) !== (record?.resourceId ?? null)) {
+                throw new Error('Saved nested workflow cancellation ownership is unavailable');
+              }
+              children.push({ workflow, runId, resourceId: child.resourceId });
+            }
+          }
+        }
+      }
+      if (!(await this.cancelSelf())) return;
+      for (const child of children) {
+        if (this.mastra) child.workflow.__registerMastra(this.mastra);
+        const run = await child.workflow.createRun({ runId: child.runId, resourceId: child.resourceId });
+        await run.cancelWithDescendants(visiting, visited);
+      }
+      visited.add(key);
+    } finally {
+      visiting.delete(key);
+    }
+  }
+
+  /** Engine-specific delivery; shared cancellation owns saved descendants. */
+  protected async cancelSelf(): Promise<boolean> {
+    if (['success', 'failed', 'tripwire', 'bailed', 'skipped'].includes(this.workflowRunStatus)) return false;
+    if (this.workflowRunStatus === 'canceled') return true;
 
     // Deliver cancellation immediately, even if persisting it later fails.
     this.abortController.abort();
@@ -3467,14 +3585,18 @@ export class Run<
       runId: this.runId,
       opts: {
         status: 'canceled',
-        expectedStatus: ['pending', 'running', 'waiting', 'suspended'],
+        expectedStatus: ['pending', 'running', 'waiting', 'suspended', 'paused'],
       },
     });
     // A concurrent completion or prior cancellation wins the storage condition.
     // Do not relabel its in-memory status or completed span as canceled.
-    if (workflowsStore && !canceled) return;
+    if (workflowsStore && !canceled) {
+      const current = await workflowsStore.loadWorkflowSnapshot({ workflowName: this.workflowId, runId: this.runId });
+      return current?.status === 'canceled';
+    }
     this.workflowRunStatus = 'canceled';
     this.workflowRunSpan?.endTree({ attributes: { status: 'canceled' } });
+    return true;
   }
 
   async #validateSchema<TInput>(schema: StandardSchemaWithJSON<TInput>, data: TInput, type: string) {

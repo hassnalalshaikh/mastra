@@ -1828,6 +1828,9 @@ export class EventedRun<
   TInput = unknown,
   TOutput = unknown,
 > extends Run<TEngineType, TSteps, TState, TInput, TOutput> {
+  private abortHandlerInstalled = false;
+  private cancellationPublished?: Promise<void>;
+  private cancellationPublicationFailed = false;
   constructor(params: {
     workflowId: string;
     runId: string;
@@ -1858,21 +1861,24 @@ export class EventedRun<
    * This ensures consistent cancellation behavior whether abort() is called directly or via cancel().
    */
   private setupAbortHandler(): void {
-    const abortHandler = () => {
-      this.mastra?.pubsub
-        .publish('workflows', {
-          type: 'workflow.cancel',
-          runId: this.runId,
-          data: {
-            workflowId: this.workflowId,
-            runId: this.runId,
-          },
-        })
-        .catch(err => {
-          this.mastra?.getLogger()?.error(`Failed to publish workflow.cancel for runId ${this.runId}:`, err);
-        });
-    };
-    this.abortController.signal.addEventListener('abort', abortHandler, { once: true });
+    if (this.abortHandlerInstalled) return;
+    this.abortHandlerInstalled = true;
+    this.abortController.signal.addEventListener('abort', () => this.publishCancellation(), { once: true });
+  }
+
+  private publishCancellation(): void {
+    if (this.cancellationPublished) return;
+    this.cancellationPublished = this.mastra?.pubsub.publish('workflows', {
+      type: 'workflow.cancel',
+      runId: this.runId,
+      data: {
+        workflowId: this.workflowId,
+        runId: this.runId,
+      },
+    });
+    this.cancellationPublished?.catch(err => {
+      this.mastra?.getLogger()?.error(`Failed to publish workflow.cancel for runId ${this.runId}:`, err);
+    });
   }
 
   async start({
@@ -2506,23 +2512,25 @@ export class EventedRun<
     };
   }
 
-  async cancel() {
-    // Update storage directly for immediate status update (same pattern as Inngest)
-    const workflowsStore = await this.mastra?.getStorage()?.getStore('workflows');
-    await workflowsStore?.updateWorkflowState({
-      workflowName: this.workflowId,
-      runId: this.runId,
-      opts: {
-        status: 'canceled',
-      },
-    });
-
-    // End the whole span tree now: a step that ignores abortSignal keeps running, so the
-    // execution engine may never unwind and no span in the tree would otherwise be ended.
-    this.workflowRunSpan?.endTree({ attributes: { status: 'canceled' } });
-
-    // Trigger abort signal - the abort handler will publish the workflow.cancel event
-    // This ensures consistent behavior whether cancel() or abort() is called
-    this.abortController.abort();
+  protected async cancelSelf(): Promise<boolean> {
+    // Reconstructed runs must notify the existing worker without start/resume.
+    // Only a later explicit command may retry failed delivery.
+    if (this.cancellationPublicationFailed) {
+      this.cancellationPublished = undefined;
+      this.cancellationPublicationFailed = false;
+    }
+    this.setupAbortHandler();
+    const canceled = await super.cancelSelf();
+    if (canceled) {
+      this.abortController.abort();
+      this.publishCancellation();
+    }
+    try {
+      await this.cancellationPublished;
+    } catch (error) {
+      this.cancellationPublicationFailed = true;
+      throw error;
+    }
+    return canceled;
   }
 }
