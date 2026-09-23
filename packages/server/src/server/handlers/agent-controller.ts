@@ -201,10 +201,14 @@ const steerBodySchema = z.object({ message: z.string(), requestContext: bodyRequ
 const toolApprovalBodySchema = z.object({
   toolCallId: z.string(),
   approved: z.boolean(),
+  expectedRunId: z.string().optional(),
+  expectedOperationId: z.number().int().nonnegative().optional(),
   requestContext: bodyRequestContextSchema,
 });
 const toolSuspensionBodySchema = z.object({
   toolCallId: z.string(),
+  expectedRunId: z.string().optional(),
+  expectedOperationId: z.number().int().nonnegative().optional(),
   // Free-form resume payload. For ask_user this is a string (or string[] for
   // multi-select); for submit_plan it's `{ action, feedback? }`; for
   // request_access it's "Yes"/"No".
@@ -271,6 +275,24 @@ const createSessionResponseSchema = z.object({
   threadId: z.string().optional(),
 });
 const ackResponseSchema = z.object({ ok: z.boolean() });
+// Successful transport is separate from acceptance by the native command gate.
+const commandResponseSchema = z.object({
+  ok: z.boolean(),
+  receipt: z.intersection(
+    z.object({
+      command: z.enum(['approval', 'suspension', 'abort']),
+      toolCallId: z.string().optional(),
+      runId: z.string().optional(),
+    }),
+    z.discriminatedUnion('accepted', [
+      z.object({ accepted: z.literal(true) }),
+      z.object({
+        accepted: z.literal(false),
+        reason: z.enum(['no_pending_target', 'stale_target', 'ambiguous_target', 'stopping', 'unavailable']),
+      }),
+    ]),
+  ),
+});
 /**
  * Status-line relevant slice of the session's observational-memory progress.
  * Mirrors the TUI status line: `msg pending/threshold ↓removal` (the active
@@ -720,14 +742,26 @@ export const ABORT_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   path: '/agent-controller/:controllerId/sessions/:resourceId/abort',
   responseType: 'json' as const,
   pathParamSchema: sessionPathParams,
-  queryParamSchema: sessionScopeQuerySchema,
-  responseSchema: ackResponseSchema,
+  queryParamSchema: sessionScopeQuerySchema.extend({
+    expectedRunId: z.string().optional(),
+    expectedOperationId: z.coerce.number().int().nonnegative().optional(),
+  }),
+  responseSchema: commandResponseSchema,
   summary: 'Abort a controller session run',
   description: 'Aborts the in-flight run for the session, if any.',
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, sessionThreadId, requestContext }) => {
+  handler: async ({
+    mastra,
+    controllerId,
+    resourceId,
+    sessionScope,
+    sessionThreadId,
+    requestContext,
+    expectedRunId,
+    expectedOperationId,
+  }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(
@@ -736,8 +770,8 @@ export const ABORT_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      session.abort();
-      return { ok: true };
+      const receipt = session.abort({ expectedRunId, expectedOperationId });
+      return { ok: receipt.accepted, receipt };
     } catch (error) {
       return handleError(error, 'error aborting controller session');
     }
@@ -751,7 +785,7 @@ export const AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE = createRoute({
   pathParamSchema: sessionPathParams,
   queryParamSchema: sessionScopeQuerySchema,
   bodySchema: toolApprovalBodySchema,
-  responseSchema: ackResponseSchema,
+  responseSchema: commandResponseSchema,
   summary: 'Respond to a controller tool approval',
   description: 'Approves or declines a pending tool call surfaced by the session.',
   tags: ['AgentController'],
@@ -766,6 +800,8 @@ export const AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE = createRoute({
     toolCallId,
     approved,
     requestContext,
+    expectedRunId,
+    expectedOperationId,
   }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
@@ -780,8 +816,14 @@ export const AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE = createRoute({
       // Calling approveToolCall/declineToolCall directly would bypass the gate,
       // leaving the run loop hung and duplicating the resumed stream.
       // Pass toolCallId so a stale request cannot resolve a different pending gate.
-      session.respondToToolApproval({ toolCallId, decision: approved ? 'approve' : 'decline', requestContext });
-      return { ok: true };
+      const receipt = session.respondToToolApproval({
+        toolCallId,
+        decision: approved ? 'approve' : 'decline',
+        requestContext,
+        expectedRunId,
+        expectedOperationId,
+      });
+      return { ok: receipt.accepted, receipt };
     } catch (error) {
       return handleError(error, 'error responding to controller tool approval');
     }
@@ -795,7 +837,7 @@ export const AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE = createRoute({
   pathParamSchema: sessionPathParams,
   queryParamSchema: sessionScopeQuerySchema,
   bodySchema: toolSuspensionBodySchema,
-  responseSchema: ackResponseSchema,
+  responseSchema: commandResponseSchema,
   summary: 'Respond to a suspended controller tool',
   description:
     'Resumes a suspended interactive tool (ask_user, request_access, submit_plan) with the provided resume data.',
@@ -811,6 +853,8 @@ export const AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE = createRoute({
     toolCallId,
     resumeData,
     requestContext,
+    expectedRunId,
+    expectedOperationId,
   }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
@@ -823,13 +867,14 @@ export const AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE = createRoute({
       // A resumed tool drives the run to its next terminal or suspension boundary.
       // Awaiting it holds this request open until the continuation finishes, which
       // can trip the request timeout and leave CORS mutating an already-sent response.
-      ackBackgroundSessionWork({
-        work: session.respondToToolSuspension({ toolCallId, resumeData, requestContext }),
-        session,
-        mastra,
-        operation: 'respondToToolSuspension',
+      const receipt = await session.respondToToolSuspensionWithReceipt({
+        toolCallId,
+        resumeData,
+        requestContext,
+        expectedRunId,
+        expectedOperationId,
       });
-      return { ok: true };
+      return { ok: receipt.accepted, receipt };
     } catch (error) {
       return handleError(error, 'error responding to controller tool suspension');
     }

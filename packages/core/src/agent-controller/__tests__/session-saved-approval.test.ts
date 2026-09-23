@@ -204,12 +204,44 @@ describe('saved Session approvals', () => {
     );
     await f.session.restorePendingApproval({ threadId: 'thread', subscription: f.subscription });
     f.session.respondToToolApproval({ decision: 'approve', toolCallId: 'saved-call' });
+    expect(f.session.approval.getRunId()).toBe('saved-run');
     await vi.waitFor(() => expect(f.sendToolApproval).toHaveBeenCalledTimes(1));
     await expect(f.session.sendSignal({ content: 'Another message' }).accepted).rejects.toThrow(
       'Respond to the saved tool approval',
     );
     finish();
     await vi.waitFor(() => expect(f.session.approval.isRestored()).toBe(false));
+    expect(f.session.approval.getRunId()).toBeNull();
+  });
+
+  it('does not deliver a prepared saved decision after its tool ID is rebound to another native run', async () => {
+    const f = fixture();
+    let release!: (value: any) => void;
+    f.session.setMachinery({
+      getAgent: () => f.agent,
+      buildRequestContext: () =>
+        new Promise(resolve => {
+          release = resolve;
+        }),
+      buildToolsets: async () => ({}),
+    } as any);
+    await f.session.restorePendingApproval({ threadId: 'thread', subscription: f.subscription });
+    expect(
+      f.session.respondToToolApproval({ decision: 'approve', toolCallId: 'saved-call', expectedRunId: 'saved-run' }),
+    ).toMatchObject({ accepted: true, runId: 'saved-run' });
+    const nextDecision = vi.fn();
+    f.session.approval.restore({
+      toolName: 'fixture',
+      toolCallId: 'saved-call',
+      runId: 'new-run',
+      respond: nextDecision,
+    });
+    release({});
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.sendToolApproval).not.toHaveBeenCalled();
+    expect(nextDecision).not.toHaveBeenCalled();
+    expect(f.session.approval.getRunId()).toBe('new-run');
+    expect(f.session.approval.isArmed()).toBe(true);
   });
 
   it('rejects a stale discovery after reconnecting to the same thread', async () => {

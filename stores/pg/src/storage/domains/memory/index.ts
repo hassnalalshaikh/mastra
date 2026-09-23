@@ -104,6 +104,8 @@ import {
 } from '../../db';
 import type { PgDomainConfig } from '../../db';
 import { runPrune, runBatchedDelete, resolveTargets } from '../../retention';
+import { scanById } from './scan';
+import type { MemoryScanInput, MemoryMessageScanInput, MemoryScanPage } from './scan';
 
 // Database row type that includes timezone-aware columns
 type MessageRowFromDB = {
@@ -273,7 +275,7 @@ export class MemoryPG extends MemoryStorage {
    * @param schemaPrefix - Prefix for index names (e.g. "my_schema_" or "")
    */
   static getDefaultIndexDefs(schemaPrefix: string): CreateIndexOptions[] {
-    return [
+    const indexes: CreateIndexOptions[] = [
       {
         name: `${schemaPrefix}mastra_threads_resourceid_createdat_idx`,
         table: TABLE_THREADS,
@@ -284,7 +286,29 @@ export class MemoryPG extends MemoryStorage {
         table: TABLE_MESSAGES,
         columns: ['thread_id', 'createdAt DESC'],
       },
+      {
+        name: `${schemaPrefix}mastra_threads_resourceid_id_idx`,
+        table: TABLE_THREADS,
+        columns: ['resourceId', 'id'],
+      },
+      {
+        name: `${schemaPrefix}mastra_messages_resourceid_id_idx`,
+        table: TABLE_MESSAGES,
+        columns: ['resourceId', 'id'],
+      },
+      {
+        name: `${schemaPrefix}mastra_messages_thread_id_id_idx`,
+        table: TABLE_MESSAGES,
+        columns: ['thread_id', 'id'],
+      },
     ];
+    // Index names are scoped to their table's schema. Drop the redundant prefix
+    // only when it would exceed PostgreSQL's identifier limit; preserve existing
+    // valid names so initialization doesn't create duplicate indexes.
+    return indexes.map(index => ({
+      ...index,
+      name: index.name.length > 63 ? index.name.slice(schemaPrefix.length) : index.name,
+    }));
   }
 
   /**
@@ -524,6 +548,71 @@ export class MemoryPG extends MemoryStorage {
     }
   }
 
+  /**
+   * Scan retained threads in stable ID order. Deletions and metadata/date edits
+   * do not shift later records behind the cursor. This is not a snapshot:
+   * inserts behind the cursor are visited by the next scan.
+   */
+  public async scanThreads(input: MemoryScanInput = {}): Promise<MemoryScanPage<StorageThreadType>> {
+    if (input.resourceId !== undefined && (typeof input.resourceId !== 'string' || !input.resourceId.trim())) {
+      throw new Error('Memory scan resourceId must be a nonempty string.');
+    }
+    const table = getTableName({ indexName: TABLE_THREADS, schemaName: getSchemaName(this.#schema) });
+    const page = await scanById<StorageThreadType & { createdAtZ?: Date; updatedAtZ?: Date }>({
+      client: this.#db.client,
+      table,
+      select: 'id, "resourceId", title, metadata, "createdAt", "createdAtZ", "updatedAt", "updatedAtZ"',
+      scope: JSON.stringify([table, input.resourceId ?? null]),
+      input,
+      conditions: input.resourceId === undefined ? [] : ['"resourceId" = $1'],
+      values: input.resourceId === undefined ? [] : [input.resourceId],
+    });
+    return {
+      ...page,
+      records: page.records.map(thread => ({
+        id: thread.id,
+        resourceId: thread.resourceId,
+        title: thread.title,
+        metadata: typeof thread.metadata === 'string' ? JSON.parse(thread.metadata) : thread.metadata,
+        createdAt: thread.createdAtZ || thread.createdAt,
+        updatedAt: thread.updatedAtZ || thread.updatedAt,
+      })),
+    };
+  }
+
+  /**
+   * Bounded raw history scan, including messages whose thread row is absent.
+   * No semantic search, signal hiding, metadata filtering or total-count read.
+   * Resource/thread filters are applied on every page and bound into the cursor.
+   */
+  public async scanMessages(
+    input: MemoryMessageScanInput = {},
+  ): Promise<MemoryScanPage<MastraMessageV1 | MastraDBMessage>> {
+    const conditions: string[] = [];
+    const values: string[] = [];
+    for (const [column, value] of [
+      ['"resourceId"', input.resourceId],
+      ['thread_id', input.threadId],
+    ] as const) {
+      if (value === undefined) continue;
+      if (typeof value !== 'string' || !value.trim())
+        throw new Error('Memory scan resourceId/threadId must be nonempty strings.');
+      values.push(value);
+      conditions.push(`${column} = $${values.length}`);
+    }
+    const table = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
+    const page = await scanById<MessageRowFromDB>({
+      client: this.#db.client,
+      table,
+      select: 'id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"',
+      scope: JSON.stringify([table, input.resourceId ?? null, input.threadId ?? null]),
+      input,
+      conditions,
+      values,
+    });
+    return { ...page, records: page.records.map(row => this.parseRow(row)) };
+  }
+
   public async listThreads(args: StorageListThreadsInput): Promise<StorageListThreadsOutput> {
     const { page = 0, perPage: perPageInput, orderBy, filter } = args;
 
@@ -604,7 +693,7 @@ export class MemoryPG extends MemoryStorage {
 
       const limitValue = perPageInput === false ? total : perPage;
       // Select both standard and timezone-aware columns (*Z) for proper UTC timestamp handling
-      const dataQuery = `SELECT id, "resourceId", title, metadata, "createdAt", "createdAtZ", "updatedAt", "updatedAtZ" ${baseQuery} ORDER BY COALESCE("${field}Z", "${field}") ${direction} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      const dataQuery = `SELECT id, "resourceId", title, metadata, "createdAt", "createdAtZ", "updatedAt", "updatedAtZ" ${baseQuery} ORDER BY COALESCE("${field}Z", "${field}") ${direction}, "id" ${direction} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       const rows = await this.#db.client.manyOrNone<StorageThreadType & { createdAtZ: Date; updatedAtZ: Date }>(
         dataQuery,
         [...queryParams, limitValue, offset],
@@ -1108,7 +1197,7 @@ export class MemoryPG extends MemoryStorage {
 
     try {
       const { field, direction } = this.parseOrderBy(orderBy, 'ASC');
-      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}`;
+      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}, "id" ${direction}`;
 
       const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
       const tableName = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
@@ -1306,7 +1395,7 @@ export class MemoryPG extends MemoryStorage {
 
     try {
       const { field, direction } = this.parseOrderBy(orderBy, 'ASC');
-      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}`;
+      const orderByStatement = `ORDER BY COALESCE("${field}Z", "${field}") ${direction}, "id" ${direction}`;
 
       const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
       const tableName = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
@@ -1794,6 +1883,34 @@ export class MemoryPG extends MemoryStorage {
 
     return resource;
   }
+
+  mutateResourceWorkingMemory = async ({
+    resourceId,
+    update,
+  }: {
+    resourceId: string;
+    update: (current: string | null) => string;
+  }): Promise<void> => {
+    const tableName = getTableName({ indexName: TABLE_RESOURCES, schemaName: getSchemaName(this.#schema) });
+    await this.#db.client.tx(async transaction => {
+      const now = new Date().toISOString();
+      await transaction.none(
+        `INSERT INTO ${tableName} (id, "workingMemory", metadata, "createdAt", "updatedAt", "createdAtZ", "updatedAtZ")
+         VALUES ($1, NULL, '{}', $2::timestamptz AT TIME ZONE 'UTC', $2::timestamptz AT TIME ZONE 'UTC', $2::timestamptz, $2::timestamptz) ON CONFLICT (id) DO NOTHING`,
+        [resourceId, now],
+      );
+      const current = await transaction.one<{ workingMemory: string | null }>(
+        `SELECT "workingMemory" FROM ${tableName} WHERE id = $1 FOR UPDATE`,
+        [resourceId],
+      );
+      const workingMemory = update(current.workingMemory ?? null);
+      if (typeof workingMemory !== 'string') throw new Error('Working-memory updater must return a string');
+      await transaction.none(
+        `UPDATE ${tableName} SET "workingMemory" = $2, "updatedAt" = $3::timestamptz AT TIME ZONE 'UTC', "updatedAtZ" = $3::timestamptz WHERE id = $1`,
+        [resourceId, workingMemory, new Date().toISOString()],
+      );
+    });
+  };
 
   async updateResource({
     resourceId,

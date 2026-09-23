@@ -328,6 +328,34 @@ await session.respondToToolSuspension({
 
 For `submit_plan`, pass `{ action: 'approved' }` or `{ action: 'rejected', feedback }`. Approval can switch to the mode configured by `transitionsTo` before the tool resumes.
 
+#### Command acceptance receipts
+
+`respondToToolApproval()` and `abort()` return a `SessionCommandReceipt`.
+Use `respondToToolSuspensionWithReceipt()` for an answer receipt before the resumed run finishes.
+The existing `respondToToolSuspension()` still waits for the resumed run.
+
+```typescript
+const receipt = await session.respondToToolSuspensionWithReceipt({
+  toolCallId: event.toolCallId,
+  resumeData: 'Blue',
+  expectedRunId: savedRunId,
+  expectedOperationId: session.run.getOperationId(),
+})
+if (!receipt.accepted) console.log(receipt.reason)
+```
+
+The three commands accept optional `expectedRunId` and `expectedOperationId` checks.
+Receipts identify the command, accepted target tool/run when available, and whether the native gate accepted it.
+Rejection reasons are `no_pending_target`, `stale_target`, `ambiguous_target`, `stopping`, and `unavailable`.
+Acceptance is separate from execution, cancellation, artifact saving, and billing completion. Observe native session events for those outcomes.
+
+An unbound idle Stop is rejected. A bound thread Stop accepts cancellation of its captured thread scope,
+including native discovery of saved work; it does not assert that saved work exists or that cancellation finished.
+
+The HTTP routes return `{ ok: receipt.accepted, receipt }`. Public client command methods return accepted receipts
+and throw `SessionCommandRejectedError` with the rejected receipt. They send commands once: a lost or invalid
+response leaves acceptance unconfirmed and is never retried automatically.
+
 ### Token usage
 
 #### `getTokenUsage()`

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ActorSignal } from '../../auth/ee';
 import type { RequestContext } from '../../di';
 import type { SerializedError } from '../../error';
@@ -26,6 +27,87 @@ function publishStepEvent(
   ...args: Parameters<PubSub['publish']>
 ): Promise<void> {
   return engine.options.emitStepEvents === false ? Promise.resolve() : pubsub.publish(...args);
+}
+
+function checkpointFingerprint(value: unknown, requestContext: unknown, input: unknown): string | undefined {
+  try {
+    // Normalize exactly as JSON storage does, then ignore object insertion order.
+    // Pruning builds copies with a different key order but unchanged values.
+    const normalized = JSON.parse(JSON.stringify([value, requestContext, input]));
+    return createHash('sha256')
+      .update(
+        JSON.stringify(normalized, (_key, item) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+          return Object.fromEntries(
+            Object.keys(item)
+              .sort()
+              .map(key => [key, item[key]]),
+          );
+        }),
+      )
+      .digest('hex');
+  } catch {
+    // Unsupported serialization must take the normal persistence path.
+    return undefined;
+  }
+}
+
+function omitContextCallbacks(value: unknown): unknown {
+  if (typeof value === 'function') return undefined;
+  if (!value || typeof value !== 'object') return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value) && (prototype !== Array.prototype || Object.hasOwn(value, 'constructor'))) {
+    throw new Error('Custom context arrays require the ordinary checkpoint');
+  }
+  // Preserve custom encodings and non-plain values for the existing clone and
+  // JSON-equivalence checks. Only plain context data may lose callbacks.
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return value;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  // Do not evaluate application accessors while copying transient callbacks.
+  if (Object.values(descriptors).some(descriptor => descriptor.get || descriptor.set)) {
+    throw new Error('Context accessors require the ordinary checkpoint');
+  }
+  if (typeof descriptors.toJSON?.value === 'function') return value;
+  if (Array.isArray(value)) return Array.prototype.map.call(value, omitContextCallbacks);
+  return Object.fromEntries(
+    Object.entries(descriptors)
+      .filter(([, descriptor]) => descriptor.enumerable)
+      .map(([key, descriptor]) => [key, omitContextCallbacks(descriptor.value)]),
+  );
+}
+
+function getSequentialCheckpointStep(snapshot: WorkflowRunState, index = snapshot.activePaths[0]!): string | undefined {
+  if (snapshot.activePaths.length !== 1) return undefined;
+  const entry = snapshot.serializedStepGraph?.[index];
+  if (entry?.type === 'step' && entry.step.component !== 'WORKFLOW') return entry.step.id;
+  if (entry?.type === 'mapping' || entry?.type === 'agent' || entry?.type === 'tool') return entry.id;
+  return undefined;
+}
+
+/**
+ * Durable agent empty-routing completions that do not introduce side effects,
+ * tool results, or conversation mutations. When checkpoint reuse is enabled,
+ * their running entry-end writes are redundant: recoverActiveRuns already has a
+ * prior `running` row, and restart re-enters from the last material checkpoint
+ * with the in-memory step graph rebuilt on the next persisted write.
+ *
+ * Never skip LLM execution, real tool calls, mapping, goal, or iteration-state
+ * updates — those carry recovery-authoritative results.
+ */
+function isEmptyDurableRoutingCompletion(
+  stepId: string,
+  stepResult: StepResult<any, any, any, any> | undefined,
+): boolean {
+  if (!stepResult || stepResult.status !== 'success') return false;
+  const output = (stepResult as { output?: unknown }).output;
+  if (stepId === 'extract-tool-calls') return Array.isArray(output) && output.length === 0;
+  if (stepId === 'durable-tool-call') return Array.isArray(output) && output.length === 0;
+  if (stepId === 'collect-tool-results') {
+    if (!output || typeof output !== 'object' || Array.isArray(output)) return false;
+    const toolResults = (output as { toolResults?: unknown }).toolResults;
+    return Array.isArray(toolResults) && toolResults.length === 0;
+  }
+  return stepId === 'durable-agentic-execution-bg-task-check' || stepId === 'durable-agentic-execution-signal-drain';
 }
 
 /**
@@ -182,6 +264,8 @@ export async function persistStepUpdate(
   const operationId = `workflow.${workflowId}.run.${runId}.path.${JSON.stringify(executionContext.executionPath)}.stepUpdate${phase ? `.${phase}` : ''}`;
 
   await engine.wrapDurableOperation(operationId, async () => {
+    const completedCheckpoint = engine.getCompletedStepCheckpoint(runId);
+    engine.setCompletedStepCheckpoint(runId);
     // A run-scoped override (e.g. the transient per-chunk runs of a workflow used as an
     // agent output processor, #19605) wins over the workflow-wide option.
     const persistencePredicate = engine.getRunPersistenceOverride(runId) ?? engine.options?.shouldPersistSnapshot;
@@ -207,6 +291,7 @@ export async function persistStepUpdate(
     const requestContextObj = engine.serializeRequestContext(requestContext);
 
     const snapshot: WorkflowRunState = {
+      ...(phase === 'entry-end' && workflowStatus === 'running' ? { completedEntry: true } : {}),
       runId,
       status: workflowStatus,
       value: executionContext.state,
@@ -226,14 +311,119 @@ export async function persistStepUpdate(
       tracingContext,
     };
 
+    const canReuse = engine.options.reuseCompletedStepCheckpoint && engine.supportsCompletedStepCheckpointReuse();
+    const stepId = canReuse ? getSequentialCheckpointStep(snapshot) : undefined;
+    let persistedSnapshot = engine.options?.pruneSnapshot
+      ? engine.options.pruneSnapshot({ snapshot, workflowStatus })
+      : snapshot;
+    if (
+      canReuse &&
+      phase === 'start' &&
+      workflowStatus === 'running' &&
+      stepId &&
+      completedCheckpoint &&
+      completedCheckpoint.index + 1 === snapshot.activePaths[0] &&
+      Object.keys(snapshot.activeStepsPath ?? {}).length === 1 &&
+      snapshot.context[stepId]?.status === 'running' &&
+      completedCheckpoint.fingerprint ===
+        checkpointFingerprint(
+          persistedSnapshot.value,
+          persistedSnapshot.requestContext,
+          persistedSnapshot.context[stepId]?.payload,
+        )
+    ) {
+      // The acknowledged prior result contains exactly what restart needs to
+      // enter this step. No side effect occurs between that checkpoint and here.
+      return;
+    }
+
+    const nextStepId =
+      canReuse &&
+      phase === 'entry-end' &&
+      workflowStatus === 'running' &&
+      stepId &&
+      Object.keys(persistedSnapshot.activeStepsPath ?? {}).length === 0 &&
+      persistedSnapshot.context[stepId]?.status === 'success'
+        ? getSequentialCheckpointStep(persistedSnapshot, snapshot.activePaths[0]! + 1)
+        : undefined;
+    let candidate: { index: number; fingerprint: string } | undefined;
+    if (nextStepId && stepId) {
+      try {
+        // Detach before yielding: storage may serialize either before or after
+        // awaiting I/O, while callers can still mutate the live state or input.
+        const serialized = JSON.stringify(persistedSnapshot);
+        // Native memory carries a live runState callback in RequestContext.
+        // JSON storage already omits it; it must not disable checkpoint reuse.
+        // Leave step values unchanged and verify the complete stored encoding.
+        const detached = structuredClone({
+          ...persistedSnapshot,
+          requestContext: omitContextCallbacks(persistedSnapshot.requestContext),
+        }) as WorkflowRunState;
+        const completedResult = detached.context[stepId];
+        const fingerprint =
+          // Cloning Buffers or custom classes can change their JSON encoding.
+          // Such values must keep the existing persistence behavior.
+          serialized === JSON.stringify(detached) && completedResult?.status === 'success'
+            ? checkpointFingerprint(detached.value, detached.requestContext, completedResult.output)
+            : undefined;
+        if (fingerprint) {
+          // The start intent and preceding result share one acknowledged write.
+          // Recovery can enter the next step with restart:true and its input.
+          persistedSnapshot = { ...detached, preparedNextStep: nextStepId };
+          candidate = { index: detached.activePaths[0]!, fingerprint };
+        }
+      } catch {
+        // Non-cloneable values retain the ordinary start checkpoint.
+      }
+    }
+
+    if (
+      canReuse &&
+      phase === 'entry-end' &&
+      workflowStatus === 'running' &&
+      stepId &&
+      isEmptyDurableRoutingCompletion(stepId, persistedSnapshot.context[stepId])
+    ) {
+      // Keep the in-memory reuse chain so the next start can also skip, but do
+      // not pay another storage round trip for an empty routing boundary.
+      if (
+        candidate &&
+        persistedSnapshot.context[stepId]?.status === 'success' &&
+        candidate.fingerprint ===
+          checkpointFingerprint(
+            persistedSnapshot.value,
+            persistedSnapshot.requestContext,
+            persistedSnapshot.context[stepId].output,
+          )
+      ) {
+        engine.setCompletedStepCheckpoint(runId, candidate);
+      }
+      return;
+    }
+
     const workflowsStore = await engine.mastra?.getStorage()?.getStore('workflows');
     await workflowsStore?.persistWorkflowSnapshot({
       workflowName: workflowId,
       runId,
       resourceId,
-      snapshot: engine.options?.pruneSnapshot ? engine.options.pruneSnapshot({ snapshot, workflowStatus }) : snapshot,
+      snapshot: persistedSnapshot,
     });
     engine.setLastPersistedStatus(runId, workflowStatus);
+    if (
+      workflowsStore &&
+      candidate &&
+      stepId &&
+      persistedSnapshot.context[stepId]?.status === 'success' &&
+      candidate.fingerprint ===
+        checkpointFingerprint(
+          persistedSnapshot.value,
+          persistedSnapshot.requestContext,
+          persistedSnapshot.context[stepId].output,
+        )
+    ) {
+      // A storage adapter that mutates its argument also disables reuse.
+      engine.setCompletedStepCheckpoint(runId, candidate);
+    }
   });
 }
 

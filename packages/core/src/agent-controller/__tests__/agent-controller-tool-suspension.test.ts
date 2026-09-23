@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import z from 'zod';
+import { Memory } from '../../../../memory/src';
 import { Agent } from '../../agent';
 import { Mastra } from '../../mastra';
 import { InMemoryStore } from '../../storage';
@@ -266,8 +267,10 @@ describe('AgentController: tool suspension and resumption', () => {
       },
     });
 
+    const storage = new InMemoryStore();
     const agent = new Agent({
       id: 'test-agent-resume',
+      memory: new Memory({ storage, options: { generateTitle: false } }),
       name: 'Test Agent Resume',
       instructions: 'You confirm actions.',
       model: new MastraLanguageModelV2Mock({
@@ -282,7 +285,6 @@ describe('AgentController: tool suspension and resumption', () => {
       tools: { confirmAction: confirmTool },
     });
 
-    const storage = new InMemoryStore();
     const mastra = new Mastra({
       agents: { 'test-agent-resume': agent },
       logger: false,
@@ -327,6 +329,7 @@ describe('AgentController: tool suspension and resumption', () => {
 
     const resumeEnd = events.find((e: any) => e.type === 'agent_end');
     expect(resumeEnd).toBeDefined();
+    expect(events.filter((e: any) => e.type === 'error')).toEqual([]);
     expect(resumeEnd.reason).toBe('complete');
     expect(events.some((e: any) => e.type === 'error')).toBe(false);
 

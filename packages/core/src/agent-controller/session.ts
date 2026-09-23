@@ -55,6 +55,25 @@ import type {
 
 export const SUSPENDED_RUN_AGENT_KEY = createRunScopeKey<Agent>('agent-controller.suspendedRunAgent');
 
+/** Acceptance of a command, not completion of its execution or cancellation. */
+export type SessionCommandReceipt = {
+  command: 'approval' | 'suspension' | 'abort';
+  toolCallId?: string;
+  runId?: string;
+} & (
+  | { accepted: true }
+  | { accepted: false; reason: 'no_pending_target' | 'stale_target' | 'ambiguous_target' | 'stopping' | 'unavailable' }
+);
+
+/** Optional identity checks for a Stop button rendered for one native operation. */
+export type SessionAbortOptions = { expectedRunId?: string; expectedOperationId?: number };
+
+class SessionCommandRejected extends Error {
+  constructor(readonly reason: 'stale_target' | 'stopping') {
+    super(`Session command rejected: ${reason}`);
+  }
+}
+
 /**
  * Minimal persistence surface the Session uses to read and write per-thread
  * settings (mode id, per-mode model id, …). The AgentController backs this with thread
@@ -560,9 +579,15 @@ export class SessionThread {
    * Ensure the session is subscribed to the given agent/thread stream, opening a
    * fresh subscription (and driving its run loop) when the binding changed.
    */
-  async ensureSubscription(threadId: string, agent = this.#owner.machinery.getAgent(), strict = false): Promise<void> {
+  async ensureSubscription(
+    threadId: string,
+    agent = this.#owner.machinery.getAgent(),
+    strict = false,
+    isCurrent?: () => boolean,
+  ): Promise<void> {
     while (this.#subscriptionOpening) await this.#subscriptionOpening;
-    const opening = this.ensureSubscriptionOnce(threadId, agent, strict);
+    if (isCurrent && !isCurrent()) throw new SessionCommandRejected('stale_target');
+    const opening = this.ensureSubscriptionOnce(threadId, agent, strict, isCurrent);
     this.#subscriptionOpening = opening;
     try {
       await opening;
@@ -571,7 +596,12 @@ export class SessionThread {
     }
   }
 
-  private async ensureSubscriptionOnce(threadId: string, agent: Agent, strict: boolean): Promise<void> {
+  private async ensureSubscriptionOnce(
+    threadId: string,
+    agent: Agent,
+    strict: boolean,
+    isCurrent?: () => boolean,
+  ): Promise<void> {
     const session = this.#owner;
     const resourceId = this.#getResourceId();
     const key = SessionStream.keyFor({ agent, resourceId, threadId });
@@ -587,7 +617,8 @@ export class SessionThread {
     if (
       this.#threadId !== threadId ||
       this.#getResourceId() !== resourceId ||
-      session.run.getOperationId() !== operationId
+      session.run.getOperationId() !== operationId ||
+      (isCurrent && !isCurrent())
     ) {
       subscription.unsubscribe();
       throw new Error('Session target changed while subscribing');
@@ -1132,6 +1163,8 @@ export class SessionStream {
 
 /** A tool call parked awaiting a resume, keyed in {@link SessionSuspensions}. */
 export interface PendingSuspension {
+  /** Consumed by a response, retained for exact native Stop until handoff. */
+  claimed?: boolean;
   /** The run id to resume when this tool call is answered. */
   runId: string;
   /** The suspended tool's name (e.g. `ask_user`, `submit_plan`). */
@@ -1170,8 +1203,25 @@ export class SessionSuspensions {
   }
 
   /** Drop `toolCallId` from the parked set (e.g. once resumed). */
-  delete({ toolCallId }: { toolCallId: string }): void {
-    this.#pending.delete(toolCallId);
+  delete({ toolCallId, expected }: { toolCallId: string; expected?: PendingSuspension }): void {
+    if (!expected || this.#pending.get(toolCallId) === expected) this.#pending.delete(toolCallId);
+  }
+
+  /** Atomically consume a response while retaining its native cancellation target. */
+  claim({ toolCallId }: { toolCallId: string }): PendingSuspension | undefined {
+    const pending = this.#pending.get(toolCallId);
+    if (!pending || pending.claimed) return undefined;
+    pending.claimed = true;
+    return pending;
+  }
+
+  /** Return a failed claim to its original gate without replacing a newer one. */
+  restoreClaim({ toolCallId, expected }: { toolCallId: string; expected: PendingSuspension }): boolean {
+    const pending = this.#pending.get(toolCallId);
+    if (pending && pending !== expected) return false;
+    expected.claimed = false;
+    this.#pending.set(toolCallId, expected);
+    return true;
   }
 
   /**
@@ -1208,6 +1258,11 @@ export class SessionSuspensions {
     return this.#pending.size > 0;
   }
 
+  /** Unique native run identities represented by the current pending tools. */
+  getRunIds(): string[] {
+    return [...new Set([...this.#pending.values()].map(suspension => suspension.runId))];
+  }
+
   /**
    * Resolve which parked suspension to act on. With an explicit `toolCallId` it
    * must match a parked suspension; without one it returns the single parked
@@ -1215,12 +1270,11 @@ export class SessionSuspensions {
    */
   resolveToolCallId(toolCallId?: string): string | undefined {
     if (toolCallId) {
-      return this.#pending.has(toolCallId) ? toolCallId : undefined;
+      const pending = this.#pending.get(toolCallId);
+      return pending && !pending.claimed ? toolCallId : undefined;
     }
-    if (this.#pending.size === 1) {
-      return this.#pending.keys().next().value;
-    }
-    return undefined;
+    const available = [...this.#pending].filter(([, pending]) => !pending.claimed);
+    return available.length === 1 ? available[0]![0] : undefined;
   }
 }
 
@@ -1338,6 +1392,7 @@ export interface ApprovalResponse {
  */
 export class SessionApproval {
   #restored = false;
+  #runId: string | null = null;
   /** Resolver for the parked approval promise, or null when nothing is gated. */
   #resolve: ((decision: ApprovalDecision) => void) | null = null;
   /** Name of the tool currently awaiting approval, or null when none. */
@@ -1352,6 +1407,7 @@ export class SessionApproval {
    */
   arm({ toolName, toolCallId }: { toolName: string; toolCallId?: string }): Promise<ApprovalDecision> {
     this.#restored = false;
+    this.#runId = null;
     this.#toolName = toolName;
     this.#toolCallId = toolCallId ?? null;
     return new Promise<ApprovalDecision>(resolve => {
@@ -1363,13 +1419,16 @@ export class SessionApproval {
   restore({
     toolName,
     toolCallId,
+    runId,
     respond,
   }: {
     toolName: string;
     toolCallId: string;
+    runId?: string;
     respond: (decision: ApprovalDecision) => void;
   }): void {
     this.#restored = true;
+    this.#runId = runId ?? null;
     this.#toolName = toolName;
     this.#toolCallId = toolCallId;
     this.#resolve = respond;
@@ -1379,6 +1438,7 @@ export class SessionApproval {
   clearRestored(): boolean {
     if (!this.#restored) return false;
     this.#restored = false;
+    this.#runId = null;
     this.#resolve = null;
     this.#toolName = null;
     this.#toolCallId = null;
@@ -1388,6 +1448,11 @@ export class SessionApproval {
   /** Id of the tool call currently awaiting approval, or null when none. */
   getToolCallId(): string | null {
     return this.#toolCallId;
+  }
+
+  /** Persisted native run identity of a restored gate, when present. */
+  getRunId(): string | null {
+    return this.#runId;
   }
 
   /** Whether an approval is currently parked awaiting a decision. */
@@ -1414,9 +1479,11 @@ export class SessionApproval {
     requestContext,
     declineContext,
     onAlwaysAllow,
-  }: ApprovalResponse & { toolCallId?: string; onAlwaysAllow?: (toolName: string) => void }): void {
-    if (!this.isArmed()) return;
-    if (toolCallId !== undefined && this.#toolCallId !== null && toolCallId !== this.#toolCallId) return;
+  }: ApprovalResponse & { toolCallId?: string; onAlwaysAllow?: (toolName: string) => void }): SessionCommandReceipt {
+    const target = { command: 'approval' as const, toolCallId };
+    if (!this.isArmed()) return { ...target, accepted: false, reason: 'no_pending_target' };
+    if (toolCallId !== undefined && toolCallId !== this.#toolCallId)
+      return { ...target, accepted: false, reason: 'stale_target' };
 
     if (decision === 'always_allow_category' && this.#toolName) {
       onAlwaysAllow?.(this.#toolName);
@@ -1427,10 +1494,13 @@ export class SessionApproval {
       requestContext,
       declineContext,
     };
-    this.#resolve?.(resolved);
+    const resolve = this.#resolve;
+    const acceptedToolCallId = this.#toolCallId ?? undefined;
     this.#resolve = null;
     this.#toolName = null;
     this.#toolCallId = null;
+    resolve?.(resolved);
+    return { command: 'approval', accepted: true, toolCallId: acceptedToolCallId };
   }
 
   /**
@@ -1439,6 +1509,7 @@ export class SessionApproval {
    * rejected (not run) and the run can finalize. A no-op when nothing is armed.
    */
   cancel(): void {
+    this.#runId = null;
     if (!this.isArmed()) return;
     this.#resolve?.({ decision: 'decline' });
     this.#resolve = null;
@@ -1448,6 +1519,7 @@ export class SessionApproval {
 
   /** Clear the gated tool name/call id once a parked approval has been consumed. */
   clearToolName(): void {
+    this.#runId = null;
     this.#toolName = null;
     this.#toolCallId = null;
   }
@@ -1846,7 +1918,14 @@ export class SessionMode {
    * switch starting mid-flight supersedes this one, which then bails before
    * emitting `model_changed`.
    */
-  async switch({ modeId }: { modeId: string }): Promise<void> {
+  async switch({
+    modeId,
+    isCurrent,
+  }: {
+    modeId: string;
+    /** @internal Guard an accepted command's captured target. */ isCurrent?: () => boolean;
+  }): Promise<void> {
+    if (isCurrent && !isCurrent()) throw new SessionCommandRejected('stale_target');
     const mode = this.#resolveMode?.(modeId) ?? null;
     if (!mode) {
       throw new Error(`Mode not found: ${modeId}`);
@@ -1860,18 +1939,19 @@ export class SessionMode {
     // Emit the mode change immediately so UIs can update without waiting for
     // the storage round-trips below.
     this.#bus.emit({ type: 'mode_changed', modeId, previousModeId });
+    if (isCurrent && !isCurrent()) return;
 
     // Remember the outgoing mode's model before moving on.
     if (previousModelId) {
       await this.#model.saveForMode({ modeId: previousModeId, modelId: previousModelId });
     }
-    if (this.#switchVersion !== version) return;
+    if (this.#switchVersion !== version || (isCurrent && !isCurrent())) return;
 
     await this.#store()?.set(MODE_ID_KEY, modeId);
-    if (this.#switchVersion !== version) return;
+    if (this.#switchVersion !== version || (isCurrent && !isCurrent())) return;
 
     const modelId = await this.#model.resolveForMode({ modeId, defaultModelId: mode.defaultModelId });
-    if (this.#switchVersion !== version) return;
+    if (this.#switchVersion !== version || (isCurrent && !isCurrent())) return;
     if (modelId) {
       this.#model.set({ modelId });
       this.#bus.emit({ type: 'model_changed', modelId });
@@ -3522,6 +3602,7 @@ export class Session<TState = unknown> {
     this.approval.restore({
       toolName,
       toolCallId,
+      runId,
       respond: decision => {
         const resume = async () => {
           const requestContext = await this.machinery.buildRequestContext(decision.requestContext);
@@ -3537,7 +3618,8 @@ export class Session<TState = unknown> {
             this.thread.getId() !== threadId ||
             this.identity.getResourceId() !== resourceId ||
             this.run.isAbortRequested() ||
-            this.run.getOperationId() !== operationId
+            this.run.getOperationId() !== operationId ||
+            this.approval.getRunId() !== runId
           )
             return;
           await agent.sendToolApproval({
@@ -3556,7 +3638,8 @@ export class Session<TState = unknown> {
             requestContext,
             toolsets,
           });
-          if (this.stream.isCurrent({ subscription }) && !this.approval.isArmed()) this.approval.clearRestored();
+          if (this.stream.isCurrent({ subscription }) && !this.approval.isArmed() && this.approval.getRunId() === runId)
+            this.approval.clearRestored();
         };
         void resume().catch(async error => {
           if (
@@ -3564,10 +3647,12 @@ export class Session<TState = unknown> {
             this.thread.getId() !== threadId ||
             this.identity.getResourceId() !== resourceId ||
             this.run.getOperationId() !== operationId ||
-            this.run.isAbortRequested()
+            this.run.isAbortRequested() ||
+            this.approval.getRunId() !== runId
           )
             return;
           this.emit({ type: 'error', error: getErrorFromUnknown(error) });
+          this.approval.clearRestored();
           // Re-read saved work after failure; never retry a decision automatically.
           try {
             if (this.stream.isCurrent({ subscription })) await this.restorePendingApproval({ threadId, subscription });
@@ -3621,7 +3706,8 @@ export class Session<TState = unknown> {
       parkedRuns.add(runId);
       this.emit({ type: 'tool_suspension_cancelled', toolCallId, toolName, reason: ABORTED_BY_USER_REASON });
     }
-    const discoverParkedOwner = parkedRuns.size > 0 && agents.length > 1;
+    const discoverParkedOwner =
+      parkedRuns.size > 0 && (agents.length > 1 || isDurableAgentLike(this.machinery.getAgent()));
     if (threadId && ((!localRunId && parkedRuns.size === 0) || discoverParkedOwner)) {
       const agent = this.machinery.getAgent();
       // A restored Session has no live run identity. Use the same scoped native
@@ -3750,7 +3836,23 @@ export class Session<TState = unknown> {
    * additionally clears the display-state mirror of those suspensions and
    * notifies subscribers so stale suspension UI doesn't linger.
    */
-  abort(): void {
+  abort(options: SessionAbortOptions = {}): SessionCommandReceipt {
+    const pendingRunIds = this.suspensions.getRunIds();
+    const runId =
+      this.getCurrentRunId() ?? this.approval.getRunId() ?? (pendingRunIds.length === 1 ? pendingRunIds[0] : undefined);
+    const target = { command: 'abort' as const, runId };
+    if (this.run.isAbortRequested()) return { ...target, accepted: false, reason: 'stopping' };
+    if (options.expectedRunId !== undefined && !runId && pendingRunIds.length > 1)
+      return { ...target, accepted: false, reason: 'ambiguous_target' };
+    if (
+      (options.expectedRunId !== undefined && options.expectedRunId !== runId) ||
+      (options.expectedOperationId !== undefined && options.expectedOperationId !== this.run.getOperationId())
+    )
+      return { ...target, accepted: false, reason: 'stale_target' };
+    // A bound thread is a native cancellation scope even after process recovery:
+    // abortRun discovers its saved owners. Acceptance does not assert work exists.
+    if (!runId && !this.thread.getId() && !this.approval.isArmed() && !this.suspensions.hasPending())
+      return { ...target, accepted: false, reason: 'no_pending_target' };
     const hadPendingSuspensions = this.displayState.get().pendingSuspensions.size > 0;
     // Registered before Stop tears anything down: resolves when the live subscription is detached.
     const teardown = hadPendingSuspensions && this.stream.isOpen() ? this.#watchStreamTeardown() : undefined;
@@ -3778,6 +3880,7 @@ export class Session<TState = unknown> {
     } else {
       teardown?.cancel();
     }
+    return { ...target, accepted: true };
   }
 
   /**
@@ -3832,14 +3935,25 @@ export class Session<TState = unknown> {
     toolCallId,
     requestContext,
     declineContext,
+    expectedRunId,
+    expectedOperationId,
   }: {
     decision: 'approve' | 'decline' | 'always_allow_category';
     toolCallId?: string;
     requestContext?: RequestContext;
     declineContext?: { reason?: string; message?: string };
-  }): void {
+    expectedRunId?: string;
+    expectedOperationId?: number;
+  }): SessionCommandReceipt {
+    const runId = this.getCurrentRunId() ?? this.approval.getRunId() ?? undefined;
+    if (
+      (expectedRunId !== undefined && expectedRunId !== runId) ||
+      (expectedOperationId !== undefined && expectedOperationId !== this.run.getOperationId())
+    )
+      return { command: 'approval', toolCallId, runId, accepted: false, reason: 'stale_target' };
+    if (this.run.isAbortRequested()) return { command: 'approval', toolCallId, accepted: false, reason: 'stopping' };
     const wasArmed = this.approval.isArmed();
-    this.approval.respond({
+    const receipt = this.approval.respond({
       decision,
       toolCallId,
       requestContext,
@@ -3854,6 +3968,7 @@ export class Session<TState = unknown> {
       this.displayState.clearPendingApproval();
       this.emit({ type: 'display_state_changed', displayState: this.displayState.get() });
     }
+    return { ...receipt, runId };
   }
 
   // ===========================================================================
@@ -4610,30 +4725,110 @@ export class Session<TState = unknown> {
     toolCallId?: string;
     requestContext?: RequestContext;
   }): Promise<void> {
+    await this.#respondToToolSuspension({ resumeData, toolCallId, requestContext });
+  }
+
+  /**
+   * Resolve when the native suspension is consumed, without waiting for the
+   * resumed run. Subsequent execution errors remain native session events.
+   */
+  respondToToolSuspensionWithReceipt(input: {
+    resumeData: any;
+    toolCallId?: string;
+    requestContext?: RequestContext;
+    expectedRunId?: string;
+    expectedOperationId?: number;
+  }): Promise<SessionCommandReceipt> {
+    return new Promise(resolve => {
+      void this.#respondToToolSuspension(input, resolve).then(
+        () => resolve({ command: 'suspension', toolCallId: input.toolCallId, accepted: false, reason: 'unavailable' }),
+        () => resolve({ command: 'suspension', toolCallId: input.toolCallId, accepted: false, reason: 'unavailable' }),
+      );
+    });
+  }
+
+  async #respondToToolSuspension(
+    {
+      resumeData,
+      toolCallId,
+      requestContext,
+      expectedRunId,
+      expectedOperationId,
+    }: {
+      resumeData: any;
+      toolCallId?: string;
+      requestContext?: RequestContext;
+      expectedRunId?: string;
+      expectedOperationId?: number;
+    },
+    onReceipt?: (receipt: SessionCommandReceipt) => void,
+  ): Promise<void> {
+    const reject = (reason: Extract<SessionCommandReceipt, { accepted: false }>['reason']) =>
+      onReceipt?.({ command: 'suspension', toolCallId, accepted: false, reason });
+    if (this.run.isAbortRequested()) {
+      reject('stopping');
+      return;
+    }
     const resolvedToolCallId = this.suspensions.resolveToolCallId(toolCallId);
-    if (!resolvedToolCallId) return;
+    if (!resolvedToolCallId) {
+      reject(
+        toolCallId && this.suspensions.get({ toolCallId })?.claimed
+          ? 'no_pending_target'
+          : this.suspensions.hasPending()
+            ? toolCallId
+              ? 'stale_target'
+              : 'ambiguous_target'
+            : 'no_pending_target',
+      );
+      return;
+    }
 
-    const suspension = this.suspensions.get({ toolCallId: resolvedToolCallId });
-
+    if (
+      (expectedRunId !== undefined &&
+        expectedRunId !== this.suspensions.get({ toolCallId: resolvedToolCallId })?.runId) ||
+      (expectedOperationId !== undefined && expectedOperationId !== this.run.getOperationId())
+    ) {
+      reject('stale_target');
+      return;
+    }
+    let claim: ReturnType<Session<TState>['claimToolSuspension']> | undefined;
     try {
-      if (suspension?.toolName === 'submit_plan') {
+      claim = this.claimToolSuspension(resolvedToolCallId);
+      onReceipt?.({
+        command: 'suspension',
+        toolCallId: resolvedToolCallId,
+        runId: claim.suspension.runId,
+        accepted: true,
+      });
+      if (claim.suspension.toolName === 'submit_plan') {
         await this.handlePlanApprovalResume({
           toolCallId: resolvedToolCallId,
           response: resumeData as SubmitPlanResumeData,
           requestContext,
+          claim,
         });
         return;
       }
 
-      await this.resumeToolCall({
+      await this.resumeClaimedToolCall({
         resumeData,
         toolCallId: resolvedToolCallId,
         requestContext,
+        claim,
       });
     } catch (error) {
+      if (error instanceof SessionCommandRejected) {
+        reject(error.reason);
+        return;
+      }
       const err = getErrorFromUnknown(error);
+      reject(this.run.isAbortRequested() ? 'stopping' : 'unavailable');
+      if (claim && !claim.isCurrent()) return;
       this.emit({ type: 'error', error: err });
-      if (err.name !== 'ToolDependencyError') await this.finishAgentRun('error');
+      if (err.name !== 'ToolDependencyError' && (!claim || claim.isCurrent())) await this.finishAgentRun('error');
+    } finally {
+      if (claim?.suspension.claimed)
+        this.suspensions.delete({ toolCallId: resolvedToolCallId, expected: claim.suspension });
     }
   }
 
@@ -4647,19 +4842,22 @@ export class Session<TState = unknown> {
     toolCallId,
     response,
     requestContext,
+    claim,
   }: {
     toolCallId: string;
     response: SubmitPlanResumeData;
     requestContext?: RequestContext;
+    claim: ReturnType<Session<TState>['claimToolSuspension']>;
   }): Promise<void> {
     if (response.action === 'rejected') {
       // The caller aborts once the rejected tool result is persisted. Waiting for
       // the run to terminate here would prevent that abort from ever being sent.
-      await this.resumeToolCall({
+      await this.resumeClaimedToolCall({
         resumeData: response,
         toolCallId,
         requestContext,
         resolveOnToolEnd: true,
+        claim,
       });
       return;
     }
@@ -4667,10 +4865,12 @@ export class Session<TState = unknown> {
     const transitionModeId = this.machinery.resolveTransitionModeId();
     if (transitionModeId && transitionModeId !== this.mode.get()) {
       await new Promise(resolveTimeout => setTimeout(resolveTimeout, 0));
-      await this.mode.switch({ modeId: transitionModeId });
+      if (!claim.isCurrent())
+        throw new SessionCommandRejected(this.run.isAbortRequested() ? 'stopping' : 'stale_target');
+      await this.mode.switch({ modeId: transitionModeId, isCurrent: claim.isCurrent });
     }
 
-    await this.resumeToolCall({ resumeData: response, toolCallId, requestContext });
+    await this.resumeClaimedToolCall({ resumeData: response, toolCallId, requestContext, claim });
   }
 
   /**
@@ -4807,7 +5007,7 @@ export class Session<TState = unknown> {
   async resumeToolCall({
     resumeData,
     toolCallId,
-    requestContext: requestContextInput,
+    requestContext,
     resolveOnToolEnd = false,
   }: {
     resumeData: any;
@@ -4815,7 +5015,19 @@ export class Session<TState = unknown> {
     requestContext?: RequestContext;
     resolveOnToolEnd?: boolean;
   }): Promise<void> {
-    const suspension = this.suspensions.get({ toolCallId });
+    const claim = this.claimToolSuspension(toolCallId);
+    try {
+      await this.resumeClaimedToolCall({ resumeData, toolCallId, requestContext, resolveOnToolEnd, claim });
+    } finally {
+      if (claim.suspension.claimed) this.suspensions.delete({ toolCallId, expected: claim.suspension });
+    }
+  }
+
+  private claimToolSuspension(toolCallId: string) {
+    if (this.run.isAbortRequested()) throw new SessionCommandRejected('stopping');
+    const threadId = this.thread.getId();
+    if (!threadId) throw new Error('Cannot resume a suspended tool without a current thread');
+    const suspension = this.suspensions.claim({ toolCallId });
     if (!suspension) {
       throw new Error('No active suspension to resume');
     }
@@ -4829,25 +5041,54 @@ export class Session<TState = unknown> {
       this.stream.getCurrentAgent() ??
       this.machinery.getAgent();
 
+    const resourceId = this.identity.getResourceId();
+    const operationId = this.run.getOperationId();
+    const isCurrent = () => {
+      const pending = this.suspensions.get({ toolCallId });
+      return (
+        this.thread.getId() === threadId &&
+        this.identity.getResourceId() === resourceId &&
+        this.run.getOperationId() === operationId &&
+        !this.run.isAbortRequested() &&
+        (!pending || pending === suspension)
+      );
+    };
+
     // Remove before resuming so a re-suspend during the resumed run can
     // re-register the same toolCallId without being clobbered by this cleanup.
     // Drop the matching display-state entry too so the UI stops rendering the
     // resolved prompt while any other parked suspensions stay visible.
     const pendingDisplay = this.displayState.get().pendingSuspensions.get(toolCallId);
-    this.suspensions.delete({ toolCallId });
     this.displayState.deletePendingSuspension(toolCallId);
+    return { suspension, pendingDisplay, agent, threadId, resourceId, isCurrent };
+  }
 
+  private async resumeClaimedToolCall({
+    resumeData,
+    toolCallId,
+    requestContext: requestContextInput,
+    resolveOnToolEnd = false,
+    claim,
+  }: {
+    resumeData: any;
+    toolCallId: string;
+    requestContext?: RequestContext;
+    resolveOnToolEnd?: boolean;
+    claim: ReturnType<Session<TState>['claimToolSuspension']>;
+  }): Promise<void> {
+    const { suspension, pendingDisplay, agent, threadId, resourceId, isCurrent } = claim;
+    const assertCurrent = () => {
+      if (!isCurrent()) throw new SessionCommandRejected(this.run.isAbortRequested() ? 'stopping' : 'stale_target');
+    };
+    assertCurrent();
     const requestContext = await this.machinery.buildRequestContext(requestContextInput);
-    const threadId = this.thread.getId();
-    if (!threadId) {
-      throw new Error('Cannot resume a suspended tool without a current thread');
-    }
+    assertCurrent();
 
-    await this.thread.ensureSubscription(threadId, agent);
+    await this.thread.ensureSubscription(threadId, agent, false, isCurrent);
+    assertCurrent();
     const resumedSubscriptionBoundary = this.createSubscribedResumeBoundaryWaiter({ toolCallId, resolveOnToolEnd });
 
     try {
-      const resourceId = this.identity.getResourceId();
       const sharedOptions = this.machinery.buildSharedRunOptions();
       // Interactive builtins suspend to collect user input, not for approval.
       // The resume data is the user's answer (a bare string), which the approval
@@ -4857,6 +5098,8 @@ export class Session<TState = unknown> {
       if (isInteractive) {
         sharedOptions.requireToolApproval = false;
       }
+      const toolsets = await this.machinery.buildToolsets(requestContext);
+      assertCurrent();
       await agent.sendStreamResume({
         threadId,
         resourceId,
@@ -4868,19 +5111,20 @@ export class Session<TState = unknown> {
           memory: { thread: threadId, resource: resourceId },
           abortSignal: this.run.ensureAbortController().signal,
           requestContext,
-          toolsets: await this.machinery.buildToolsets(requestContext),
+          toolsets,
         },
       });
+      this.suspensions.delete({ toolCallId, expected: suspension });
       await resumedSubscriptionBoundary.promise;
     } catch (error) {
-      if (getErrorFromUnknown(error).name === 'ToolDependencyError') {
-        this.suspensions.register({ toolCallId, ...suspension });
+      if (getErrorFromUnknown(error).name === 'ToolDependencyError' && isCurrent()) {
+        this.suspensions.restoreClaim({ toolCallId, expected: suspension });
         if (pendingDisplay) this.emit({ type: 'tool_suspended', ...pendingDisplay });
       }
       throw error;
     } finally {
       resumedSubscriptionBoundary.cancel();
-      await this.thread.ensureSubscription(threadId);
+      if (isCurrent()) await this.thread.ensureSubscription(threadId, this.machinery.getAgent(), false, isCurrent);
     }
   }
 

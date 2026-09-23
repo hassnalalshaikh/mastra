@@ -7769,6 +7769,7 @@ export type PostMemoryThreadsThreadIdWorkingMemory_QueryParams = GetMemoryConfig
 
 export type PostMemoryThreadsThreadIdWorkingMemory_Body = {
   workingMemory: string;
+  mode?: ('replace' | 'merge') | undefined;
   resourceId?: string | undefined;
   memoryConfig?:
     | {
@@ -7801,6 +7802,42 @@ export interface PostMemoryThreadsThreadIdWorkingMemory_RouteContract {
   body: PostMemoryThreadsThreadIdWorkingMemory_Body;
   request: PostMemoryThreadsThreadIdWorkingMemory_Request;
   response: PostMemoryThreadsThreadIdWorkingMemory_Response;
+  responseType: 'json';
+}
+
+// ============================================================================
+// Route: PATCH /memory/threads/:threadId/working-memory
+// ============================================================================
+export type PatchMemoryThreadsThreadIdWorkingMemory_PathParams = GetMemoryThreadsThreadId_PathParams;
+
+export type PatchMemoryThreadsThreadIdWorkingMemory_QueryParams = GetMemoryConfig_QueryParams;
+
+export type PatchMemoryThreadsThreadIdWorkingMemory_Body = PostMemoryThreadsThreadIdWorkingMemory_Body;
+
+export type PatchMemoryThreadsThreadIdWorkingMemory_Response = PostAuthRefresh_Response;
+
+export type PatchMemoryThreadsThreadIdWorkingMemory_Request = Simplify<
+  (PatchMemoryThreadsThreadIdWorkingMemory_PathParams extends never
+    ? {}
+    : { params: PatchMemoryThreadsThreadIdWorkingMemory_PathParams }) &
+    (PatchMemoryThreadsThreadIdWorkingMemory_QueryParams extends never
+      ? {}
+      : {} extends PatchMemoryThreadsThreadIdWorkingMemory_QueryParams
+        ? { query?: PatchMemoryThreadsThreadIdWorkingMemory_QueryParams }
+        : { query: PatchMemoryThreadsThreadIdWorkingMemory_QueryParams }) &
+    (PatchMemoryThreadsThreadIdWorkingMemory_Body extends never
+      ? {}
+      : {} extends PatchMemoryThreadsThreadIdWorkingMemory_Body
+        ? { body?: PatchMemoryThreadsThreadIdWorkingMemory_Body }
+        : { body: PatchMemoryThreadsThreadIdWorkingMemory_Body })
+>;
+
+export interface PatchMemoryThreadsThreadIdWorkingMemory_RouteContract {
+  pathParams: PatchMemoryThreadsThreadIdWorkingMemory_PathParams;
+  queryParams: PatchMemoryThreadsThreadIdWorkingMemory_QueryParams;
+  body: PatchMemoryThreadsThreadIdWorkingMemory_Body;
+  request: PatchMemoryThreadsThreadIdWorkingMemory_Request;
+  response: PatchMemoryThreadsThreadIdWorkingMemory_Response;
   responseType: 'json';
 }
 
@@ -21056,11 +21093,29 @@ export interface DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFoll
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_PathParams =
   PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_PathParams;
 
-export type PostAgentControllerControllerIdSessionsResourceIdAbort_QueryParams =
-  PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
+export type PostAgentControllerControllerIdSessionsResourceIdAbort_QueryParams = {
+  sessionScope?: string | undefined;
+  sessionThreadId?: string | undefined;
+  expectedRunId?: string | undefined;
+  expectedOperationId?: number | undefined;
+};
 
-export type PostAgentControllerControllerIdSessionsResourceIdAbort_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+export type PostAgentControllerControllerIdSessionsResourceIdAbort_Response = {
+  ok: boolean;
+  receipt: {
+    command: 'approval' | 'suspension' | 'abort';
+    toolCallId?: string | undefined;
+    runId?: string | undefined;
+  } & (
+    | {
+        accepted: true;
+      }
+    | {
+        accepted: false;
+        reason: 'no_pending_target' | 'stale_target' | 'ambiguous_target' | 'stopping' | 'unavailable';
+      }
+  );
+};
 
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdAbort_PathParams extends never
@@ -21095,6 +21150,8 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_QueryP
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Body = {
   toolCallId: string;
   approved: boolean;
+  expectedRunId?: string | undefined;
+  expectedOperationId?: number | undefined;
   requestContext?:
     | {
         [key: string]: unknown;
@@ -21103,7 +21160,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Body =
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdAbort_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdToolApproval_PathParams extends never
@@ -21141,6 +21198,8 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Quer
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Body = {
   toolCallId: string;
+  expectedRunId?: string | undefined;
+  expectedOperationId?: number | undefined;
   resumeData: unknown;
   requestContext?:
     | {
@@ -21150,7 +21209,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Body
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdAbort_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdToolSuspension_PathParams extends never
@@ -21947,6 +22006,7 @@ export interface RouteTypes {
   'DELETE /memory/threads/:threadId': DeleteMemoryThreadsThreadId_RouteContract;
   'POST /memory/threads/:threadId/clone': PostMemoryThreadsThreadIdClone_RouteContract;
   'POST /memory/threads/:threadId/working-memory': PostMemoryThreadsThreadIdWorkingMemory_RouteContract;
+  'PATCH /memory/threads/:threadId/working-memory': PatchMemoryThreadsThreadIdWorkingMemory_RouteContract;
   'POST /memory/messages/delete': PostMemoryMessagesDelete_RouteContract;
   'GET /memory/search': GetMemorySearch_RouteContract;
   'GET /memory/network/status': GetMemoryNetworkStatus_RouteContract;
@@ -22805,6 +22865,7 @@ export interface Client {
   };
   '/memory/threads/:threadId/working-memory': {
     GET: GetMemoryThreadsThreadIdWorkingMemory_RouteContract;
+    PATCH: PatchMemoryThreadsThreadIdWorkingMemory_RouteContract;
     POST: PostMemoryThreadsThreadIdWorkingMemory_RouteContract;
   };
   '/observability/branches': {
