@@ -18,6 +18,9 @@ const SHARP_SETTLE_MS = 150;
 /** Live pictures remembered as views of the current page. */
 const SEEN_PICTURES = 4;
 
+/** Nobody is touching a page that keeps changing on its own: at most about three sharp pictures a second. */
+const SHARP_MIN_GAP_MS = 333;
+
 /**
  * CDP screencast frame event data from Page.screencastFrame
  */
@@ -123,7 +126,13 @@ export class ScreencastStream extends EventEmitter {
       let seen: string[] = [];
       let lastSharp: string | undefined;
       let settle: ReturnType<typeof setTimeout> | undefined;
-      this.clearSettle = () => clearTimeout(settle);
+      let cooldown: ReturnType<typeof setTimeout> | undefined;
+      let cooling = false;
+      let lastCaptureAt = 0;
+      this.clearSettle = () => {
+        clearTimeout(settle);
+        clearTimeout(cooldown);
+      };
 
       const emitFrame = (data: string, params: CdpScreencastFrame) => {
         emitted += 1;
@@ -150,6 +159,10 @@ export class ScreencastStream extends EventEmitter {
       const release = () => {
         if (held) ack(held);
         held = undefined;
+        if (cooling) {
+          clearTimeout(cooldown);
+          cooling = false;
+        }
         const next = pending;
         pending = undefined;
         if (next) handle(next);
@@ -159,6 +172,7 @@ export class ScreencastStream extends EventEmitter {
       };
       const sharpen = async (params: CdpScreencastFrame, acknowledge: boolean) => {
         capturing = true;
+        lastCaptureAt = Date.now();
         if (acknowledge) held = params;
         const before = emitted;
         try {
@@ -200,10 +214,23 @@ export class ScreencastStream extends EventEmitter {
             if (capturing) sharpAgain = params;
             else void sharpen(params, false);
           }, SHARP_SETTLE_MS);
-        } else if (capturing) {
+        } else if (capturing || cooling) {
           if (pending) ack(pending);
           pending = params;
-        } else void sharpen(params, true);
+        } else {
+          const wait = lastCaptureAt + SHARP_MIN_GAP_MS - Date.now();
+          if (wait <= 0) return void sharpen(params, true);
+          // Pace a page that keeps changing on its own. The newest picture waits unacknowledged, so
+          // Chrome pauses too; user input ends the wait at once (release).
+          pending = params;
+          cooling = true;
+          cooldown = setTimeout(() => {
+            cooling = false;
+            const next = pending;
+            pending = undefined;
+            if (next && live()) handle(next);
+          }, wait);
+        }
       };
 
       const handle = (params: CdpScreencastFrame) => {
