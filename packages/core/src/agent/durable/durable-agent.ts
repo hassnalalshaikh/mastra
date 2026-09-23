@@ -14,10 +14,10 @@ import type { WorkflowsStorage } from '../../storage';
 import type { FullOutput, MastraModelOutput } from '../../stream/base/output';
 import type { ChunkType, MastraOnFinishCallback, MastraStreamTransformOptions } from '../../stream/types';
 import { ChunkFrom } from '../../stream/types';
-import { deepMerge } from '../../utils';
+import { createToolInputState, restoreToolInput, TOOL_INPUT_STATE } from '../../tools/resumable-input';
 import { ToolPolicyError } from '../../tools/tool-policy';
 import { getPreparedToolPolicy } from '../../tools/tool-policy-execution';
-import { createToolInputState, restoreToolInput, TOOL_INPUT_STATE } from '../../tools/resumable-input';
+import { deepMerge } from '../../utils';
 import type { WorkflowRunState, WorkflowRunStatus } from '../../workflows/types';
 import { Workflow } from '../../workflows/workflow';
 import { Agent } from '../agent';
@@ -1311,6 +1311,12 @@ export class DurableAgent<
 
   override getToolPolicy() {
     return this.#wrappedAgent.getToolPolicy();
+  }
+
+  // The wrapper's own `#toolPolicy` is empty; resolve through the wrapped agent
+  // so a rebuilt tool set keeps an agent-level policy.
+  override resolveToolPolicy(args: Parameters<Agent['resolveToolPolicy']>[0]) {
+    return this.#wrappedAgent.resolveToolPolicy(args);
   }
 
   // --- Processors ---

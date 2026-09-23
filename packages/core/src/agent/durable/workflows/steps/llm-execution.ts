@@ -514,6 +514,13 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                   }
                   currentTools = convertedTools as unknown as ToolSet;
                   if (registryEntry) {
+                    // Keep the full toolset this step started from so the NEXT step
+                    // (via resolveRuntimeDependencies) and its processors see the
+                    // complete catalog. Without this, a processor that withholds
+                    // tools (ToolSearchProcessor with includeResolvedTools) would
+                    // shrink the registry to `search_tools` on step 1 and the tool
+                    // it auto-loaded could never surface on step 2 (issue #22933).
+                    registryEntry.baseTools = tools;
                     // Store the exact per-step snapshot rather than merging onto the
                     // previous step's set. `currentTools` already starts from the full
                     // toolset resolved at the top of this step, so a snapshot keeps the
@@ -523,6 +530,11 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                     // tool-call step even though the model was never shown them.
                     registryEntry.tools = convertedTools;
                   }
+                } else if (registryEntry?.baseTools) {
+                  // No processor narrowed this step, so the model sees the full
+                  // toolset; make the tool-call step resolve from the same set
+                  // instead of a previous step's narrowed snapshot.
+                  registryEntry.tools = registryEntry.baseTools;
                 }
               } catch (error) {
                 // Handle TripWire from processInputStep — emit tripwire chunk and
@@ -578,7 +590,12 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
             );
             if (currentActiveTools)
               currentActiveTools = currentActiveTools.filter((name: string) => !!currentTools?.[name]);
-            if (registryEntry) registryEntry.tools = currentTools as any;
+            if (registryEntry) {
+              // The policy decision is per step: keep the full set for later steps,
+              // so a tool whose skill becomes ready can return (same as #22933).
+              registryEntry.baseTools ??= tools;
+              registryEntry.tools = currentTools as any;
+            }
 
             // ── Signal echo & pre-run drain ───────────────────────────────
             // Mirror the non-durable llm-execution-step:
