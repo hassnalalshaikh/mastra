@@ -1313,6 +1313,12 @@ export class DurableAgent<
     return this.#wrappedAgent.getToolPolicy();
   }
 
+  // The wrapper's own `#toolPolicy` is empty; resolve through the wrapped agent
+  // so a rebuilt tool set keeps an agent-level policy.
+  override resolveToolPolicy(args: Parameters<Agent['resolveToolPolicy']>[0]) {
+    return this.#wrappedAgent.resolveToolPolicy(args);
+  }
+
   // --- Processors ---
   override async getConfiguredProcessorWorkflows() {
     return this.#wrappedAgent.getConfiguredProcessorWorkflows();
