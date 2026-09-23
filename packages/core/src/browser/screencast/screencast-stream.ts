@@ -9,6 +9,15 @@ import { EventEmitter } from 'node:events';
 import type { CdpSessionLike, CdpSessionProvider, ScreencastFrameData, ScreencastOptions } from './types';
 import { SCREENCAST_DEFAULTS } from './types';
 
+/** How long after user input live pictures are forwarded without a device-density capture. */
+const INTERACTIVE_MS = 500;
+
+/** Quiet time after the last live picture before one device-density capture replaces it. */
+const SHARP_SETTLE_MS = 150;
+
+/** Live pictures remembered as views of the current page. */
+const SEEN_PICTURES = 4;
+
 /**
  * CDP screencast frame event data from Page.screencastFrame
  */
@@ -61,6 +70,15 @@ export class ScreencastStream extends EventEmitter {
   /** Frame handler reference (for cleanup) */
   private frameHandler: ((params: CdpScreencastFrame) => void) | null = null;
 
+  /** Live pictures are forwarded directly until this time; device-density captures otherwise. */
+  private interactiveUntil = 0;
+
+  /** Cancels the pending sharp capture of the current CDP session. */
+  private clearSettle: () => void = () => {};
+
+  /** Lets Chrome send the next live picture without waiting for the capture in progress. */
+  private releaseHeld: () => void = () => {};
+
   /**
    * Creates a new ScreencastStream.
    *
@@ -93,44 +111,111 @@ export class ScreencastStream extends EventEmitter {
       // Get CDP session from provider
       this.cdpSession = await this.provider.getCdpSession();
       const session = this.cdpSession;
+      const live = () => this.cdpSession === session && !this.stopping;
+      const ack = (params: CdpScreencastFrame) =>
+        void session.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+      let emitted = 0;
       let capturing = false;
       let pending: CdpScreencastFrame | undefined;
-      const deliver = async (params: CdpScreencastFrame) => {
+      let sharpAgain: CdpScreencastFrame | undefined;
+      // Live pictures already known to show the page as it is now. A capture can make Chrome send a
+      // slightly different live picture of the same page, so more than the latest one is remembered.
+      let seen: string[] = [];
+      let lastSharp: string | undefined;
+      let settle: ReturnType<typeof setTimeout> | undefined;
+      this.clearSettle = () => clearTimeout(settle);
+
+      const emitFrame = (data: string, params: CdpScreencastFrame) => {
+        emitted += 1;
+        lastSharp = undefined;
+        seen = [params.data];
+        this.emit('frame', {
+          data,
+          timestamp: params.metadata?.timestamp ? params.metadata.timestamp * 1000 : Date.now(),
+          viewport: {
+            width: params.metadata?.deviceWidth ?? 0,
+            height: params.metadata?.deviceHeight ?? 0,
+            offsetTop: params.metadata?.offsetTop,
+            scrollOffsetX: params.metadata?.scrollOffsetX,
+            scrollOffsetY: params.metadata?.scrollOffsetY,
+            pageScaleFactor: params.metadata?.pageScaleFactor,
+          },
+          sessionId: params.sessionId,
+        } satisfies ScreencastFrameData);
+      };
+
+      // One device-density capture. A capture that finishes after a newer live picture is dropped.
+      // Holding the acknowledgement paces Chrome to the capture; user input releases it at once.
+      let held: CdpScreencastFrame | undefined;
+      const release = () => {
+        if (held) ack(held);
+        held = undefined;
+        const next = pending;
+        pending = undefined;
+        if (next) handle(next);
+      };
+      this.releaseHeld = () => {
+        if (live()) release();
+      };
+      const sharpen = async (params: CdpScreencastFrame, acknowledge: boolean) => {
         capturing = true;
+        if (acknowledge) held = params;
+        const before = emitted;
         try {
-          const data = (await this.provider.captureFrame?.(this.options)) ?? params.data;
-          if (this.cdpSession !== session || this.stopping) return;
-          this.emit('frame', {
-            data,
-            timestamp: params.metadata?.timestamp ? params.metadata.timestamp * 1000 : Date.now(),
-            viewport: {
-              width: params.metadata?.deviceWidth ?? 0,
-              height: params.metadata?.deviceHeight ?? 0,
-              offsetTop: params.metadata?.offsetTop,
-              scrollOffsetX: params.metadata?.scrollOffsetX,
-              scrollOffsetY: params.metadata?.scrollOffsetY,
-              pageScaleFactor: params.metadata?.pageScaleFactor,
-            },
-            sessionId: params.sessionId,
-          } satisfies ScreencastFrameData);
+          const data = await this.provider.captureFrame?.(this.options);
+          if (!live() || emitted !== before) return;
+          if (data !== undefined && data === lastSharp) {
+            // Nothing changed on the page: this live picture is another view of the current one.
+            if (!seen.includes(params.data)) seen = [...seen.slice(-(SEEN_PICTURES - 1)), params.data];
+            return;
+          }
+          emitFrame(data ?? params.data, params);
+          if (data !== undefined) lastSharp = data;
         } catch (error) {
-          if (this.cdpSession === session && !this.stopping) this.emit('error', error);
+          if (live()) this.emit('error', error);
         } finally {
-          void session.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+          if (held === params) {
+            ack(params);
+            held = undefined;
+          }
           capturing = false;
           const next = pending;
-          pending = undefined;
-          if (next && this.cdpSession === session && !this.stopping) void deliver(next);
+          const again = sharpAgain;
+          pending = sharpAgain = undefined;
+          if (next && live()) handle(next);
+          else if (again && live()) void sharpen(again, false);
         }
+      };
+
+      const route = (params: CdpScreencastFrame) => {
+        if (Date.now() < this.interactiveUntil) {
+          // The user is driving the page: forward the live picture without a second capture.
+          emitFrame(params.data, params);
+          ack(params);
+          clearTimeout(settle);
+          settle = setTimeout(() => {
+            if (!live()) return;
+            // The page came to rest; new input opens the next live window.
+            this.interactiveUntil = 0;
+            if (capturing) sharpAgain = params;
+            else void sharpen(params, false);
+          }, SHARP_SETTLE_MS);
+        } else if (capturing) {
+          if (pending) ack(pending);
+          pending = params;
+        } else void sharpen(params, true);
+      };
+
+      const handle = (params: CdpScreencastFrame) => {
+        // The same picture again: the echo of our own capture, or no visual change.
+        if (seen.includes(params.data)) return ack(params);
+        route(params);
       };
 
       // Set up frame handler
       this.frameHandler = (params: CdpScreencastFrame) => {
         if (this.provider.captureFrame) {
-          if (capturing) {
-            if (pending) void session.send('Page.screencastFrameAck', { sessionId: pending.sessionId }).catch(() => {});
-            pending = params;
-          } else void deliver(params);
+          handle(params);
           return;
         }
         const frameData: ScreencastFrameData = {
@@ -187,6 +272,12 @@ export class ScreencastStream extends EventEmitter {
     }
   }
 
+  /** Forward live pictures directly while the user drives the page; sharp pictures follow when it settles. */
+  markInteractive(): void {
+    this.interactiveUntil = Date.now() + INTERACTIVE_MS;
+    this.releaseHeld();
+  }
+
   /**
    * Acknowledge a frame to CDP (required to continue receiving frames).
    */
@@ -210,6 +301,7 @@ export class ScreencastStream extends EventEmitter {
     }
 
     this.active = false;
+    this.clearSettle();
     let hadError = false;
 
     // Clean up handler regardless of CDP state
@@ -277,6 +369,7 @@ export class ScreencastStream extends EventEmitter {
   }
 
   private async reconnectOnce(): Promise<void> {
+    this.clearSettle();
     // Clean up existing session
     if (this.cdpSession && this.frameHandler && this.cdpSession.off) {
       try {

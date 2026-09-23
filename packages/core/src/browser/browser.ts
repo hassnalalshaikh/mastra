@@ -415,6 +415,8 @@ export interface ScreencastStream {
   on(event: 'url', handler: (url: string) => void): this;
   /** Emit a URL update (called by browser providers on navigation) */
   emitUrl(url: string): void;
+  /** Forward live pictures while the user drives the page (optional for custom streams). */
+  markInteractive?(): void;
 }
 
 // =============================================================================
