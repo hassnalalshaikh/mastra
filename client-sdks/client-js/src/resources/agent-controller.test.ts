@@ -2,7 +2,11 @@ import { RequestContext } from '@mastra/core/request-context';
 import { describe, expect, beforeEach, it, vi } from 'vitest';
 
 import { MastraClient } from '../client';
-import { agentControllerMessageText, isKnownAgentControllerEvent } from './agent-controller';
+import {
+  agentControllerMessageText,
+  isKnownAgentControllerEvent,
+  SessionCommandRejectedError,
+} from './agent-controller';
 import type { AgentControllerEvent, KnownAgentControllerEvent } from './agent-controller';
 
 global.fetch = vi.fn();
@@ -113,11 +117,11 @@ describe('AgentController Resource', () => {
     await session.followUp('later', { requestContext });
     expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: 'later', requestContext });
 
-    mockJson({ ok: true });
+    mockJson({ ok: true, receipt: { command: 'approval', accepted: true, toolCallId: 'call-7' } });
     await session.approveTool('call-7', true, { requestContext });
     expect(JSON.parse(lastCall()[1].body as string)).toEqual({ toolCallId: 'call-7', approved: true, requestContext });
 
-    mockJson({ ok: true });
+    mockJson({ ok: true, receipt: { command: 'suspension', accepted: true, toolCallId: 'call-9' } });
     await session.respondToToolSuspension('call-9', 'answer', { requestContext });
     expect(JSON.parse(lastCall()[1].body as string)).toEqual({
       toolCallId: 'call-9',
@@ -135,15 +139,80 @@ describe('AgentController Resource', () => {
   });
 
   it('aborts the in-flight run', async () => {
-    mockJson({ ok: true });
+    mockJson({ ok: true, receipt: { command: 'abort', accepted: true } });
     await client.getAgentController('code').session('user-1').abort();
     const [url, init] = lastCall();
     expect(url).toBe('http://localhost:4111/api/agent-controller/code/sessions/user-1/abort');
     expect(init.method).toBe('POST');
   });
 
+  it.each(['approval', 'suspension', 'abort'] as const)(
+    'exposes rejection for %s and never replays a lost receipt',
+    async kind => {
+      const session = client.getAgentController('code').session('user-1');
+      const command = () =>
+        kind === 'approval'
+          ? session.approveTool('call', true)
+          : kind === 'suspension'
+            ? session.respondToToolSuspension('call', 'answer')
+            : session.abort();
+      const receipt = { command: kind, accepted: false, reason: 'stale_target' };
+      mockJson({ ok: false, receipt });
+      await expect(command()).rejects.toMatchObject({ name: 'SessionCommandRejectedError', receipt });
+      expect(SessionCommandRejectedError).toBeDefined();
+
+      vi.mocked(global.fetch).mockClear();
+      vi.mocked(global.fetch).mockRejectedValueOnce(new Error('response lost after acceptance'));
+      await expect(command()).rejects.toThrow('response lost');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      vi.mocked(global.fetch).mockClear();
+      vi.mocked(global.fetch).mockResolvedValueOnce(
+        new Response('{', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      );
+      await expect(command()).rejects.toThrow();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      vi.mocked(global.fetch).mockClear();
+      mockJson({ ok: true });
+      await expect(command()).rejects.toThrow('acceptance was not confirmed');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('forwards exact expected identities and returns native acceptance', async () => {
+    const session = client.getAgentController('code').session('user-1');
+    const expected = { expectedRunId: 'saved-run', expectedOperationId: 7 };
+    const receipt = { command: 'approval', accepted: true, toolCallId: 'call', runId: 'saved-run' };
+    mockJson({ ok: true, receipt });
+    expect(await session.approveTool('call', true, expected)).toEqual(receipt);
+    expect(JSON.parse(lastCall()[1].body as string)).toMatchObject(expected);
+    mockJson({ ok: true, receipt: { command: 'abort', accepted: true, runId: 'saved-run' } });
+    await session.abort(expected);
+    const query = new URL(lastCall()[0]).searchParams;
+    expect(query.get('expectedRunId')).toBe('saved-run');
+    expect(query.get('expectedOperationId')).toBe('7');
+  });
+
+  it.each([
+    { command: 'approval', accepted: true, toolCallId: 'different' },
+    { command: 'approval', accepted: true, toolCallId: 1 },
+    { command: 'approval', accepted: true, toolCallId: 'current', runId: 'wrong-run' },
+    { command: 'approval', accepted: true, toolCallId: 'current', runId: 1 },
+  ])('does not confirm a malformed or mismatched receipt: %j', async receipt => {
+    const retryingClient = new MastraClient({ ...clientOptions, retries: 4 });
+    mockJson({ ok: true, receipt });
+    await expect(
+      retryingClient
+        .getAgentController('code')
+        .session('user')
+        .approveTool('current', true, { expectedRunId: 'saved-run' }),
+    ).rejects.toThrow('acceptance was not confirmed');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('approves a pending tool call', async () => {
-    mockJson({ ok: true });
+    mockJson({ ok: true, receipt: { command: 'approval', accepted: true, toolCallId: 'call-7' } });
     await client.getAgentController('code').session('user-1').approveTool('call-7', true);
     const [url, init] = lastCall();
     expect(url).toBe('http://localhost:4111/api/agent-controller/code/sessions/user-1/tool-approval');
@@ -151,7 +220,7 @@ describe('AgentController Resource', () => {
   });
 
   it('responds to a suspended tool (ask_user)', async () => {
-    mockJson({ ok: true });
+    mockJson({ ok: true, receipt: { command: 'suspension', accepted: true, toolCallId: 'call-9' } });
     await client.getAgentController('code').session('user-1').respondToToolSuspension('call-9', 'my answer');
     const [url, init] = lastCall();
     expect(url).toBe('http://localhost:4111/api/agent-controller/code/sessions/user-1/tool-suspension');
@@ -159,7 +228,7 @@ describe('AgentController Resource', () => {
   });
 
   it('responds to a submit_plan suspension', async () => {
-    mockJson({ ok: true });
+    mockJson({ ok: true, receipt: { command: 'suspension', accepted: true, toolCallId: 'call-plan' } });
     await client
       .getAgentController('code')
       .session('user-1')

@@ -16,7 +16,11 @@ export type {
   GetAgentCardOptions,
   VerifyAgentCardSignatureOptions,
 } from './resources/a2a';
-export { agentControllerMessageText, isKnownAgentControllerEvent } from './resources/agent-controller';
+export {
+  agentControllerMessageText,
+  isKnownAgentControllerEvent,
+  SessionCommandRejectedError,
+} from './resources/agent-controller';
 export type {
   MastraDBMessage,
   MastraMessageContentV2,
@@ -25,6 +29,9 @@ export type {
   KnownAgentControllerEvent,
   OtherAgentControllerEvent,
   AgentControllerRequestOptions,
+  AgentControllerCommandOptions,
+  SessionCommandReceipt,
+  SessionAbortOptions,
   SubscribeAgentControllerSessionOptions,
   AgentControllerSubscription,
   PlanResume,

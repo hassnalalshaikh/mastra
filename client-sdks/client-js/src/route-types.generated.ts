@@ -22685,11 +22685,28 @@ export interface PostAgentControllerControllerIdSessionsResourceIdFollowUp_Route
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_PathParams =
   GetAgentControllerControllerIdSessionsResourceId_PathParams;
 
-export type PostAgentControllerControllerIdSessionsResourceIdAbort_QueryParams =
-  PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
+export type PostAgentControllerControllerIdSessionsResourceIdAbort_QueryParams = {
+  sessionScope?: string | undefined;
+  expectedRunId?: string | undefined;
+  expectedOperationId?: number | undefined;
+};
 
-export type PostAgentControllerControllerIdSessionsResourceIdAbort_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+export type PostAgentControllerControllerIdSessionsResourceIdAbort_Response = {
+  ok: boolean;
+  receipt: {
+    command: 'approval' | 'suspension' | 'abort';
+    toolCallId?: string | undefined;
+    runId?: string | undefined;
+  } & (
+    | {
+        accepted: true;
+      }
+    | {
+        accepted: false;
+        reason: 'no_pending_target' | 'stale_target' | 'ambiguous_target' | 'stopping' | 'unavailable';
+      }
+  );
+};
 
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdAbort_PathParams extends never
@@ -22724,6 +22741,8 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_QueryP
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Body = {
   toolCallId: string;
   approved: boolean;
+  expectedRunId?: string | undefined;
+  expectedOperationId?: number | undefined;
   requestContext?:
     | {
         [key: string]: unknown;
@@ -22732,7 +22751,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Body =
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdAbort_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdToolApproval_PathParams extends never
@@ -22770,6 +22789,8 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Quer
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Body = {
   toolCallId: string;
+  expectedRunId?: string | undefined;
+  expectedOperationId?: number | undefined;
   resumeData: unknown;
   requestContext?:
     | {
@@ -22779,7 +22800,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Body
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdAbort_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolSuspension_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdToolSuspension_PathParams extends never

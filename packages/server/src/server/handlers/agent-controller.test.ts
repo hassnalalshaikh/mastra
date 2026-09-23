@@ -190,13 +190,123 @@ describe('agent-controller routes', () => {
   });
 
   describe('ABORT_AGENT_CONTROLLER_SESSION_ROUTE', () => {
-    it('acks an abort on an idle session', async () => {
+    it('rejects a stale Stop without cancelling the current session', async () => {
+      const res = await ABORT_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-stop',
+        expectedOperationId: 999,
+      } as any);
+      expect(res).toMatchObject({ ok: false, receipt: { command: 'abort', accepted: false, reason: 'stale_target' } });
+    });
+    it('rejects cancellation of an idle native session', async () => {
       const res = await ABORT_AGENT_CONTROLLER_SESSION_ROUTE.handler({
         mastra,
         controllerId: 'code',
         resourceId: 'user-1',
       } as any);
-      expect(res).toEqual({ ok: true });
+      expect(res).toMatchObject({
+        ok: false,
+        receipt: { command: 'abort', accepted: false, reason: 'no_pending_target' },
+      });
+    });
+  });
+
+  describe('native command rejection receipts', () => {
+    async function sessionFor(resourceId: string) {
+      const controller = mastra.getAgentController('code')!;
+      await controller.init();
+      return controller.createSession({ resourceId, id: resourceId, ownerId: controller.id });
+    }
+
+    it.each([
+      [ABORT_AGENT_CONTROLLER_SESSION_ROUTE, 'abort'],
+      [AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE, 'approval'],
+      [AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE, 'suspension'],
+    ] as const)('does not execute commands on an older core peer: %s', async (route, command) => {
+      const session = await sessionFor('old-core');
+      Object.defineProperty(session, 'respondToToolSuspensionWithReceipt', { value: undefined });
+      const abort = vi.spyOn(session, 'abort');
+      const approval = vi.spyOn(session, 'respondToToolApproval');
+      const answer = vi.spyOn(session, 'respondToToolSuspension');
+      const result = await route.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'old-core',
+        toolCallId: 'current',
+        approved: true,
+        resumeData: 'answer',
+      } as any);
+      expect(result).toMatchObject({ ok: false, receipt: { command, accepted: false, reason: 'unavailable' } });
+      expect(abort).not.toHaveBeenCalled();
+      expect(approval).not.toHaveBeenCalled();
+      expect(answer).not.toHaveBeenCalled();
+    });
+
+    it('distinguishes stale, accepted and duplicate approval without a replacement gate', async () => {
+      const session = await sessionFor('receipt-user');
+      const decision = session.approval.arm({ toolName: 'fixture', toolCallId: 'current' });
+      const command = (toolCallId: string) =>
+        AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE.handler({
+          mastra,
+          controllerId: 'code',
+          resourceId: 'receipt-user',
+          toolCallId,
+          approved: true,
+        } as any);
+      expect(await command('old')).toMatchObject({ ok: false, receipt: { accepted: false, reason: 'stale_target' } });
+      expect(await command('current')).toMatchObject({ ok: true, receipt: { accepted: true, toolCallId: 'current' } });
+      expect(await command('current')).toMatchObject({
+        ok: false,
+        receipt: { accepted: false, reason: 'no_pending_target' },
+      });
+      expect(await decision).toMatchObject({ decision: 'approve' });
+    });
+
+    it('rejects stale and already consumed answers while the accepted resume is still pending', async () => {
+      const session = await sessionFor('receipt-question');
+      session.suspensions.register({
+        threadId: session.thread.requireId(),
+        resourceId: session.identity.getResourceId(),
+        toolCallId: 'current',
+        toolName: 'ask_user',
+        runId: 'saved-run',
+      });
+      vi.spyOn(session.machinery, 'buildRequestContext').mockReturnValue(new Promise<any>(() => {}));
+      const command = (toolCallId: string) =>
+        AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE.handler({
+          mastra,
+          controllerId: 'code',
+          resourceId: 'receipt-question',
+          toolCallId,
+          resumeData: 'answer',
+        } as any);
+      expect(await command('old')).toMatchObject({ ok: false, receipt: { accepted: false, reason: 'stale_target' } });
+      expect(await command('current')).toMatchObject({ ok: true, receipt: { accepted: true, runId: 'saved-run' } });
+      expect(await command('current')).toMatchObject({
+        ok: false,
+        receipt: { accepted: false, reason: 'no_pending_target' },
+      });
+    });
+
+    it.each([
+      AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE,
+      AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE,
+      ABORT_AGENT_CONTROLLER_SESSION_ROUTE,
+    ])("does not consume another resource's pending gate", async route => {
+      const session = await sessionFor('receipt-owner');
+      void session.approval.arm({ toolName: 'fixture', toolCallId: 'current' });
+      await expect(
+        route.handler({
+          mastra,
+          controllerId: 'code',
+          resourceId: 'other-user',
+          toolCallId: 'current',
+          approved: true,
+          resumeData: 'answer',
+        } as any),
+      ).resolves.toMatchObject({ ok: false, receipt: { accepted: false, reason: 'no_pending_target' } });
+      expect(session.approval.isArmed()).toBe(true);
     });
   });
 
@@ -250,11 +360,6 @@ describe('agent-controller routes', () => {
       { name: 'sendMessage', method: 'sendMessage', route: SEND_AGENT_CONTROLLER_MESSAGE_ROUTE },
       { name: 'steer', method: 'steer', route: STEER_AGENT_CONTROLLER_SESSION_ROUTE },
       { name: 'followUp', method: 'followUp', route: FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE },
-      {
-        name: 'respondToToolSuspension',
-        method: 'respondToToolSuspension',
-        route: AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE,
-      },
     ] as const;
 
     for (const { name, method, route } of cases) {
@@ -400,7 +505,7 @@ describe('agent-controller routes', () => {
 
     it('forwards requestContext to session.respondToToolApproval', async () => {
       const session = await getRouteSession('user-rc');
-      const spy = vi.spyOn(session, 'respondToToolApproval').mockReturnValue(undefined);
+      const spy = vi.spyOn(session, 'respondToToolApproval').mockReturnValue({ command: 'approval', accepted: true });
       const requestContext = makeRequestContext();
 
       await AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE.handler({
@@ -415,9 +520,11 @@ describe('agent-controller routes', () => {
       expect(spy).toHaveBeenCalledWith({ toolCallId: 'call-1', decision: 'approve', requestContext });
     });
 
-    it('forwards requestContext to session.respondToToolSuspension', async () => {
+    it('forwards requestContext to the native suspension receipt method', async () => {
       const session = await getRouteSession('user-rc');
-      const spy = vi.spyOn(session, 'respondToToolSuspension').mockResolvedValue(undefined);
+      const spy = vi
+        .spyOn(session, 'respondToToolSuspensionWithReceipt')
+        .mockResolvedValue({ command: 'suspension', accepted: true });
       const requestContext = makeRequestContext();
 
       await AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE.handler({
@@ -434,7 +541,14 @@ describe('agent-controller routes', () => {
 
     it('acks a tool suspension without waiting for the resumed run to finish', async () => {
       const session = await getRouteSession('user-suspension-ack');
-      vi.spyOn(session, 'respondToToolSuspension').mockReturnValue(new Promise<void>(() => {}));
+      session.suspensions.register({
+        threadId: session.thread.requireId(),
+        resourceId: session.identity.getResourceId(),
+        toolCallId: 'call-3',
+        toolName: 'ask_user',
+        runId: 'saved-run',
+      });
+      vi.spyOn(session.machinery, 'buildRequestContext').mockReturnValue(new Promise<any>(() => {}));
 
       const result = await Promise.race([
         AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE.handler({
@@ -447,7 +561,10 @@ describe('agent-controller routes', () => {
         new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 50)),
       ]);
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({
+        ok: true,
+        receipt: { command: 'suspension', accepted: true, toolCallId: 'call-3', runId: 'saved-run' },
+      });
     });
   });
 

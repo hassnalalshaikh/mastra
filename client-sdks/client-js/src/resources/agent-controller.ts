@@ -3,8 +3,11 @@ import type {
   AgentControllerWireEvent,
   MastraDBMessage,
   MastraMessagePart,
+  SessionAbortOptions,
+  SessionCommandReceipt,
 } from '@mastra/core/agent-controller';
 export type { MastraDBMessage, MastraMessageContentV2, MastraMessagePart } from '@mastra/core/agent-controller';
+export type { SessionCommandReceipt, SessionAbortOptions } from '@mastra/core/agent-controller';
 import type { RequestContext } from '@mastra/core/request-context';
 import type { StorageListMessagesOutput } from '@mastra/core/storage';
 
@@ -261,6 +264,16 @@ export interface PlanResume {
  */
 export interface AgentControllerRequestOptions {
   requestContext?: RequestContext | Record<string, any>;
+}
+
+export type AgentControllerCommandOptions = AgentControllerRequestOptions & SessionAbortOptions;
+
+/** The native gate explicitly rejected this command; no action was accepted. */
+export class SessionCommandRejectedError extends Error {
+  constructor(readonly receipt: Extract<SessionCommandReceipt, { accepted: false }>) {
+    super(`Session ${receipt.command} command rejected: ${receipt.reason}`);
+    this.name = 'SessionCommandRejectedError';
+  }
 }
 
 /** Options for subscribing to an agent controller session's event stream. */
@@ -609,17 +622,29 @@ export class AgentControllerSession extends BaseResource {
     });
   }
 
-  /** Abort the in-flight run for this session. */
-  async abort(): Promise<void> {
-    await this.request(this.url(`${this.base()}/abort`), { method: 'POST' });
+  /** Request native cancellation. Acceptance does not mean cancellation has finished. */
+  async abort(options: Omit<SessionAbortOptions, 'localOnly'> = {}): Promise<SessionCommandReceipt> {
+    const query = new URLSearchParams();
+    if (options.expectedRunId !== undefined) query.set('expectedRunId', options.expectedRunId);
+    if (options.expectedOperationId !== undefined)
+      query.set('expectedOperationId', String(options.expectedOperationId));
+    const suffix = query.size ? `?${query}` : '';
+    return this.command('abort', `${this.base()}/abort${suffix}`, undefined, options);
   }
 
   /** Approve or decline a pending tool call (`tool_approval_required`). */
-  async approveTool(toolCallId: string, approved: boolean, options?: AgentControllerRequestOptions): Promise<void> {
+  async approveTool(
+    toolCallId: string,
+    approved: boolean,
+    options?: AgentControllerCommandOptions,
+  ): Promise<SessionCommandReceipt> {
     const requestContext = parseClientRequestContext(options?.requestContext);
-    await this.request(this.url(`${this.base()}/tool-approval`), {
-      method: 'POST',
-      body: { toolCallId, approved, ...(requestContext ? { requestContext } : {}) },
+    return this.command('approval', `${this.base()}/tool-approval`, {
+      toolCallId,
+      approved,
+      expectedRunId: options?.expectedRunId,
+      expectedOperationId: options?.expectedOperationId,
+      ...(requestContext ? { requestContext } : {}),
     });
   }
 
@@ -631,13 +656,48 @@ export class AgentControllerSession extends BaseResource {
   async respondToToolSuspension(
     toolCallId: string,
     resumeData: string | string[] | PlanResume,
-    options?: AgentControllerRequestOptions,
-  ): Promise<void> {
+    options?: AgentControllerCommandOptions,
+  ): Promise<SessionCommandReceipt> {
     const requestContext = parseClientRequestContext(options?.requestContext);
-    await this.request(this.url(`${this.base()}/tool-suspension`), {
-      method: 'POST',
-      body: { toolCallId, resumeData, ...(requestContext ? { requestContext } : {}) },
+    return this.command('suspension', `${this.base()}/tool-suspension`, {
+      toolCallId,
+      resumeData,
+      expectedRunId: options?.expectedRunId,
+      expectedOperationId: options?.expectedOperationId,
+      ...(requestContext ? { requestContext } : {}),
     });
+  }
+
+  private async command(
+    command: SessionCommandReceipt['command'],
+    path: string,
+    body?: Record<string, unknown>,
+    expected?: SessionAbortOptions,
+  ): Promise<SessionCommandReceipt> {
+    // A lost response leaves acceptance unknown. Never replay a consumed gate or
+    // a Stop against newer work just to obtain another HTTP response.
+    const result = await new BaseResource({ ...this.options, retries: 0 }).request<{
+      ok: boolean;
+      receipt: SessionCommandReceipt;
+    }>(this.url(path), { method: 'POST', ...(body ? { body } : {}) });
+    const receipt = result?.receipt;
+    const expectedRunId = expected?.expectedRunId ?? body?.expectedRunId;
+    if (
+      !receipt ||
+      receipt.command !== command ||
+      typeof receipt.accepted !== 'boolean' ||
+      (receipt.toolCallId !== undefined && typeof receipt.toolCallId !== 'string') ||
+      (receipt.runId !== undefined && typeof receipt.runId !== 'string') ||
+      (receipt.accepted && body?.toolCallId !== undefined && receipt.toolCallId !== body.toolCallId) ||
+      (receipt.accepted && expectedRunId !== undefined && receipt.runId !== expectedRunId) ||
+      result.ok !== receipt.accepted ||
+      (!receipt.accepted &&
+        !['no_pending_target', 'stale_target', 'ambiguous_target', 'stopping', 'unavailable'].includes(receipt.reason))
+    ) {
+      throw new Error(`Session ${command} command acceptance was not confirmed by the server`);
+    }
+    if (!receipt.accepted) throw new SessionCommandRejectedError(receipt);
+    return receipt;
   }
 
   /** Inject a message into the in-flight run without starting a new turn. */
