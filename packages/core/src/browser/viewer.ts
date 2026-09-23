@@ -156,6 +156,7 @@ export class BrowserViewer {
         ) {
           throw new Error('Browser connection changed');
         }
+        if (command.type !== 'preferences') this.stream?.markInteractive?.();
         await this.browser.executeViewerCommand(command, this.threadId);
         if (command.type !== 'mouse' && command.type !== 'keyboard' && command.type !== 'text')
           await this.refreshState();
