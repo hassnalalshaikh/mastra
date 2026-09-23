@@ -1,5 +1,85 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Session } from '../session';
+import z from 'zod';
+import { Agent } from '../../agent';
+import { InMemoryStore } from '../../storage';
+import { MastraLanguageModelV2Mock } from '../../test-utils/llm-mock';
+import { createTool } from '../../tools';
+import { submitPlanTool } from '../../tools/builtin/submit-plan';
+import { AgentController } from '../agent-controller';
+import { Session, SessionStream } from '../session';
+import { createMockWorkspace } from '../test-utils';
+
+function nativeStream(toolName?: string) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: 'stream-start', warnings: [] });
+      controller.enqueue({ type: 'response-metadata', id: 'response', modelId: 'mock', timestamp: new Date(0) });
+      if (toolName) {
+        controller.enqueue({
+          type: 'tool-call',
+          toolCallId: 'question',
+          toolName,
+          input: '{"path":"plan.md"}',
+          providerExecuted: false,
+        });
+      } else {
+        controller.enqueue({ type: 'text-start', id: 'text' });
+        controller.enqueue({ type: 'text-delta', id: 'text', delta: 'Done.' });
+        controller.enqueue({ type: 'text-end', id: 'text' });
+      }
+      controller.enqueue({
+        type: 'finish',
+        finishReason: toolName ? 'tool-calls' : 'stop',
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      });
+      controller.close();
+    },
+  });
+}
+
+async function nativeFixture(plan = false) {
+  let calls = 0;
+  const confirm = createTool({
+    id: 'confirm',
+    description: 'Ask for confirmation',
+    inputSchema: z.object({ path: z.string() }),
+    execute: async (_input, context) => {
+      if (context?.agent?.resumeData === 'done') return 'done';
+      await context?.agent?.suspend({ question: 'Continue?' });
+      return 'waiting';
+    },
+  });
+  const agent = new Agent({
+    id: 'plan',
+    name: 'plan',
+    instructions: 'Ask once.',
+    model: new MastraLanguageModelV2Mock({
+      doStream: async () => ({ stream: nativeStream(calls++ === 0 ? (plan ? 'submit_plan' : 'confirm') : undefined) }),
+    }),
+    tools: plan ? { submit_plan: submitPlanTool } : { confirm },
+  });
+  const build = new Agent({
+    id: 'build',
+    name: 'build',
+    instructions: 'Build.',
+    model: new MastraLanguageModelV2Mock({ doStream: async () => ({ stream: nativeStream() }) }),
+  });
+  const controller = new AgentController({
+    id: 'receipt-native',
+    workspace: createMockWorkspace(),
+    storage: new InMemoryStore(),
+    initialState: { yolo: true } as any,
+    modes: [
+      { id: 'plan', name: 'Plan', default: true, agent, ...(plan ? { transitionsTo: 'build' } : {}) },
+      { id: 'build', name: 'Build', agent: build },
+    ],
+  });
+  await controller.init();
+  const session = await controller.createSession({ id: 'session', ownerId: 'owner', resourceId: 'user' });
+  await session.thread.create();
+  await session.sendMessage({ content: 'Start.' });
+  return { session, agent, build };
+}
 
 function fixture(bound = true) {
   const session = new Session({ id: 'session', ownerId: 'owner', resourceId: 'user' });
@@ -23,6 +103,83 @@ function fixture(bound = true) {
 }
 
 describe('native command acceptance receipts', () => {
+  it('preserves an immediate same-tool same-run re-suspension before the send response returns', async () => {
+    const { session, agent } = await nativeFixture();
+    const original = session.suspensions.get({ toolCallId: 'question' })!;
+    expect(original).toBeDefined();
+    const send = agent.sendStreamResume.bind(agent);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    vi.spyOn(agent, 'sendStreamResume').mockImplementationOnce(async options => {
+      await send(options);
+      await held;
+    });
+    let observed!: () => void;
+    const resuspended = new Promise<void>(resolve => {
+      observed = resolve;
+    });
+    const unsubscribe = session.subscribe(event => {
+      if (event.type === 'tool_suspended') observed();
+    });
+    const answer = session.respondToToolSuspension({ toolCallId: 'question', resumeData: 'again' });
+    await resuspended;
+    release();
+    await answer;
+    unsubscribe();
+    const next = session.suspensions.get({ toolCallId: 'question' });
+    expect(next).toMatchObject({ runId: original.runId, toolName: 'confirm' });
+    expect(next).not.toBe(original);
+    expect(next?.claimed).not.toBe(true);
+    await session.respondToToolSuspension({ toolCallId: 'question', resumeData: 'done' });
+    expect(session.suspensions.hasPending()).toBe(false);
+  });
+
+  it('does not restore the old prompt when delivery fails after a native same-run re-suspension', async () => {
+    const { session, agent } = await nativeFixture();
+    const original = session.suspensions.get({ toolCallId: 'question' })!;
+    const send = agent.sendStreamResume.bind(agent);
+    let observed!: () => void;
+    const resuspended = new Promise<void>(resolve => {
+      observed = resolve;
+    });
+    const events: any[] = [];
+    const unsubscribe = session.subscribe(event => {
+      events.push(event);
+      if (event.type === 'tool_suspended') observed();
+    });
+    const failure = Object.assign(new Error('Dependency failed after handoff'), { name: 'ToolDependencyError' });
+    vi.spyOn(agent, 'sendStreamResume').mockImplementationOnce(async options => {
+      await send(options);
+      await resuspended;
+      throw failure;
+    });
+    await session.respondToToolSuspension({ toolCallId: 'question', resumeData: 'again' });
+    unsubscribe();
+    expect(session.suspensions.get({ toolCallId: 'question' })).not.toBe(original);
+    expect(session.suspensions.get({ toolCallId: 'question' })?.claimed).not.toBe(true);
+    expect(events.filter(event => event.type === 'tool_suspended')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'error')).toEqual([{ type: 'error', error: failure }]);
+    await session.respondToToolSuspension({ toolCallId: 'question', resumeData: 'done' });
+  });
+
+  it('restores the selected build subscription after the native plan resume starts a new operation', async () => {
+    const { session, build } = await nativeFixture(true);
+    const before = session.run.getOperationId();
+    await session.respondToToolSuspension({ toolCallId: 'question', resumeData: { action: 'approved' } });
+    expect(session.run.getOperationId()).toBeGreaterThan(before);
+    expect(session.mode.get()).toBe('build');
+    expect(
+      session.stream.matches({
+        key: SessionStream.keyFor({
+          agent: build,
+          threadId: session.thread.requireId(),
+          resourceId: session.identity.getResourceId(),
+        }),
+      }),
+    ).toBe(true);
+  });
   it.each(['approve', 'decline', 'always_allow_category'] as const)(
     'accepts %s once and rejects stale and resolved gates',
     async decision => {

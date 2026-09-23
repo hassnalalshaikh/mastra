@@ -5042,25 +5042,45 @@ export class Session<TState = unknown> {
       this.machinery.getAgent();
 
     const resourceId = this.identity.getResourceId();
-    const operationId = this.run.getOperationId();
+    let operationId = this.run.getOperationId();
+    let handedOff = false;
+    const sameBinding = () => this.thread.getId() === threadId && this.identity.getResourceId() === resourceId;
     const isCurrent = () => {
       const pending = this.suspensions.get({ toolCallId });
       return (
-        this.thread.getId() === threadId &&
-        this.identity.getResourceId() === resourceId &&
+        sameBinding() &&
         this.run.getOperationId() === operationId &&
         !this.run.isAbortRequested() &&
-        (!pending || pending === suspension)
+        (handedOff ? !pending || pending.runId === suspension.runId : pending === suspension)
       );
     };
 
-    // Remove before resuming so a re-suspend during the resumed run can
-    // re-register the same toolCallId without being clobbered by this cleanup.
-    // Drop the matching display-state entry too so the UI stops rendering the
-    // resolved prompt while any other parked suspensions stay visible.
+    // Keep the claimed target available to Stop until native handoff. A second
+    // answer cannot consume it; remove only its displayed prompt for now.
     const pendingDisplay = this.displayState.get().pendingSuspensions.get(toolCallId);
     this.displayState.deletePendingSuspension(toolCallId);
-    return { suspension, pendingDisplay, agent, threadId, resourceId, isCurrent };
+    return {
+      suspension,
+      pendingDisplay,
+      agent,
+      threadId,
+      resourceId,
+      isCurrent,
+      handoff: () => {
+        // The native stream assigns identity before agent_start. Release only
+        // this consumed target before that run can suspend the same tool again.
+        if (
+          !sameBinding() ||
+          this.run.isAbortRequested() ||
+          this.run.getRunId() !== suspension.runId ||
+          this.suspensions.get({ toolCallId }) !== suspension
+        )
+          return;
+        operationId = this.run.getOperationId();
+        handedOff = true;
+        this.suspensions.delete({ toolCallId, expected: suspension });
+      },
+    };
   }
 
   private async resumeClaimedToolCall({
@@ -5087,6 +5107,7 @@ export class Session<TState = unknown> {
     await this.thread.ensureSubscription(threadId, agent, false, isCurrent);
     assertCurrent();
     const resumedSubscriptionBoundary = this.createSubscribedResumeBoundaryWaiter({ toolCallId, resolveOnToolEnd });
+    let unsubscribeStart: (() => void) | undefined;
 
     try {
       const sharedOptions = this.machinery.buildSharedRunOptions();
@@ -5100,6 +5121,11 @@ export class Session<TState = unknown> {
       }
       const toolsets = await this.machinery.buildToolsets(requestContext);
       assertCurrent();
+      unsubscribeStart = this.subscribe(event => {
+        if (event.type !== 'agent_start') return;
+        unsubscribeStart?.();
+        claim.handoff();
+      });
       await agent.sendStreamResume({
         threadId,
         resourceId,
@@ -5114,15 +5140,15 @@ export class Session<TState = unknown> {
           toolsets,
         },
       });
-      this.suspensions.delete({ toolCallId, expected: suspension });
       await resumedSubscriptionBoundary.promise;
     } catch (error) {
       if (getErrorFromUnknown(error).name === 'ToolDependencyError' && isCurrent()) {
-        this.suspensions.restoreClaim({ toolCallId, expected: suspension });
-        if (pendingDisplay) this.emit({ type: 'tool_suspended', ...pendingDisplay });
+        const restored = this.suspensions.restoreClaim({ toolCallId, expected: suspension });
+        if (restored && pendingDisplay) this.emit({ type: 'tool_suspended', ...pendingDisplay });
       }
       throw error;
     } finally {
+      unsubscribeStart?.();
       resumedSubscriptionBoundary.cancel();
       if (isCurrent()) await this.thread.ensureSubscription(threadId, this.machinery.getAgent(), false, isCurrent);
     }
