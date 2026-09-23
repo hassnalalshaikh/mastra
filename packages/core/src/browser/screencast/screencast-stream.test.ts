@@ -116,6 +116,7 @@ describe('ScreencastStream', () => {
       finish[0]('sharp');
       await vi.waitFor(() => expect(frames).toHaveBeenCalledTimes(1));
       frame('view-b', 2);
+      await new Promise(resolve => setTimeout(resolve, 350));
       expect(finish).toHaveLength(2);
       finish[1]('sharp');
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -124,6 +125,7 @@ describe('ScreencastStream', () => {
       expect(finish).toHaveLength(2);
       expect(frames).toHaveBeenCalledTimes(1);
       frame('view-c', 5);
+      await new Promise(resolve => setTimeout(resolve, 350));
       expect(finish).toHaveLength(3);
       finish[2]('changed');
       await vi.waitFor(() => expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['sharp', 'changed']));
@@ -146,6 +148,43 @@ describe('ScreencastStream', () => {
       await stream.stop();
     });
 
+    it('paces sharp pictures of a page that keeps changing while nobody touches it', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame, acked } = sharpFixture();
+      await stream.start();
+      frame('animation-1', 1);
+      finish[0]('sharp-1');
+      await vi.advanceTimersByTimeAsync(0);
+      frame('animation-2', 2);
+      frame('animation-3', 3);
+      expect(finish).toHaveLength(1);
+      expect(acked(3)).toBe(false);
+      await vi.advanceTimersByTimeAsync(332);
+      expect(finish).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(finish).toHaveLength(2);
+      finish[1]('sharp-3');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['sharp-1', 'sharp-3']);
+      await stream.stop();
+    });
+
+    it('ends the pacing wait at once when the user drives the page', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame, acked } = sharpFixture();
+      await stream.start();
+      frame('animation-1', 1);
+      finish[0]('sharp-1');
+      await vi.advanceTimersByTimeAsync(0);
+      frame('animation-2', 2);
+      stream.markInteractive();
+      expect(acked(2)).toBe(true);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['sharp-1', 'animation-2']);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(finish).toHaveLength(2);
+      await stream.stop();
+    });
+
     it('keeps the sharp picture when the capture echo arrives inside the input window', async () => {
       vi.useFakeTimers();
       const { stream, finish, frames, frame } = sharpFixture();
@@ -157,6 +196,7 @@ describe('ScreencastStream', () => {
       await vi.advanceTimersByTimeAsync(0);
       frame('scroll-echo', 2);
       expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll', 'sharp']);
+      await vi.advanceTimersByTimeAsync(333);
       expect(finish).toHaveLength(2);
       finish[1]('sharp');
       await vi.advanceTimersByTimeAsync(0);
