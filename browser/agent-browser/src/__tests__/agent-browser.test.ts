@@ -84,6 +84,7 @@ const { mockPage, mockLocator, mockContext, mockManager } = vi.hoisted(() => {
     screenshot: vi.fn().mockResolvedValue(Buffer.from('fake-png')),
     dragTo: vi.fn(),
     waitFor: vi.fn(),
+    boundingBox: vi.fn(),
   };
 
   const mockManager = {
@@ -777,6 +778,54 @@ describe('AgentBrowser', () => {
     it('launches browser only once for concurrent ensureReady calls', async () => {
       await Promise.all([browser.ensureReady(), browser.ensureReady()]);
       expect(mockManager.launch).toHaveBeenCalledOnce();
+    });
+  });
+  describe('agent actions for live viewers', () => {
+    const box = { x: 10, y: 20, width: 100, height: 30 };
+    beforeEach(async () => {
+      mockLocator.boundingBox.mockResolvedValue(box);
+      // Earlier suites leave failing click implementations behind (clearAllMocks keeps them).
+      mockLocator.click.mockReset();
+      mockLocator.fill.mockReset();
+      await browser.ensureReady();
+      await browser.snapshot({});
+    });
+
+    it('measures nothing while nobody watches', async () => {
+      await browser.click({ ref: '@e1' });
+      expect(mockLocator.boundingBox).not.toHaveBeenCalled();
+      expect(mockLocator.scrollIntoViewIfNeeded).not.toHaveBeenCalled();
+    });
+
+    it('reports where a click and a typed field land, before acting', async () => {
+      const seen: unknown[] = [];
+      const clicksBefore: number[] = [];
+      const stop = browser.onAgentAction(action => {
+        seen.push(action);
+        clicksBefore.push(mockLocator.click.mock.calls.length);
+      });
+      await browser.click({ ref: '@e1' });
+      await browser.type({ ref: '@e2', text: 'coffee grinder' });
+      expect(seen).toEqual([
+        { seq: 1, kind: 'click', box },
+        { seq: 2, kind: 'type', box },
+      ]);
+      // The click is reported before it happens.
+      expect(clicksBefore).toEqual([0, 1]);
+      expect(mockLocator.scrollIntoViewIfNeeded).toHaveBeenCalled();
+      stop();
+      await browser.click({ ref: '@e1' });
+      expect(seen).toHaveLength(2);
+    });
+
+    it('never fails or skips the action when the element cannot be measured', async () => {
+      const listener = vi.fn();
+      browser.onAgentAction(listener);
+      mockLocator.boundingBox.mockRejectedValueOnce(new Error('detached'));
+      const result = await browser.click({ ref: '@e1' });
+      expect(result).toMatchObject({ success: true });
+      expect(mockLocator.click).toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
     });
   });
 });

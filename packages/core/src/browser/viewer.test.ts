@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi } from 'vitest';
-import type { MastraBrowser } from './browser';
+import type { BrowserAgentAction, MastraBrowser } from './browser';
 import { BrowserViewer } from './viewer';
 
 function fixture() {
+  const agent: { act?: (action: BrowserAgentAction) => void; detach: () => void } = { detach: vi.fn() };
   const stream = Object.assign(new EventEmitter(), {
     stop: vi.fn(async () => {}),
     reconnect: vi.fn(async () => {}),
@@ -16,10 +17,14 @@ function fixture() {
     getScreencastFormat: () => 'png',
     getViewerViewport: () => undefined,
     onBrowserClosed: vi.fn(() => vi.fn()),
+    onAgentAction: vi.fn((listener: (action: BrowserAgentAction) => void) => {
+      agent.act = listener;
+      return agent.detach;
+    }),
     isBrowserRunning: vi.fn(() => true),
     executeViewerCommand: vi.fn(async () => {}),
   };
-  return { stream, browser, viewer: new BrowserViewer(browser as unknown as MastraBrowser, 'thread-one') };
+  return { stream, browser, agent, viewer: new BrowserViewer(browser as unknown as MastraBrowser, 'thread-one') };
 }
 
 describe('native shared browser viewer', () => {
@@ -76,5 +81,32 @@ describe('native shared browser viewer', () => {
     await first;
     await expect(second).rejects.toThrow('connection changed');
     expect(browser.executeViewerCommand).toHaveBeenCalledTimes(1);
+  });
+  it('shows each agent action on the current picture and keeps it on later frames', async () => {
+    const { stream, browser, agent, viewer } = fixture();
+    const listener = vi.fn();
+    const release = await viewer.subscribe(listener);
+    expect(browser.onAgentAction).toHaveBeenCalledWith(expect.any(Function), 'thread-one');
+    stream.emit('frame', { data: 'before', viewport: { width: 640, height: 800 } });
+    const action: BrowserAgentAction = { seq: 1, kind: 'click', box: { x: 10, y: 20, width: 100, height: 30 } };
+    agent.act!(action);
+    // The last picture is republished at once with the action, so the cursor never waits for the page.
+    expect(listener).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'frame', data: 'before', agentAction: action }),
+    );
+    // A viewer that drops obsolete frames still receives the latest action on the next one.
+    stream.emit('frame', { data: 'after', viewport: { width: 640, height: 800 } });
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'after', agentAction: action }));
+    await release();
+    expect(agent.detach).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds no action to frames until the agent acts', async () => {
+    const { stream, viewer } = fixture();
+    const listener = vi.fn();
+    const release = await viewer.subscribe(listener);
+    stream.emit('frame', { data: 'frame', viewport: { width: 640, height: 800 } });
+    expect(listener.mock.lastCall?.[0]).not.toHaveProperty('agentAction');
+    await release();
   });
 });

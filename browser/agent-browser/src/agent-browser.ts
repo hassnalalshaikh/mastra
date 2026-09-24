@@ -6,6 +6,7 @@ import {
   resolveLaunchViewport,
 } from '@mastra/core/browser';
 import type {
+  BrowserAgentAction,
   BrowserState,
   BrowserTabState,
   BrowserToolError,
@@ -635,6 +636,22 @@ export class AgentBrowser extends MastraBrowser {
     return manager.getLocatorFromRef(ref);
   }
 
+  /**
+   * Tell live viewers where the agent is about to act. Only when someone is
+   * watching; it brings the element into view first (as the action itself
+   * would) and never fails or delays the action beyond a short bound.
+   */
+  private async markAgentAction(kind: BrowserAgentAction['kind'], locator: Locator, threadId?: string) {
+    if (!this.hasAgentActionListeners()) return;
+    try {
+      await locator.scrollIntoViewIfNeeded({ timeout: 1000 });
+      const box = await locator.boundingBox({ timeout: 1000 });
+      if (box && box.width > 0 && box.height > 0) this.notifyAgentAction({ kind, box }, threadId);
+    } catch {
+      // A missing box only means no cursor; the action reports its own errors.
+    }
+  }
+
   private async getScrollInfo(threadId?: string): Promise<{
     scrollY: number;
     scrollHeight: number;
@@ -1016,6 +1033,7 @@ export class AgentBrowser extends MastraBrowser {
 
         const timeout = input.timeout ?? this.defaultTimeout;
 
+        await this.markAgentAction('click', locator, threadId);
         const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
 
         await locator.click({
@@ -1069,6 +1087,7 @@ export class AgentBrowser extends MastraBrowser {
           );
         }
 
+        await this.markAgentAction('type', locator, threadId);
         if (input.clear) {
           await locator.fill('', { timeout: this.defaultTimeout });
         }
@@ -1171,6 +1190,7 @@ export class AgentBrowser extends MastraBrowser {
         const timeout = input.timeout ?? this.defaultTimeout;
         const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
 
+        await this.markAgentAction('select', locator, threadId);
         const selected = await locator.selectOption(selectValue, { timeout });
 
         await navigation;
@@ -1278,6 +1298,7 @@ export class AgentBrowser extends MastraBrowser {
           );
         }
 
+        await this.markAgentAction('hover', locator, threadId);
         await locator.hover({ timeout: this.defaultTimeout });
 
         return {
@@ -1616,6 +1637,7 @@ export class AgentBrowser extends MastraBrowser {
           );
         }
 
+        await this.markAgentAction('drag', sourceLocator, threadId);
         await sourceLocator.dragTo(targetLocator, { timeout: this.defaultTimeout });
 
         return {
