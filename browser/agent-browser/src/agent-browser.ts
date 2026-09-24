@@ -246,11 +246,9 @@ export class AgentBrowser extends MastraBrowser {
       this.activityObserver = new BrowserActivityObserver(
         context,
         () => this.recordActivity(),
-        error => {
-          this.logger.error('Browser activity observation failed', { error });
-          // A viewer whose activity cannot be observed must not remain silently billable.
-          void this.close().catch(closeError => this.logger.error('Browser cleanup failed', { error: closeError }));
-        },
+        // Unobserved input only looks idle, so the idle close still ends billing; a page-change
+        // race must never close a working browser.
+        error => this.logger.warn('Browser activity observation missed a document', { error }),
       );
       await this.activityObserver.start();
     }
