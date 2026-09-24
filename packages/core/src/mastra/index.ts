@@ -697,6 +697,8 @@ export interface MastraRecoveryConfig {
 export const WORKFLOW_RUN_RECOVERY_DEFAULTS = Object.freeze({
   staleAfterMs: 20 * 60_000,
   sweepIntervalMs: 5 * 60_000,
+  /** Failed restart attempts of one run (per process) before it is marked failed. */
+  maxRestartAttempts: 3,
 });
 
 /**
@@ -786,6 +788,8 @@ export class Mastra<
   // `recovery.workflows` and a server entry that also calls the sweep) never
   // drive the same run twice.
   #restartingWorkflowRuns = new Set<string>();
+  // Failed restart attempts per run, for `recovery.workflows` (this process only).
+  #workflowRestartFailures = new Map<string, number>();
   #durableAgentRecoveries = new Set<Promise<unknown>>();
   #durableAgentCancellations = new Set<Promise<void>>();
   #durableAgentCancellationErrors: unknown[] = [];
@@ -3897,14 +3901,28 @@ export class Mastra<
     staleAfterMs?: number;
     createdBefore?: Date;
   }): Promise<void> {
+    return this.#restartActiveWorkflowRuns(options ?? {}, { detach: false });
+  }
+
+  /**
+   * With `detach`, each restart is started and the sweep moves on without
+   * waiting for the run to finish, so one long or hung run never blocks later
+   * sweeps; the in-process guard still keeps one run from being restarted twice.
+   * With `maxAttempts`, a run whose restart fails that many times in this
+   * process is marked `failed` with the reason instead of being retried forever.
+   */
+  async #restartActiveWorkflowRuns(
+    options: { optedInOnly?: boolean; staleAfterMs?: number; createdBefore?: Date },
+    { detach, maxAttempts }: { detach: boolean; maxAttempts?: number },
+  ): Promise<void> {
     const activeRuns = await this.listActiveWorkflowRuns(options);
     const isEligible = (run: { createdAt?: Date | string; updatedAt?: Date | string } | null | undefined) => {
       if (!run) return false;
-      if (options?.createdBefore && !(new Date(run.createdAt ?? 0).getTime() < options.createdBefore.getTime())) {
+      if (options.createdBefore && !(new Date(run.createdAt ?? 0).getTime() < options.createdBefore.getTime())) {
         return false;
       }
       if (
-        options?.staleAfterMs !== undefined &&
+        options.staleAfterMs !== undefined &&
         !(Date.now() - new Date(run.updatedAt ?? Date.now()).getTime() >= options.staleAfterMs)
       ) {
         return false;
@@ -3937,11 +3955,20 @@ export class Mastra<
       const leaseOwner = randomUUID();
       const leases = this.#resolveLeaseProvider();
       let leased = false;
+      const settle = async () => {
+        this.#restartingWorkflowRuns.delete(restartKey);
+        if (leased) {
+          await leases.releaseLease(leaseKey, leaseOwner).catch(() => {});
+        }
+      };
+      const fail = (error: unknown) =>
+        this.#recordWorkflowRestartFailure(runSnapshot.workflowName, runSnapshot.runId, restartKey, error, maxAttempts);
+      let started: Promise<void> | undefined;
       try {
         const lease = await leases.acquireLease(
           leaseKey,
           leaseOwner,
-          options?.staleAfterMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.staleAfterMs,
+          options.staleAfterMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.staleAfterMs,
         );
         leased = lease.acquired;
         if (!leased) {
@@ -3953,7 +3980,7 @@ export class Mastra<
         }
         // The list may be minutes old by now: restart only if the run is still
         // active and still untouched.
-        if (options?.staleAfterMs !== undefined || options?.createdBefore) {
+        if (options.staleAfterMs !== undefined || options.createdBefore) {
           const workflowsStore = await this.#storage?.getStore('workflows');
           const current = await workflowsStore?.getWorkflowRunById({
             runId: runSnapshot.runId,
@@ -3966,20 +3993,68 @@ export class Mastra<
           }
         }
         const run = await workflow.createRun({ runId: runSnapshot.runId });
-        await run.restart();
-        this.#logger.debug('Restarted workflow run', { workflow: runSnapshot.workflowName, runId: runSnapshot.runId });
+        started = run.restart().then(() => {
+          this.#workflowRestartFailures.delete(restartKey);
+          this.#logger.debug('Restarted workflow run', {
+            workflow: runSnapshot.workflowName,
+            runId: runSnapshot.runId,
+          });
+        }, fail);
+        started = started.finally(settle);
       } catch (error) {
-        this.#logger.error('Failed to restart workflow run', {
-          workflow: runSnapshot.workflowName,
-          runId: runSnapshot.runId,
-          error,
-        });
+        await fail(error);
       } finally {
-        this.#restartingWorkflowRuns.delete(restartKey);
-        if (leased) {
-          await leases.releaseLease(leaseKey, leaseOwner).catch(() => {});
+        if (!started) {
+          await settle();
         }
       }
+      if (started && !detach) {
+        await started;
+      }
+    }
+  }
+
+  async #recordWorkflowRestartFailure(
+    workflowName: string,
+    runId: string,
+    restartKey: string,
+    error: unknown,
+    maxAttempts: number | undefined,
+  ): Promise<void> {
+    this.#logger.error('Failed to restart workflow run', { workflow: workflowName, runId, error });
+    if (maxAttempts === undefined) return;
+    const attempts = (this.#workflowRestartFailures.get(restartKey) ?? 0) + 1;
+    if (attempts < maxAttempts) {
+      this.#workflowRestartFailures.set(restartKey, attempts);
+      return;
+    }
+    this.#workflowRestartFailures.delete(restartKey);
+    const reason = error instanceof Error ? error.message : String(error);
+    try {
+      const workflowsStore = await this.#storage?.getStore('workflows');
+      await workflowsStore?.updateWorkflowState({
+        workflowName,
+        runId,
+        opts: {
+          status: 'failed',
+          error: {
+            name: 'WorkflowRestartError',
+            message: `Automatic restart failed ${attempts} times; the run was stopped: ${reason}`,
+          },
+          expectedStatus: ['running', 'waiting'],
+        },
+      });
+      this.#logger.warn('Marked workflow run failed after repeated restart failures', {
+        workflow: workflowName,
+        runId,
+        attempts,
+      });
+    } catch (markError) {
+      this.#logger.error('Failed to mark workflow run failed after repeated restart failures', {
+        workflow: workflowName,
+        runId,
+        error: markError,
+      });
     }
   }
 
@@ -3992,15 +4067,19 @@ export class Mastra<
 
   /**
    * One sweep of `recovery.workflows: 'auto'`. Skipped while the previous
-   * sweep is still restarting runs.
+   * sweep is still listing and starting restarts; it does not wait for the
+   * restarted runs to finish.
    */
   #sweepOrphanedWorkflowRuns(createdBefore: Date): void {
     if (this.#workflowRecoverySweep || this.#shutdownStarted) return;
-    this.#workflowRecoverySweep = this.restartAllActiveWorkflowRuns({
-      optedInOnly: true,
-      staleAfterMs: this.#recoveryConfig.workflowRunStaleAfterMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.staleAfterMs,
-      createdBefore,
-    })
+    this.#workflowRecoverySweep = this.#restartActiveWorkflowRuns(
+      {
+        optedInOnly: true,
+        staleAfterMs: this.#recoveryConfig.workflowRunStaleAfterMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.staleAfterMs,
+        createdBefore,
+      },
+      { detach: true, maxAttempts: WORKFLOW_RUN_RECOVERY_DEFAULTS.maxRestartAttempts },
+    )
       .catch(error => {
         this.#logger?.error('Failed to restart orphaned workflow runs', { error });
       })
