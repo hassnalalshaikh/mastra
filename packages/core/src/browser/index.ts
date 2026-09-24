@@ -20,6 +20,7 @@ export type {
   ScreencastEvents,
   MouseEventParams,
   KeyboardEventParams,
+  BrowserAgentAction,
 } from './browser';
 
 // ============================================================================
