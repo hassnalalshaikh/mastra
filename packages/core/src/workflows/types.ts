@@ -536,6 +536,19 @@ export interface WorkflowOptions {
    * workflows so inner step events reach the outer subscriber.
    */
   sharePubsub?: boolean;
+  /**
+   * Whether `Mastra.restartAllActiveWorkflowRuns()` (boot-time generic
+   * recovery) automatically restarts this workflow's active runs. Defaults to
+   * true for default-engine workflows. Set to false for workflows whose
+   * recovery is owned elsewhere or whose side effects must not be re-driven by
+   * a blanket restart.
+   *
+   * Evented workflows (including every scheduled workflow) are restarted only
+   * when this is explicitly `true`. Workflows that set it to `true` are the
+   * ones `restartAllActiveWorkflowRuns({ optedInOnly: true })` and
+   * `recovery.workflows: 'auto'` restart.
+   */
+  autoRestartActiveRuns?: boolean;
   shouldPersistSnapshot?: (params: {
     stepResults: Record<string, StepResult<any, any, any, any>>;
     workflowStatus: WorkflowRunStatus;

@@ -1,12 +1,3 @@
-import { ToolPolicyError } from '../tools/tool-policy';
-import type { ToolPolicy, ToolPolicyConfig, ToolPolicyResolverArgs } from '../tools/tool-policy';
-import {
-  combineToolPolicies,
-  executeToolWithPolicy,
-  markPolicyExecutor,
-  TOOL_EXECUTION_POLICY,
-  withToolPolicyInvocation,
-} from '../tools/tool-policy-execution';
 import { randomUUID } from 'node:crypto';
 import type { Agent } from '../agent';
 import { createDurableAgent } from '../agent/durable/create-durable-agent';
@@ -88,6 +79,15 @@ import type { ToolLoopAgentLike } from '../tool-loop-agent';
 import { isToolLoopAgentLike, toolLoopAgentToMastraAgent } from '../tool-loop-agent';
 import type { ToolAction, ToolPayloadTransformPolicy } from '../tools';
 import { normalizeToolPayloadTransformPolicy } from '../tools/payload-transform';
+import type { ToolPolicy, ToolPolicyConfig, ToolPolicyResolverArgs } from '../tools/tool-policy';
+import { ToolPolicyError } from '../tools/tool-policy';
+import {
+  combineToolPolicies,
+  executeToolWithPolicy,
+  markPolicyExecutor,
+  TOOL_EXECUTION_POLICY,
+  withToolPolicyInvocation,
+} from '../tools/tool-policy-execution';
 import type { MastraTTS } from '../tts';
 import type { MastraIdGenerator, IdGeneratorContext } from '../types';
 import { readPositiveIntEnv } from '../utils';
@@ -622,7 +622,11 @@ export interface Config<
    * (must be idempotent). In multi-instance deploys every replica will race to
    * recover the same runs, since there is no lease/lock yet.
    *
-   * @default { durableAgents: 'off' }
+   * `workflows: 'auto'` restarts, once workers start, the active runs of
+   * workflows that set `options.autoRestartActiveRuns: true` (including evented
+   * and scheduled workflows). See {@link MastraRecoveryConfig.workflows}.
+   *
+   * @default { durableAgents: 'off', workflows: 'off' }
    */
   recovery?: MastraRecoveryConfig;
 
@@ -653,6 +657,19 @@ export interface MastraRecoveryConfig {
    * @default 'off'
    */
   durableAgents?: 'auto' | 'off';
+  /**
+   * Restart the active runs of workflows that set
+   * `options.autoRestartActiveRuns: true` once this instance starts its
+   * workers (`startWorkers()` without a worker name). This covers evented and
+   * scheduled workflows, whose runs are otherwise orphaned by a process
+   * restart. Workflows that do not opt in are never touched.
+   *
+   * Opt-in only: a restarted run re-executes its interrupted step, so those
+   * steps must be safe to run again. There is no lease yet, so enable it on
+   * one instance per storage.
+   * @default 'off'
+   */
+  workflows?: 'auto' | 'off';
 }
 
 /**
@@ -736,6 +753,11 @@ export class Mastra<
   #storageExplicit = false;
   #storageFallbackWarningPending = false;
   #recoveryConfig: MastraRecoveryConfig = { durableAgents: 'off' };
+  #workflowRecoveryStarted = false;
+  // Runs this instance is restarting now, so overlapping sweeps (for example
+  // `recovery.workflows` and a server entry that also calls the sweep) never
+  // drive the same run twice.
+  #restartingWorkflowRuns = new Set<string>();
   #durableAgentRecoveries = new Set<Promise<unknown>>();
   #durableAgentCancellations = new Set<Promise<void>>();
   #durableAgentCancellationErrors: unknown[] = [];
@@ -1351,6 +1373,7 @@ export class Mastra<
     // `restartAllActiveWorkflowRuns` boot hook.
     this.#recoveryConfig = {
       durableAgents: config?.recovery?.durableAgents ?? 'off',
+      ...(config?.recovery?.workflows ? { workflows: config.recovery.workflows } : {}),
     };
 
     this.#editor = config?.editor;
@@ -3787,18 +3810,31 @@ export class Mastra<
     return workflow as TWorkflows[TWorkflowName];
   }
 
-  public async listActiveWorkflowRuns(): Promise<WorkflowRuns> {
+  /**
+   * List the active (running or waiting) runs that boot-time recovery can
+   * restart: every default-engine workflow, plus evented workflows that set
+   * `options.autoRestartActiveRuns: true`. With `optedInOnly`, only workflows
+   * that set `options.autoRestartActiveRuns: true` are listed.
+   */
+  public async listActiveWorkflowRuns(options?: { optedInOnly?: boolean }): Promise<WorkflowRuns> {
     const storage = this.#storage;
     if (!storage) {
       this.#logger.debug('Cannot get active workflow runs. Mastra storage is not initialized');
       return { runs: [], total: 0 };
     }
 
-    // Get all workflows with default engine type
-    const defaultEngineWorkflows = Object.values(this.#workflows).filter(workflow => workflow.engineType === 'default');
+    // Default-engine workflows restart unless they opt out; evented workflows
+    // (every scheduled workflow) only when they opt in.
+    const restartableWorkflows = Object.values(this.#workflows).filter(workflow => {
+      const optedIn = workflow.options?.autoRestartActiveRuns === true;
+      if (options?.optedInOnly) {
+        return optedIn && (workflow.engineType === 'default' || workflow.engineType === 'evented');
+      }
+      return workflow.engineType === 'default' || (workflow.engineType === 'evented' && optedIn);
+    });
 
     const activeRunsByWorkflow = await Promise.all(
-      defaultEngineWorkflows.map(workflow => workflow.listActiveWorkflowRuns()),
+      restartableWorkflows.map(workflow => workflow.listActiveWorkflowRuns()),
     );
 
     const allRuns = activeRunsByWorkflow.flatMap(activeRuns => activeRuns.runs);
@@ -3810,8 +3846,14 @@ export class Mastra<
     };
   }
 
-  public async restartAllActiveWorkflowRuns(): Promise<void> {
-    const activeRuns = await this.listActiveWorkflowRuns();
+  /**
+   * Restart the runs listed by {@link Mastra.listActiveWorkflowRuns}, skipping
+   * workflows that set `options.autoRestartActiveRuns: false`. With
+   * `optedInOnly`, only workflows that set `options.autoRestartActiveRuns:
+   * true` are restarted.
+   */
+  public async restartAllActiveWorkflowRuns(options?: { optedInOnly?: boolean }): Promise<void> {
+    const activeRuns = await this.listActiveWorkflowRuns(options);
     if (activeRuns.runs.length > 0) {
       this.#logger.debug(
         `Restarting ${activeRuns.runs.length} active workflow run${activeRuns.runs.length > 1 ? 's' : ''}`,
@@ -3819,6 +3861,22 @@ export class Mastra<
     }
     for (const runSnapshot of activeRuns.runs) {
       const workflow = this.getWorkflowById(runSnapshot.workflowName);
+      if (workflow?.options?.autoRestartActiveRuns === false) {
+        this.#logger.debug('Skipping workflow run auto-restart; workflow opts out of generic recovery', {
+          workflow: runSnapshot.workflowName,
+          runId: runSnapshot.runId,
+        });
+        continue;
+      }
+      const restartKey = `${runSnapshot.workflowName}:${runSnapshot.runId}`;
+      if (this.#restartingWorkflowRuns.has(restartKey)) {
+        this.#logger.debug('Skipping workflow run auto-restart; the run is already being restarted', {
+          workflow: runSnapshot.workflowName,
+          runId: runSnapshot.runId,
+        });
+        continue;
+      }
+      this.#restartingWorkflowRuns.add(restartKey);
       try {
         const run = await workflow.createRun({ runId: runSnapshot.runId });
         await run.restart();
@@ -3829,6 +3887,8 @@ export class Mastra<
           runId: runSnapshot.runId,
           error,
         });
+      } finally {
+        this.#restartingWorkflowRuns.delete(restartKey);
       }
     }
   }
@@ -6259,6 +6319,24 @@ export class Mastra<
     // runtime signals (e.g. `mastra.schedules.create()`) know whether they need
     // to lazily inject + start additional workers themselves.
     this.#workersStarted = true;
+
+    // Opt-in boot recovery for workflow runs orphaned by a process restart.
+    // It runs once, after the workflow event workers above are subscribed, so
+    // evented restarts are processed by this instance. Restarted runs can last
+    // a long time, so do not hold startup until they finish.
+    if (
+      !name &&
+      this.#recoveryConfig.workflows === 'auto' &&
+      !this.#workflowRecoveryStarted &&
+      !this.#workersDisabled &&
+      !this.#shutdownStarted &&
+      (!this.#workerFilter || this.#workerFilter.has('orchestration'))
+    ) {
+      this.#workflowRecoveryStarted = true;
+      void this.restartAllActiveWorkflowRuns({ optedInOnly: true }).catch(error => {
+        this.#logger?.error('Failed to restart active workflow runs during startup', { error });
+      });
+    }
   }
 
   /**
