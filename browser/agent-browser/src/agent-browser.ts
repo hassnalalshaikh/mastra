@@ -26,7 +26,6 @@ import type { BrowserLaunchOptions } from 'agent-browser';
 import type { Page, Locator } from 'playwright-core';
 import { BrowserActivityObserver } from './activity-observer';
 import { SavedBrowserTabs } from './saved-tabs';
-import { ViewerPreferences } from './viewer-preferences';
 import type {
   GotoInput,
   SnapshotInput,
@@ -48,6 +47,7 @@ import type { CreateAgentBrowserThreadManager } from './thread-manager';
 import { createAgentBrowserTools } from './tools';
 import type { BrowserConfig } from './types';
 import { getBrowserPid } from './utils';
+import { ViewerPreferences } from './viewer-preferences';
 
 /** AgentBrowser accepts an optional thread-manager factory (see {@link CreateAgentBrowserThreadManager}). */
 export type AgentBrowserConfig = BrowserConfig & {
@@ -240,11 +240,9 @@ export class AgentBrowser extends MastraBrowser {
       this.activityObserver = new BrowserActivityObserver(
         context,
         () => this.recordActivity(),
-        error => {
-          this.logger.error('Browser activity observation failed', { error });
-          // A viewer whose activity cannot be observed must not remain silently billable.
-          void this.close().catch(closeError => this.logger.error('Browser cleanup failed', { error: closeError }));
-        },
+        // Unobserved input only looks idle, so the idle close still ends billing; a page-change
+        // race must never close a working browser.
+        error => this.logger.warn('Browser activity observation missed a document', { error }),
       );
       await this.activityObserver.start();
     }

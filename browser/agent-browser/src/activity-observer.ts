@@ -125,15 +125,16 @@ export class BrowserActivityObserver {
       if (result.exceptionDetails) throw new Error('Browser activity observation could not be installed');
       await Promise.all((tree.childFrames ?? []).map(install));
     };
-    const refresh = async () => {
-      const { frameTree } = await session.send('Page.getFrameTree');
-      await install(frameTree);
-    };
-    session.on('DOM.documentUpdated', () => {
-      void refresh().catch(error => {
-        if (!this.stopped && !page.isClosed() && current()) this.onError(error);
-      });
-    });
+    // A navigation during an install destroys the target context; the next document gets the
+    // new-document script, so a failed install is reported and never fatal.
+    const refresh = () =>
+      session
+        .send('Page.getFrameTree')
+        .then(({ frameTree }) => install(frameTree))
+        .catch(error => {
+          if (!this.stopped && !page.isClosed() && current()) this.onError(error);
+        });
+    session.on('DOM.documentUpdated', () => void refresh());
     await session.send('DOM.enable');
     await refresh();
   }
