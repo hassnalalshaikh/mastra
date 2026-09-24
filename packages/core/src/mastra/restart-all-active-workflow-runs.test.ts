@@ -275,7 +275,7 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
     // Created before this process, but its snapshot changed a minute ago: the
     // old container is still driving it (default stale threshold: 20 minutes).
     await persistOrphanedRun(mastra, optedIn.workflow, 'live-elsewhere', MINUTE);
-    const sweep = vi.spyOn(mastra, 'restartAllActiveWorkflowRuns');
+    const sweep = vi.spyOn(mastra, 'listActiveWorkflowRuns');
 
     await mastra.startWorkers();
     await vi.waitFor(() => expect(sweep.mock.calls.length).toBeGreaterThanOrEqual(3));
@@ -286,7 +286,7 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
 
   it('never touches a run created after this process started its workers (a schedule fire at boot)', async () => {
     const { mastra, optedIn } = autoRecovery({ workflowRunStaleAfterMs: 0, workflowRunSweepIntervalMs: 20 });
-    const sweep = vi.spyOn(mastra, 'restartAllActiveWorkflowRuns');
+    const sweep = vi.spyOn(mastra, 'listActiveWorkflowRuns');
 
     await mastra.startWorkers();
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -317,6 +317,54 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
       { timeout: 5_000 },
     );
     expect(optedIn.second).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not wait for a restarted run: a hung run never blocks other restarts or later sweeps', async () => {
+    const { mastra, optedIn } = autoRecovery({ workflowRunSweepIntervalMs: 20 });
+    await persistOrphanedRun(mastra, optedIn.workflow, 'hangs', 30 * MINUTE);
+    await persistOrphanedRun(mastra, optedIn.workflow, 'finishes', 30 * MINUTE);
+    const restarted: string[] = [];
+    vi.spyOn(optedIn.workflow, 'createRun').mockImplementation(async ({ runId }: any) => {
+      return {
+        restart: () => {
+          restarted.push(runId);
+          return runId === 'hangs' ? new Promise(() => {}) : Promise.resolve();
+        },
+      } as any;
+    });
+    const list = vi.spyOn(mastra, 'listActiveWorkflowRuns');
+
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await mastra.startWorkers();
+    await vi.waitFor(() => expect(list.mock.calls.length).toBeGreaterThanOrEqual(3));
+
+    expect([...new Set(restarted)].sort()).toEqual(['finishes', 'hangs']);
+    // The hung run is never restarted twice by this process.
+    expect(restarted.filter(runId => runId === 'hangs')).toHaveLength(1);
+  });
+
+  it('marks a run failed with the reason after 3 failed restart attempts instead of retrying forever', async () => {
+    const { mastra, optedIn } = autoRecovery({ workflowRunSweepIntervalMs: 20 });
+    await persistOrphanedRun(mastra, optedIn.workflow, 'cannot-restart', 30 * MINUTE);
+    const restart = vi.fn(() => Promise.reject(new Error('position not recorded')));
+    vi.spyOn(optedIn.workflow, 'createRun').mockResolvedValue({ restart } as any);
+
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await mastra.startWorkers();
+    await vi.waitFor(async () => {
+      expect(await loadStatus(mastra, 'evented-opted-in', 'cannot-restart')).toBe('failed');
+    });
+
+    expect(restart).toHaveBeenCalledTimes(3);
+    const workflowsStore = await mastra.getStorage()!.getStore('workflows');
+    const snapshot = await workflowsStore!.loadWorkflowSnapshot({
+      workflowName: 'evented-opted-in',
+      runId: 'cannot-restart',
+    });
+    expect((snapshot?.error as any)?.message).toContain('Automatic restart failed 3 times');
+    expect((snapshot?.error as any)?.message).toContain('position not recorded');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(restart).toHaveBeenCalledTimes(3);
   });
 
   it('skips a run whose recovery lease another process holds', async () => {
