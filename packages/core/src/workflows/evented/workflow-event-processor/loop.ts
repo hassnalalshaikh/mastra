@@ -9,7 +9,7 @@ import type { StepExecutor } from '../step-executor';
 import { createPendingMarker } from '../types';
 import type { ProcessorArgs } from '.';
 
-const FOREACH_QUEUED = '__mastra_foreach_queued__';
+export const FOREACH_QUEUED = '__mastra_foreach_queued__';
 
 function isQueuedForeachIteration(value: unknown): value is { [FOREACH_QUEUED]: true } {
   return Boolean(value && typeof value === 'object' && FOREACH_QUEUED in value);

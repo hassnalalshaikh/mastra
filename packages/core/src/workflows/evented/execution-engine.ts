@@ -14,6 +14,7 @@ import type {
 } from '../types';
 import { cleanStepResult, hydrateSerializedStepErrors } from '../utils';
 import type { WorkflowEventProcessor } from './workflow-event-processor';
+import { resolveEventedRestartPosition } from './workflow-event-processor/restart-position';
 import { getStepId } from './workflow-event-processor/utils';
 
 export class EventedExecutionEngine extends ExecutionEngine {
@@ -182,22 +183,24 @@ export class EventedExecutionEngine extends ExecutionEngine {
           },
         });
       } else if (params.restart) {
-        const prevStepId = getStepId(this.resolveWorkflow(params.workflowId, params.runId), params.restart.activePaths);
-        const prevResult = params.restart.stepResults[prevStepId ?? 'input'];
+        const workflow = this.resolveWorkflow(params.workflowId, params.runId);
+        const restart = resolveEventedRestartPosition({ stepGraph: workflow.stepGraph, restart: params.restart });
+        const prevStepId = getStepId(workflow, restart.activePaths);
+        const prevResult = restart.stepResults[prevStepId ?? 'input'];
         await pubsub.publish('workflows', {
           type: 'workflow.start',
           runId: params.runId,
           data: {
             workflowId: params.workflowId,
             runId: params.runId,
-            executionPath: params.restart.activePaths,
-            stepResults: params.restart.stepResults,
-            restart: params.restart,
+            executionPath: restart.activePaths,
+            stepResults: restart.stepResults,
+            restart,
             prevResult: { status: 'success', output: prevResult?.payload },
             requestContext: params.requestContext.toJSON(),
             format: params.format,
             perStep: params.perStep,
-            state: params.restart.state,
+            state: restart.state,
           },
         });
       } else {

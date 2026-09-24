@@ -33,6 +33,7 @@ import { resolveCurrentState } from '../helpers';
 import { StepExecutor } from '../step-executor';
 import { processWorkflowForEach, processWorkflowLoop } from './loop';
 import { processWorkflowConditional, processWorkflowParallel } from './parallel';
+import { resolveEventedRestartPosition } from './restart-position';
 import { processWorkflowSleep, processWorkflowSleepUntil, processWorkflowWaitForEvent } from './sleep';
 import { getNestedWorkflow, getStepId, isExecutableStep } from './utils';
 
@@ -1569,7 +1570,14 @@ export class WorkflowEventProcessor extends EventProcessor {
             outputOptions,
           },
         });
-      } else if (restart && !!restart.activeStepsPath?.[leafId]) {
+      } else if (
+        restart &&
+        !!restart.activeStepsPath?.[leafId] &&
+        // A foreach iteration, or a nested run that never recorded its run id,
+        // starts a new nested run below.
+        step.type !== 'foreach' &&
+        !!stepResults[leafId]?.metadata?.nestedRunId
+      ) {
         const nestedRunId = stepResults[leafId]?.metadata?.nestedRunId ?? randomUUID();
         const snapshot =
           (await workflowsStore?.loadWorkflowSnapshot({
@@ -1577,9 +1585,12 @@ export class WorkflowEventProcessor extends EventProcessor {
             runId: nestedRunId,
           })) ?? ({ context: {} } as WorkflowRunState);
 
-        const restartParams = createRestartExecutionParams({ snapshot, graph: nestedWorkflow.buildExecutionGraph() });
+        const restartParams = resolveEventedRestartPosition({
+          stepGraph: nestedWorkflow.stepGraph,
+          restart: createRestartExecutionParams({ snapshot, graph: nestedWorkflow.buildExecutionGraph() }),
+        });
 
-        const nestedPrevStepId = getStepId(nestedWorkflow, snapshot.activePaths);
+        const nestedPrevStepId = getStepId(nestedWorkflow, restartParams.activePaths);
         const nestedPrevResult = restartParams.stepResults[nestedPrevStepId ?? 'input'];
 
         await this.mastra.pubsub.publish('workflows', {
