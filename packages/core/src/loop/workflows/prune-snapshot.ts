@@ -425,6 +425,12 @@ function getActiveStepIds(snapshot: WorkflowRunState): Set<string> {
   return activeStepIds;
 }
 
+// A restart from a tool-call checkpoint re-enters `collect-tool-results`, which
+// reads the iteration's LLM result through getStepResult(). Its conversation
+// state must survive in running snapshots until the iteration ends; each
+// iteration is a fresh nested run, so this is always the current LLM result.
+const RESTART_READ_OUTPUT_STEPS = new Set(['durable-llm-execution']);
+
 function pruneRunningHistory(context: WorkflowRunState['context'], activeStepIds: ReadonlySet<string>): void {
   for (const [key, value] of Object.entries(context ?? {})) {
     if (key === 'input' || activeStepIds.has(key) || !isPlainObject(value)) continue;
@@ -432,7 +438,9 @@ function pruneRunningHistory(context: WorkflowRunState['context'], activeStepIds
 
     const pruned: Record<string, any> = { ...value };
     pruned.payload = stripRunningHistoryFields(pruned.payload);
-    if ('output' in pruned) pruned.output = stripRunningHistoryFields(pruned.output);
+    if ('output' in pruned && !RESTART_READ_OUTPUT_STEPS.has(key)) {
+      pruned.output = stripRunningHistoryFields(pruned.output);
+    }
     if ('prevOutput' in pruned) pruned.prevOutput = stripRunningHistoryFields(pruned.prevOutput);
     if (DURABLE_METADATA_STEPS.has(key)) {
       for (const side of ['payload', 'output', 'prevOutput']) {

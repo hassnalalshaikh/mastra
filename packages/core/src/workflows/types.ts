@@ -517,6 +517,20 @@ export interface WorkflowOptions {
    */
   reuseCompletedStepCheckpoint?: boolean;
   /**
+   * Sequential steps whose `running` checkpoints may be skipped because restart
+   * re-derives them exactly from the last persisted checkpoint. Called with the
+   * step's id, the persist phase and its current result. Return true only when
+   * re-running the step after a crash repeats no external side effect beyond
+   * idempotent writes. Requires `reuseCompletedStepCheckpoint`. Suspended,
+   * paused and terminal snapshots are never skipped.
+   */
+  replayableRunningStep?: (params: {
+    stepId: string;
+    phase: 'start' | 'entry-end';
+    stepResult: StepResult<any, any, any, any> | undefined;
+    stepResults: Record<string, StepResult<any, any, any, any>>;
+  }) => boolean;
+  /**
    * When true, nested runs created by execute() share the parent's pubsub
    * instance instead of creating an isolated one. Used by durable agent
    * workflows so inner step events reach the outer subscriber.

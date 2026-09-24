@@ -1725,6 +1725,7 @@ export class Workflow<
       validateInputs: options.validateInputs ?? true,
       emitStepEvents: options.emitStepEvents ?? true,
       reuseCompletedStepCheckpoint: options.reuseCompletedStepCheckpoint ?? false,
+      replayableRunningStep: options.replayableRunningStep,
       shouldPersistSnapshot: options.shouldPersistSnapshot ?? (() => true),
       allowUnclaimedResumes: options.allowUnclaimedResumes,
       pruneSnapshot: options.pruneSnapshot,
@@ -2855,6 +2856,21 @@ export class Workflow<
       (requestContext as RequestContext).set('__mastraWorflowInputData', inputData);
     }
 
+    // A parent can record this nested step as active before the nested run
+    // saves its first checkpoint (a crash in that window). Such a run never
+    // started: begin it from its input instead of failing the restart.
+    let restartNested = !!restart;
+    if (restartNested && !isTimeTravel && !isResume) {
+      const nestedSnapshot = await (
+        await this.#mastra?.getStorage()?.getStore('workflows')
+      )?.loadWorkflowSnapshot({ workflowName: this.id, runId: run.runId });
+      const neverStarted =
+        !nestedSnapshot ||
+        (nestedSnapshot.status === 'pending' &&
+          !Object.prototype.hasOwnProperty.call(nestedSnapshot.context ?? {}, 'input'));
+      if (neverStarted) restartNested = false;
+    }
+
     let res: WorkflowResult<TState, TInput, TOutput, TSteps>;
 
     try {
@@ -2873,7 +2889,7 @@ export class Workflow<
           outputOptions: { includeState: true, includeResumeLabels: true },
           perStep,
         });
-      } else if (restart) {
+      } else if (restartNested) {
         res = await run.restart({ requestContext, actor, ...observabilityContext, outputWriter });
       } else if (isResume) {
         res = await run.resume({

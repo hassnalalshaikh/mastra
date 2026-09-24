@@ -15,6 +15,7 @@ import type {
   WorkflowFinishCallbackResult,
   WorkflowErrorCallbackInfo,
   WorkflowStartCallbackInfo,
+  WorkflowOptions,
 } from './types';
 import type { RestartExecutionParams, StepFlowEntry, TimeTravelExecutionParams } from '.';
 
@@ -32,6 +33,8 @@ export interface ExecutionEngineOptions {
   validateInputs: boolean;
   emitStepEvents?: boolean;
   reuseCompletedStepCheckpoint?: boolean;
+  /** See `WorkflowOptions.replayableRunningStep`. */
+  replayableRunningStep?: WorkflowOptions['replayableRunningStep'];
   shouldPersistSnapshot: (params: {
     stepResults: Record<string, StepResult<any, any, any, any>>;
     workflowStatus: WorkflowRunStatus;

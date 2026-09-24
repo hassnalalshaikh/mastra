@@ -7,6 +7,7 @@ import type { AIModelGenerationSpan, ExportedSpan, SpanType } from '../../../obs
 import { RequestContext } from '../../../request-context';
 import { PUBSUB_SYMBOL } from '../../../workflows/constants';
 import { createWorkflow } from '../../../workflows/create';
+import type { WorkflowOptions } from '../../../workflows/types';
 import { DurableStepIds, DurableAgentDefaults } from '../constants';
 import { globalRunRegistry } from '../run-registry';
 import { emitChunkEvent, emitFinishEvent, emitIterationCompleteEvent } from '../stream-adapter';
@@ -127,6 +128,42 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
   // sees whether isTaskComplete already stopped the loop.
   const goalStep = createDurableGoalStep();
 
+  // Running checkpoints only at side-effect boundaries. After a crash, restart
+  // re-enters from the last persisted checkpoint (LLM result, each finished
+  // tool call, iteration start) and re-derives these steps from it: pure
+  // mappings, the idempotent memory flush of llm-mapping (messages upsert by
+  // id), in-process signal/background routing, and goal / isTaskComplete when
+  // they passed their input through untouched (no judge, scorer or objective
+  // write happened). Saving each of them rewrote the whole loop state about
+  // ten times per tool call.
+  const alwaysReplayable = new Set<string>([
+    'map-to-llm-input',
+    'extract-tool-calls',
+    'collect-tool-results',
+    llmMappingStep.id,
+    backgroundTaskCheckStep.id,
+    signalDrainStep.id,
+    'update-iteration-state',
+    'init-iteration-state',
+  ]);
+  const replayableWhenPassThrough = new Set<string>([isTaskCompleteStep.id, goalStep.id]);
+  const replayableRunningStep: NonNullable<WorkflowOptions['replayableRunningStep']> = ({
+    stepId,
+    phase,
+    stepResult,
+  }) => {
+    if (alwaysReplayable.has(stepId)) return true;
+    // A tool-call loop over no tool calls did nothing; restart re-derives it.
+    if (stepId === toolCallStep.id) {
+      const output = (stepResult as { output?: unknown } | undefined)?.output;
+      return phase === 'entry-end' && stepResult?.status === 'success' && Array.isArray(output) && output.length === 0;
+    }
+    if (!replayableWhenPassThrough.has(stepId)) return false;
+    if (phase === 'start') return true;
+    // A no-op evaluation returns its input object unchanged.
+    return stepResult?.status === 'success' && stepResult.output === stepResult.payload;
+  };
+
   // Create the single iteration workflow (LLM -> Tool Calls -> Mapping)
   // Note: tool-call foreach concurrency is resolved per run at execution time
   // (see resolveDurableToolCallConcurrency) — approval/suspend flows force
@@ -163,6 +200,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
       validateInputs: false,
       emitStepEvents: false,
       reuseCompletedStepCheckpoint: true,
+      replayableRunningStep,
       sharePubsub: true,
       // Internal durable-agent execution plumbing — hide workflow spans;
       // the agent/tool/model spans within still surface for users.
@@ -307,6 +345,7 @@ export function createDurableAgenticWorkflow(options?: DurableAgenticWorkflowOpt
         validateInputs: false,
         emitStepEvents: false,
         reuseCompletedStepCheckpoint: true,
+        replayableRunningStep,
         // Internal durable-agent execution plumbing — see singleIterationWorkflow.
         tracingPolicy: {
           internal: InternalSpans.WORKFLOW,

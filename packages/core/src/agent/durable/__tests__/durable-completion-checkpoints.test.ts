@@ -20,11 +20,12 @@ describe('durable completion checkpoint round trips', () => {
     let completionFinishedAt = 0;
     let completionStarted = false;
     let completionFinished = false;
-    const writes: Array<{ at: number; steps: Array<[string, string]> }> = [];
+    const writes: Array<{ at: number; last?: string; steps: Array<[string, string]> }> = [];
     vi.spyOn(workflows, 'persistWorkflowSnapshot').mockImplementation(async args => {
       if (completionStarted && !completionFinished)
         writes.push({
           at: performance.now(),
+          last: args.snapshot.stepExecutionPath?.at(-1),
           steps: Object.entries(args.snapshot.context).map(([id, value]) => [id, value?.status]),
         });
       if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -82,22 +83,21 @@ describe('durable completion checkpoint round trips', () => {
           completionMs: completionFinishedAt - completionStartedAt,
         }) + '\n',
       );
-      // Empty extract/collect/tool/bg/signal routing boundaries may skip their
-      // own running writes; material results still land in a later checkpoint.
-      expect(writes.length).toBeLessThanOrEqual(9);
-      const completions = new Set(
-        writes.flatMap(w => w.steps.filter(([, status]) => status === 'success').map(([id]) => id)),
-      );
-      for (const id of [
-        'durable-llm-execution',
-        'extract-tool-calls',
-        'collect-tool-results',
+      // Only material checkpoints are written after the answer: replayable
+      // mapping/routing/evaluation steps are re-derived on restart from the
+      // saved LLM result, so they add no running writes of their own.
+      expect(writes.length).toBeLessThanOrEqual(3);
+      for (const replayable of [
         'durable-llm-mapping',
         'update-iteration-state',
         'durable-is-task-complete',
         'durable-goal',
       ])
-        expect(completions.has(id)).toBe(true);
+        expect(writes.map(w => w.last)).not.toContain(replayable);
+      const completions = new Set(
+        writes.flatMap(w => w.steps.filter(([, status]) => status === 'success').map(([id]) => id)),
+      );
+      expect(completions.has('durable-llm-execution')).toBe(true);
     } finally {
       await mastra.shutdown();
     }

@@ -78,7 +78,14 @@ function omitContextCallbacks(value: unknown): unknown {
 
 function getSequentialCheckpointStep(snapshot: WorkflowRunState, index = snapshot.activePaths[0]!): string | undefined {
   if (snapshot.activePaths.length !== 1) return undefined;
-  const entry = snapshot.serializedStepGraph?.[index];
+  return getSequentialCheckpointStepFromGraph(snapshot.serializedStepGraph, index);
+}
+
+function getSequentialCheckpointStepFromGraph(
+  serializedStepGraph: WorkflowRunState['serializedStepGraph'] | undefined,
+  index: number,
+): string | undefined {
+  const entry = serializedStepGraph?.[index];
   if (entry?.type === 'step' && entry.step.component !== 'WORKFLOW') return entry.step.id;
   if (entry?.type === 'mapping' || entry?.type === 'agent' || entry?.type === 'tool') return entry.id;
   return undefined;
@@ -284,6 +291,35 @@ export async function persistStepUpdate(
     if (workflowStatus === 'running') {
       const lastPersisted = engine.getLastPersistedStatus(runId);
       if (lastPersisted === 'suspended' || lastPersisted === 'paused') {
+        return;
+      }
+    }
+
+    // Replayable sequential steps: restart re-derives them exactly from the
+    // last persisted checkpoint, so their own running writes (start and end)
+    // are skipped. The previous checkpoint stays the recovery point.
+    if (
+      workflowStatus === 'running' &&
+      (phase === 'start' || phase === 'entry-end') &&
+      engine.options.replayableRunningStep &&
+      engine.options.reuseCompletedStepCheckpoint &&
+      engine.supportsCompletedStepCheckpointReuse() &&
+      executionContext.executionPath.length === 1
+    ) {
+      const replayEntry = serializedStepGraph?.[executionContext.executionPath[0]!];
+      const replayStepId =
+        replayEntry?.type === 'foreach' && replayEntry.step.type === 'step'
+          ? replayEntry.step.step.id
+          : getSequentialCheckpointStepFromGraph(serializedStepGraph, executionContext.executionPath[0]!);
+      if (
+        replayStepId &&
+        engine.options.replayableRunningStep({
+          stepId: replayStepId,
+          phase,
+          stepResult: stepResults[replayStepId],
+          stepResults,
+        })
+      ) {
         return;
       }
     }
