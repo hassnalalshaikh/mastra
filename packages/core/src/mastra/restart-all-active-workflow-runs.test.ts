@@ -80,12 +80,25 @@ function createTwoStepEventedWorkflow(id: string, options?: { autoRestartActiveR
   return { workflow, first, second };
 }
 
-/** Persist the snapshot a lost process leaves behind: step1 done, step2 still running. */
-async function persistOrphanedRun(mastra: Mastra, workflow: Workflow<any, any, any, any, any, any>, runId: string) {
+const MINUTE = 60_000;
+
+/**
+ * Persist the snapshot a lost process leaves behind: step1 done, step2 still
+ * running. `ageMs` is how long ago the run was created and last updated.
+ */
+async function persistOrphanedRun(
+  mastra: Mastra,
+  workflow: Workflow<any, any, any, any, any, any>,
+  runId: string,
+  ageMs = 0,
+) {
   const workflowsStore = await mastra.getStorage()!.getStore('workflows');
+  const at = new Date(Date.now() - ageMs);
   await workflowsStore!.persistWorkflowSnapshot({
     workflowName: workflow.id,
     runId,
+    createdAt: at,
+    updatedAt: at,
     snapshot: {
       runId,
       status: 'running',
@@ -227,30 +240,95 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
     expect(notOptedIn.second).not.toHaveBeenCalled();
   });
 
-  it("recovery.workflows: 'auto' restarts opted-in runs once workers start", async () => {
+  const autoRecovery = (recovery: Record<string, unknown> = {}) => {
     const optedIn = createTwoStepEventedWorkflow('evented-opted-in', { autoRestartActiveRuns: true });
     const notOptedIn = createTwoStepEventedWorkflow('evented-not-opted-in');
-
     mastra = new Mastra({
       logger: false,
       storage: new MockStore(),
       pubsub: new EventEmitterPubSub(),
       // The evented engine resolves workflows by registration key, so key = id.
       workflows: { 'evented-opted-in': optedIn.workflow, 'evented-not-opted-in': notOptedIn.workflow },
-      recovery: { workflows: 'auto' },
+      recovery: { workflows: 'auto', ...recovery },
     });
+    return { mastra, optedIn, notOptedIn };
+  };
 
-    await persistOrphanedRun(mastra, optedIn.workflow, 'opted-in-run');
-    await persistOrphanedRun(mastra, notOptedIn.workflow, 'not-opted-in-run');
+  it("recovery.workflows: 'auto' resumes a stale orphaned run once workers start and leaves others alone", async () => {
+    const { mastra, optedIn, notOptedIn } = autoRecovery();
+
+    await persistOrphanedRun(mastra, optedIn.workflow, 'opted-in-run', 30 * MINUTE);
+    await persistOrphanedRun(mastra, notOptedIn.workflow, 'not-opted-in-run', 30 * MINUTE);
 
     await mastra.startWorkers();
 
     await vi.waitFor(async () => {
-      expect(await loadStatus(mastra!, 'evented-opted-in', 'opted-in-run')).toBe('success');
+      expect(await loadStatus(mastra, 'evented-opted-in', 'opted-in-run')).toBe('success');
     });
     expect(optedIn.second).toHaveBeenCalledTimes(1);
     expect(await loadStatus(mastra, 'evented-not-opted-in', 'not-opted-in-run')).toBe('running');
     expect(notOptedIn.second).not.toHaveBeenCalled();
+  });
+
+  it('leaves a run another live process is still executing alone (recently updated)', async () => {
+    const { mastra, optedIn } = autoRecovery({ workflowRunSweepIntervalMs: 20 });
+    // Created before this process, but its snapshot changed a minute ago: the
+    // old container is still driving it (default stale threshold: 20 minutes).
+    await persistOrphanedRun(mastra, optedIn.workflow, 'live-elsewhere', MINUTE);
+    const sweep = vi.spyOn(mastra, 'restartAllActiveWorkflowRuns');
+
+    await mastra.startWorkers();
+    await vi.waitFor(() => expect(sweep.mock.calls.length).toBeGreaterThanOrEqual(3));
+
+    expect(await loadStatus(mastra, 'evented-opted-in', 'live-elsewhere')).toBe('running');
+    expect(optedIn.second).not.toHaveBeenCalled();
+  });
+
+  it('never touches a run created after this process started its workers (a schedule fire at boot)', async () => {
+    const { mastra, optedIn } = autoRecovery({ workflowRunStaleAfterMs: 0, workflowRunSweepIntervalMs: 20 });
+    const sweep = vi.spyOn(mastra, 'restartAllActiveWorkflowRuns');
+
+    await mastra.startWorkers();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    // This process's own run, created after boot, looks idle to a zero threshold.
+    await persistOrphanedRun(mastra, optedIn.workflow, 'fired-at-boot');
+    const callsBefore = sweep.mock.calls.length;
+    await vi.waitFor(() => expect(sweep.mock.calls.length).toBeGreaterThanOrEqual(callsBefore + 3));
+
+    expect(await loadStatus(mastra, 'evented-opted-in', 'fired-at-boot')).toBe('running');
+    expect(optedIn.second).not.toHaveBeenCalled();
+  });
+
+  it('resumes a run orphaned by a deploy on a later sweep, once it becomes stale', async () => {
+    const { mastra, optedIn } = autoRecovery({ workflowRunStaleAfterMs: 300, workflowRunSweepIntervalMs: 50 });
+    // The old container stopped just now: not stale at boot.
+    await persistOrphanedRun(mastra, optedIn.workflow, 'just-orphaned');
+
+    // Created strictly before this process starts its workers.
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await mastra.startWorkers();
+    expect(await loadStatus(mastra, 'evented-opted-in', 'just-orphaned')).toBe('running');
+    expect(optedIn.second).not.toHaveBeenCalled();
+
+    await vi.waitFor(
+      async () => {
+        expect(await loadStatus(mastra, 'evented-opted-in', 'just-orphaned')).toBe('success');
+      },
+      { timeout: 5_000 },
+    );
+    expect(optedIn.second).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a run whose recovery lease another process holds', async () => {
+    const { mastra, optedIn } = autoRecovery({ workflowRunSweepIntervalMs: 0 });
+    await persistOrphanedRun(mastra, optedIn.workflow, 'leased-elsewhere', 30 * MINUTE);
+    const leaseKey = `mastra:workflow-run-recovery:v1:${JSON.stringify(['evented-opted-in', 'leased-elsewhere'])}`;
+    expect((await (mastra.pubsub as any).acquireLease(leaseKey, 'other-process', 60_000)).acquired).toBe(true);
+
+    await mastra.restartAllActiveWorkflowRuns({ optedInOnly: true, staleAfterMs: 0 });
+
+    expect(await loadStatus(mastra, 'evented-opted-in', 'leased-elsewhere')).toBe('running');
+    expect(optedIn.second).not.toHaveBeenCalled();
   });
 
   it('does not restart anything when workers start without recovery.workflows', async () => {
@@ -414,7 +492,8 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
       storage,
       pubsub: new EventEmitterPubSub(),
       workflows: { sync: next.sync },
-      recovery: { workflows: 'auto' },
+      // The lost process stopped moments ago; a test-sized stale threshold.
+      recovery: { workflows: 'auto', workflowRunStaleAfterMs: 50, workflowRunSweepIntervalMs: 50 },
     });
     await mastra.startWorkers();
 

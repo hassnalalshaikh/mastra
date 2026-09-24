@@ -2,7 +2,6 @@ import type { StepFlowEntry } from '../..';
 import { getEntryId } from '../../step-entry';
 import type { RestartExecutionParams } from '../../types';
 import { isSingleStepEntry } from '../../utils';
-import { isPendingMarker } from '../types';
 import { FOREACH_QUEUED } from './loop';
 
 /**
@@ -89,16 +88,21 @@ export function resolveEventedRestartPosition({
       const result = results[id];
       const items = Array.isArray(result?.payload) ? result.payload : input;
       const output: unknown[] | undefined = Array.isArray(result?.output) ? result.output : undefined;
-      const inFlight = (value: unknown) =>
-        value === null ||
-        isPendingMarker(value) ||
-        Boolean(value && typeof value === 'object' && FOREACH_QUEUED in (value as object));
+      // Completion comes from each iteration's recorded status, never from its
+      // output value: an iteration that finished with no output is stored as
+      // `null`, the same value as an iteration still in flight.
+      const iterations: any[] = Array.isArray(result?.suspendPayload?.__workflow_meta?.foreachOutput)
+        ? result.suspendPayload.__workflow_meta.foreachOutput
+        : [];
+      const done = (index: number) => iterations[index]?.status === 'success';
+      const suspended = (index: number) =>
+        iterations[index]?.status === 'suspended' || (output?.[index] as any)?.status === 'suspended';
       if (
         finished(result) &&
         output &&
         Array.isArray(items) &&
         output.length >= items.length &&
-        !output.some(inFlight)
+        items.every((_item, itemIndex) => done(itemIndex))
       ) {
         input = output;
         continue;
@@ -107,7 +111,9 @@ export function resolveEventedRestartPosition({
         ? {
             ...result,
             payload: items,
-            output: output.map(value => (inFlight(value) ? { [FOREACH_QUEUED]: true } : value)),
+            output: output.map((value, itemIndex) =>
+              done(itemIndex) || suspended(itemIndex) ? value : { [FOREACH_QUEUED]: true },
+            ),
           }
         : running(result, items);
       return { ...restart, activePaths: [index], activeStepsPath: { [id]: [index] }, stepResults: results };

@@ -19,7 +19,8 @@ import type { IMastraEditor } from '../editor';
 import { MastraError, ErrorDomain, ErrorCategory } from '../error';
 import type { MastraScorer } from '../evals';
 import { EventEmitterPubSub } from '../events/event-emitter';
-import type { PubSub } from '../events/pubsub';
+import { isLeaseProvider, NoopLeaseProvider } from '../events/pubsub';
+import type { LeaseProvider, PubSub } from '../events/pubsub';
 import { isRunLocalTopic } from '../events/topics';
 import type { Event, EventCallback } from '../events/types';
 import type { Harness } from '../harness';
@@ -658,19 +659,45 @@ export interface MastraRecoveryConfig {
    */
   durableAgents?: 'auto' | 'off';
   /**
-   * Restart the active runs of workflows that set
-   * `options.autoRestartActiveRuns: true` once this instance starts its
-   * workers (`startWorkers()` without a worker name). This covers evented and
-   * scheduled workflows, whose runs are otherwise orphaned by a process
-   * restart. Workflows that do not opt in are never touched.
+   * Restart orphaned runs of workflows that set
+   * `options.autoRestartActiveRuns: true` (including evented and scheduled
+   * workflows, whose runs a process restart otherwise leaves `running`
+   * forever). Once this instance starts its workers (`startWorkers()` without
+   * a worker name) it sweeps, and then sweeps again every
+   * `workflowRunSweepIntervalMs`. Workflows that do not opt in are never
+   * touched.
+   *
+   * A run is restarted only when it was created before this instance started
+   * its workers and its snapshot has not changed for `workflowRunStaleAfterMs`,
+   * so a run another live process is still executing is left alone. Set the
+   * threshold above the longest step plus the longest time an old process may
+   * keep running during a deploy. Each restart also takes a lease from the
+   * pubsub when it provides one.
    *
    * Opt-in only: a restarted run re-executes its interrupted step, so those
-   * steps must be safe to run again. There is no lease yet, so enable it on
-   * one instance per storage.
+   * steps must be safe to run again.
    * @default 'off'
    */
   workflows?: 'auto' | 'off';
+  /**
+   * Minimum time since a run's snapshot last changed before `workflows: 'auto'`
+   * restarts it.
+   * @default 1_200_000 (20 minutes)
+   */
+  workflowRunStaleAfterMs?: number;
+  /**
+   * How often `workflows: 'auto'` sweeps again after the first sweep. `0`
+   * sweeps only once.
+   * @default 300_000 (5 minutes)
+   */
+  workflowRunSweepIntervalMs?: number;
 }
+
+/** Defaults for `recovery.workflows: 'auto'`. */
+export const WORKFLOW_RUN_RECOVERY_DEFAULTS = Object.freeze({
+  staleAfterMs: 20 * 60_000,
+  sweepIntervalMs: 5 * 60_000,
+});
 
 /**
  * The central orchestrator for Mastra applications, managing agents, workflows, storage, logging, observability, and more.
@@ -753,7 +780,8 @@ export class Mastra<
   #storageExplicit = false;
   #storageFallbackWarningPending = false;
   #recoveryConfig: MastraRecoveryConfig = { durableAgents: 'off' };
-  #workflowRecoveryStarted = false;
+  #workflowRecoveryTimer?: ReturnType<typeof setInterval>;
+  #workflowRecoverySweep?: Promise<void>;
   // Runs this instance is restarting now, so overlapping sweeps (for example
   // `recovery.workflows` and a server entry that also calls the sweep) never
   // drive the same run twice.
@@ -1374,6 +1402,12 @@ export class Mastra<
     this.#recoveryConfig = {
       durableAgents: config?.recovery?.durableAgents ?? 'off',
       ...(config?.recovery?.workflows ? { workflows: config.recovery.workflows } : {}),
+      ...(config?.recovery?.workflowRunStaleAfterMs !== undefined
+        ? { workflowRunStaleAfterMs: config.recovery.workflowRunStaleAfterMs }
+        : {}),
+      ...(config?.recovery?.workflowRunSweepIntervalMs !== undefined
+        ? { workflowRunSweepIntervalMs: config.recovery.workflowRunSweepIntervalMs }
+        : {}),
     };
 
     this.#editor = config?.editor;
@@ -3851,15 +3885,37 @@ export class Mastra<
    * workflows that set `options.autoRestartActiveRuns: false`. With
    * `optedInOnly`, only workflows that set `options.autoRestartActiveRuns:
    * true` are restarted.
+   *
+   * `staleAfterMs` restarts only runs whose snapshot has not changed for that
+   * long (checked again right before each restart), and `createdBefore` only
+   * runs created before that time, so runs another live process is executing
+   * are left alone. A run already being restarted, here or by another process
+   * holding the pubsub lease, is skipped.
    */
-  public async restartAllActiveWorkflowRuns(options?: { optedInOnly?: boolean }): Promise<void> {
+  public async restartAllActiveWorkflowRuns(options?: {
+    optedInOnly?: boolean;
+    staleAfterMs?: number;
+    createdBefore?: Date;
+  }): Promise<void> {
     const activeRuns = await this.listActiveWorkflowRuns(options);
-    if (activeRuns.runs.length > 0) {
-      this.#logger.debug(
-        `Restarting ${activeRuns.runs.length} active workflow run${activeRuns.runs.length > 1 ? 's' : ''}`,
-      );
+    const isEligible = (run: { createdAt?: Date | string; updatedAt?: Date | string } | null | undefined) => {
+      if (!run) return false;
+      if (options?.createdBefore && !(new Date(run.createdAt ?? 0).getTime() < options.createdBefore.getTime())) {
+        return false;
+      }
+      if (
+        options?.staleAfterMs !== undefined &&
+        !(Date.now() - new Date(run.updatedAt ?? Date.now()).getTime() >= options.staleAfterMs)
+      ) {
+        return false;
+      }
+      return true;
+    };
+    const candidates = activeRuns.runs.filter(isEligible);
+    if (candidates.length > 0) {
+      this.#logger.debug(`Restarting ${candidates.length} active workflow run${candidates.length > 1 ? 's' : ''}`);
     }
-    for (const runSnapshot of activeRuns.runs) {
+    for (const runSnapshot of candidates) {
       const workflow = this.getWorkflowById(runSnapshot.workflowName);
       if (workflow?.options?.autoRestartActiveRuns === false) {
         this.#logger.debug('Skipping workflow run auto-restart; workflow opts out of generic recovery', {
@@ -3877,7 +3933,38 @@ export class Mastra<
         continue;
       }
       this.#restartingWorkflowRuns.add(restartKey);
+      const leaseKey = `mastra:workflow-run-recovery:v1:${JSON.stringify([runSnapshot.workflowName, runSnapshot.runId])}`;
+      const leaseOwner = randomUUID();
+      const leases = this.#resolveLeaseProvider();
+      let leased = false;
       try {
+        const lease = await leases.acquireLease(
+          leaseKey,
+          leaseOwner,
+          options?.staleAfterMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.staleAfterMs,
+        );
+        leased = lease.acquired;
+        if (!leased) {
+          this.#logger.debug('Skipping workflow run auto-restart; another process holds its recovery lease', {
+            workflow: runSnapshot.workflowName,
+            runId: runSnapshot.runId,
+          });
+          continue;
+        }
+        // The list may be minutes old by now: restart only if the run is still
+        // active and still untouched.
+        if (options?.staleAfterMs !== undefined || options?.createdBefore) {
+          const workflowsStore = await this.#storage?.getStore('workflows');
+          const current = await workflowsStore?.getWorkflowRunById({
+            runId: runSnapshot.runId,
+            workflowName: runSnapshot.workflowName,
+          });
+          const snapshot = current?.snapshot;
+          const currentStatus = snapshot && typeof snapshot === 'object' ? snapshot.status : undefined;
+          if (!isEligible(current) || (currentStatus !== 'running' && currentStatus !== 'waiting')) {
+            continue;
+          }
+        }
         const run = await workflow.createRun({ runId: runSnapshot.runId });
         await run.restart();
         this.#logger.debug('Restarted workflow run', { workflow: runSnapshot.workflowName, runId: runSnapshot.runId });
@@ -3889,8 +3976,37 @@ export class Mastra<
         });
       } finally {
         this.#restartingWorkflowRuns.delete(restartKey);
+        if (leased) {
+          await leases.releaseLease(leaseKey, leaseOwner).catch(() => {});
+        }
       }
     }
+  }
+
+  #resolveLeaseProvider(): LeaseProvider {
+    const pubsub = this.#pubsub;
+    const unwrap = (pubsub as { getLeaseProvider?: () => LeaseProvider | undefined }).getLeaseProvider;
+    if (typeof unwrap === 'function') return unwrap.call(pubsub) ?? NoopLeaseProvider;
+    return isLeaseProvider(pubsub) ? pubsub : NoopLeaseProvider;
+  }
+
+  /**
+   * One sweep of `recovery.workflows: 'auto'`. Skipped while the previous
+   * sweep is still restarting runs.
+   */
+  #sweepOrphanedWorkflowRuns(createdBefore: Date): void {
+    if (this.#workflowRecoverySweep || this.#shutdownStarted) return;
+    this.#workflowRecoverySweep = this.restartAllActiveWorkflowRuns({
+      optedInOnly: true,
+      staleAfterMs: this.#recoveryConfig.workflowRunStaleAfterMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.staleAfterMs,
+      createdBefore,
+    })
+      .catch(error => {
+        this.#logger?.error('Failed to restart orphaned workflow runs', { error });
+      })
+      .finally(() => {
+        this.#workflowRecoverySweep = undefined;
+      });
   }
 
   /**
@@ -6209,6 +6325,8 @@ export class Mastra<
    * user-defined event listeners.
    */
   public async startWorkers(name?: string): Promise<void> {
+    // Runs created from here on belong to this process (see `recovery.workflows`).
+    const workersStartedAt = new Date();
     // Initialize storage before any read so adapters that open/create their
     // stores in init() are ready. The scheduler warm-up tick also persists a
     // workflow snapshot on start(), which can race a lazy init() that creates
@@ -6320,22 +6438,29 @@ export class Mastra<
     // to lazily inject + start additional workers themselves.
     this.#workersStarted = true;
 
-    // Opt-in boot recovery for workflow runs orphaned by a process restart.
-    // It runs once, after the workflow event workers above are subscribed, so
-    // evented restarts are processed by this instance. Restarted runs can last
-    // a long time, so do not hold startup until they finish.
+    // Opt-in recovery for workflow runs orphaned by a lost process. It starts
+    // after the workflow event workers above are subscribed, so evented
+    // restarts are processed by this instance, and sweeps again on an interval
+    // because a run orphaned by a deploy only becomes stale after it. Only runs
+    // created before this point are eligible: runs this process starts from
+    // now on (including schedule fires caught up at boot) are never touched.
+    // Restarted runs can last a long time, so startup does not wait for them.
     if (
       !name &&
       this.#recoveryConfig.workflows === 'auto' &&
-      !this.#workflowRecoveryStarted &&
+      !this.#workflowRecoveryTimer &&
       !this.#workersDisabled &&
       !this.#shutdownStarted &&
       (!this.#workerFilter || this.#workerFilter.has('orchestration'))
     ) {
-      this.#workflowRecoveryStarted = true;
-      void this.restartAllActiveWorkflowRuns({ optedInOnly: true }).catch(error => {
-        this.#logger?.error('Failed to restart active workflow runs during startup', { error });
-      });
+      const createdBefore = workersStartedAt;
+      this.#sweepOrphanedWorkflowRuns(createdBefore);
+      const intervalMs =
+        this.#recoveryConfig.workflowRunSweepIntervalMs ?? WORKFLOW_RUN_RECOVERY_DEFAULTS.sweepIntervalMs;
+      if (intervalMs > 0) {
+        this.#workflowRecoveryTimer = setInterval(() => this.#sweepOrphanedWorkflowRuns(createdBefore), intervalMs);
+        this.#workflowRecoveryTimer.unref?.();
+      }
     }
   }
 
@@ -6484,6 +6609,10 @@ export class Mastra<
    * Stop all running workers and unsubscribe event listeners.
    */
   public async stopWorkers(): Promise<void> {
+    if (this.#workflowRecoveryTimer) {
+      clearInterval(this.#workflowRecoveryTimer);
+      this.#workflowRecoveryTimer = undefined;
+    }
     // A background-task dispatch may have kicked off a lazy execution-worker
     // start (`__ensureExecutionWorkersStarted`) that is still in flight. Wait
     // for it so the teardown below covers what it started — otherwise the
