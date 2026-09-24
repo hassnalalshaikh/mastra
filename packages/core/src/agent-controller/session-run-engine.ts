@@ -237,6 +237,12 @@ type StreamState = {
   /** Response ids offered by `step-start` — an id binds to at most one display message. */
   offeredResponseIds: Set<string>;
   /**
+   * Delegated subagent calls (`agent-<key>` tools from `Agent.agents`) whose
+   * streamed progress is shown in `activeSubagents`, keyed by the parent tool
+   * call id, with their start time.
+   */
+  delegatedSubagentStarts: Map<string, number>;
+  /**
    * Set when a stream ends on a non-success finish reason (e.g. `content-filter`,
    * `error`, `length`). Carries the user-facing message so the run finalizes
    * into an explicit terminal error state instead of silently completing.
@@ -339,6 +345,7 @@ export class SessionRunEngine {
       thinkingContentById: new Map<string, { index: number; text: string }>(),
       toolPartById: new Map<string, number>(),
       offeredResponseIds: new Set<string>(),
+      delegatedSubagentStarts: new Map<string, number>(),
     };
   }
 
@@ -524,6 +531,98 @@ export class SessionRunEngine {
   }
 
   /**
+   * A subagent delegated through `Agent.agents` streams its own chunks back as
+   * `tool-output` chunks from `AGENT` on the parent's delegation tool call.
+   * Fold them into the same `subagent_*` events the built-in `subagent` tool
+   * emits, so `activeSubagents` shows live progress for both delegation paths.
+   */
+  private applyDelegatedSubagentOutput(
+    state: StreamState,
+    payload: Record<string, unknown>,
+    isCurrent: () => boolean,
+  ): void {
+    if (!isCurrent()) return;
+    const nested = getRecord(payload.output);
+    if (getString(nested?.from) !== 'AGENT') return;
+    const toolCallId = getString(payload.toolCallId);
+    const toolName = getString(payload.toolName);
+    if (!toolCallId || !toolName?.startsWith('agent-')) return;
+    const agentType = toolName.slice('agent-'.length);
+    if (!state.delegatedSubagentStarts.has(toolCallId)) {
+      state.delegatedSubagentStarts.set(toolCallId, Date.now());
+      const args = getRecord(this.#session.displayState.get().activeTools.get(toolCallId)?.args);
+      this.#session.emit({
+        type: 'subagent_start',
+        toolCallId,
+        agentType,
+        task: getString(args?.prompt) ?? '',
+        modelId: '',
+        forked: false,
+      });
+    }
+    const inner = getRecord(nested?.payload) ?? {};
+    switch (getString(nested?.type)) {
+      case 'text-delta': {
+        const textDelta = getString(inner.text);
+        if (textDelta) this.#session.emit({ type: 'subagent_text_delta', toolCallId, agentType, textDelta });
+        break;
+      }
+      case 'tool-call': {
+        const subToolName = getString(inner.toolName);
+        if (subToolName) {
+          this.#session.emit({
+            type: 'subagent_tool_start',
+            toolCallId,
+            agentType,
+            subToolName,
+            subToolArgs: inner.args,
+          });
+        }
+        break;
+      }
+      case 'tool-result':
+      case 'tool-error': {
+        const subToolName = getString(inner.toolName);
+        if (subToolName) {
+          this.#session.emit({
+            type: 'subagent_tool_end',
+            toolCallId,
+            agentType,
+            subToolName,
+            subToolResult: inner.result ?? inner.error,
+            isError: getString(nested?.type) === 'tool-error' || getBoolean(inner.isError, false),
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  /** Close a delegated subagent's live progress when its parent tool call settles. */
+  private endDelegatedSubagent(
+    state: StreamState,
+    payload: Record<string, unknown>,
+    isError: boolean,
+    isCurrent: () => boolean,
+  ): void {
+    if (!isCurrent()) return;
+    const toolCallId = getString(payload.toolCallId);
+    const startedAt = toolCallId ? state.delegatedSubagentStarts.get(toolCallId) : undefined;
+    if (!toolCallId || startedAt === undefined) return;
+    state.delegatedSubagentStarts.delete(toolCallId);
+    const toolName = getString(payload.toolName) ?? '';
+    const result = getRecord(payload.result);
+    this.#session.emit({
+      type: 'subagent_end',
+      toolCallId,
+      agentType: toolName.startsWith('agent-') ? toolName.slice('agent-'.length) : toolName,
+      result: getString(result?.text) ?? (isError ? getErrorFromUnknown(payload.error).message : ''),
+      isError,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+
+  /**
    * Mutates and emits one live accumulated message throughout the assistant turn.
    * Consumers that require a point-in-time value must copy or serialize at their
    * ownership boundary. Do not restore producer-side per-delta snapshots: even
@@ -704,6 +803,7 @@ export class SessionRunEngine {
           },
           isCurrent,
         );
+        this.endDelegatedSubagent(state, toolResult, getBoolean(toolResult.isError, false), isCurrent);
         break;
       }
 
@@ -723,6 +823,12 @@ export class SessionRunEngine {
           },
           isCurrent,
         );
+        this.endDelegatedSubagent(state, toolError, true, isCurrent);
+        break;
+      }
+
+      case 'tool-output': {
+        this.applyDelegatedSubagentOutput(state, getPayload(chunk), isCurrent);
         break;
       }
 
