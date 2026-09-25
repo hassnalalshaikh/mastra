@@ -44,6 +44,19 @@ describe('native shared browser viewer', () => {
     expect(stream.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the format of each picture: a sharp capture in its own format, live pictures in the screencast format', async () => {
+    const { stream, viewer } = fixture();
+    const listener = vi.fn();
+    await viewer.subscribe(listener);
+    stream.emit('frame', { data: 'live', viewport: { width: 640, height: 800 } });
+    stream.emit('frame', { data: 'sharp', format: 'webp', viewport: { width: 640, height: 800 } });
+    const frames = listener.mock.calls.map(([event]) => event).filter(event => event.type === 'frame');
+    expect(frames.map(frame => [frame.data, frame.format])).toEqual([
+      ['live', 'png'],
+      ['sharp', 'webp'],
+    ]);
+  });
+
   it('fails without launching when no browser is active', async () => {
     const { browser, viewer } = fixture();
     browser.startScreencastIfBrowserActive.mockResolvedValueOnce(null as never);

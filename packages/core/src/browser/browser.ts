@@ -41,7 +41,7 @@ import { BrowserViewer } from './viewer';
 import type { BrowserViewerCommand } from './viewer';
 
 // Re-export screencast types from the screencast module
-export type { ScreencastOptions, ScreencastFrameData, ScreencastEvents } from './screencast/types';
+export type { ScreencastOptions, ScreencastFrameData, ScreencastEvents, SharpCaptureOptions } from './screencast/types';
 
 // Alias for internal use
 type ScreencastOptions = ScreencastOptionsType;
@@ -409,7 +409,15 @@ export interface ScreencastStream {
   /** Reconnect the screencast (e.g., after tab change) */
   reconnect(): Promise<void>;
   /** Register event handlers */
-  on(event: 'frame', handler: (frame: { data: string; viewport: { width: number; height: number } }) => void): this;
+  on(
+    event: 'frame',
+    handler: (frame: {
+      data: string;
+      /** Set when this picture's format differs from the screencast format (a sharp capture). */
+      format?: 'jpeg' | 'png' | 'webp';
+      viewport: { width: number; height: number };
+    }) => void,
+  ): this;
   on(event: 'stop', handler: (reason: string) => void): this;
   on(event: 'error', handler: (error: Error) => void): this;
   on(event: 'url', handler: (url: string) => void): this;

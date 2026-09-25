@@ -15,6 +15,12 @@ const INTERACTIVE_MS = 500;
 /** Quiet time after the last live picture before one device-density capture replaces it. */
 const SHARP_SETTLE_MS = 150;
 
+/**
+ * Quiet time after the last user input before that capture. Typing leaves gaps between keys longer
+ * than SHARP_SETTLE_MS; a capture in such a gap sends a full-size picture between two keys.
+ */
+const SHARP_INPUT_QUIET_MS = 400;
+
 /** Live pictures remembered as views of the current page. */
 const SEEN_PICTURES = 4;
 
@@ -62,7 +68,7 @@ export class ScreencastStream extends EventEmitter {
   private stopping = false;
 
   /** Resolved options with defaults applied (excludes threadId which is only used for page selection) */
-  private options: Required<Omit<ScreencastOptions, 'threadId'>>;
+  private options: Required<Omit<ScreencastOptions, 'threadId' | 'sharp'>> & Pick<ScreencastOptions, 'sharp'>;
 
   /** CDP session provider */
   private provider: CdpSessionProvider;
@@ -75,6 +81,9 @@ export class ScreencastStream extends EventEmitter {
 
   /** Live pictures are forwarded directly until this time; device-density captures otherwise. */
   private interactiveUntil = 0;
+
+  /** When the viewer user last sent input. */
+  private lastInputAt = 0;
 
   /** Cancels the pending sharp capture of the current CDP session. */
   private clearSettle: () => void = () => {};
@@ -134,12 +143,13 @@ export class ScreencastStream extends EventEmitter {
         clearTimeout(cooldown);
       };
 
-      const emitFrame = (data: string, params: CdpScreencastFrame) => {
+      const emitFrame = (data: string, params: CdpScreencastFrame, format?: ScreencastFrameData['format']) => {
         emitted += 1;
         lastSharp = undefined;
         seen = [params.data];
         this.emit('frame', {
           data,
+          ...(format && format !== this.options.format ? { format } : {}),
           timestamp: params.metadata?.timestamp ? params.metadata.timestamp * 1000 : Date.now(),
           viewport: {
             width: params.metadata?.deviceWidth ?? 0,
@@ -183,7 +193,11 @@ export class ScreencastStream extends EventEmitter {
             if (!seen.includes(params.data)) seen = [...seen.slice(-(SEEN_PICTURES - 1)), params.data];
             return;
           }
-          emitFrame(data ?? params.data, params);
+          emitFrame(
+            data ?? params.data,
+            params,
+            data === undefined ? undefined : (this.options.sharp?.format ?? this.options.format),
+          );
           if (data !== undefined) lastSharp = data;
         } catch (error) {
           if (live()) this.emit('error', error);
@@ -207,13 +221,20 @@ export class ScreencastStream extends EventEmitter {
           emitFrame(params.data, params);
           ack(params);
           clearTimeout(settle);
-          settle = setTimeout(() => {
+          const rest = () => {
             if (!live()) return;
+            // Still typing or scrolling: wait until the input stops too.
+            const wait = this.lastInputAt + SHARP_INPUT_QUIET_MS - Date.now();
+            if (wait > 0) {
+              settle = setTimeout(rest, wait);
+              return;
+            }
             // The page came to rest; new input opens the next live window.
             this.interactiveUntil = 0;
             if (capturing) sharpAgain = params;
             else void sharpen(params, false);
-          }, SHARP_SETTLE_MS);
+          };
+          settle = setTimeout(rest, SHARP_SETTLE_MS);
         } else if (capturing || cooling) {
           if (pending) ack(pending);
           pending = params;
@@ -301,7 +322,8 @@ export class ScreencastStream extends EventEmitter {
 
   /** Forward live pictures directly while the user drives the page; sharp pictures follow when it settles. */
   markInteractive(): void {
-    this.interactiveUntil = Date.now() + INTERACTIVE_MS;
+    this.lastInputAt = Date.now();
+    this.interactiveUntil = this.lastInputAt + INTERACTIVE_MS;
     this.releaseHeld();
   }
 

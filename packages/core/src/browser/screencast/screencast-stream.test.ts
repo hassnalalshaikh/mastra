@@ -64,7 +64,7 @@ describe('ScreencastStream', () => {
     expect(frames).toHaveBeenCalledTimes(1);
   });
   describe('live then sharp', () => {
-    function sharpFixture() {
+    function sharpFixture(options?: ConstructorParameters<typeof ScreencastStream>[1]) {
       let receive!: (frame: any) => void;
       const finish: Array<(value: string) => void> = [];
       const session = createMockCdpSession({
@@ -73,11 +73,14 @@ describe('ScreencastStream', () => {
         }),
         detach: vi.fn(async () => {}),
       });
-      const stream = new ScreencastStream({
-        getCdpSession: async () => session,
-        isBrowserRunning: () => true,
-        captureFrame: async () => new Promise(resolve => finish.push(resolve)),
-      });
+      const stream = new ScreencastStream(
+        {
+          getCdpSession: async () => session,
+          isBrowserRunning: () => true,
+          captureFrame: async () => new Promise(resolve => finish.push(resolve)),
+        },
+        options,
+      );
       const frames = vi.fn();
       stream.on('frame', frames);
       const frame = (data: string, sessionId: number) =>
@@ -191,7 +194,7 @@ describe('ScreencastStream', () => {
       await stream.start();
       stream.markInteractive();
       frame('scroll', 1);
-      await vi.advanceTimersByTimeAsync(150);
+      await vi.advanceTimersByTimeAsync(400);
       finish[0]('sharp');
       await vi.advanceTimersByTimeAsync(0);
       frame('scroll-echo', 2);
@@ -213,13 +216,55 @@ describe('ScreencastStream', () => {
       frame('scroll-2', 2);
       expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll-1', 'scroll-2']);
       expect(finish).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(149);
+      // The pictures stop at 150 ms, but the input was 400 ms ago only at 400 ms.
+      await vi.advanceTimersByTimeAsync(399);
       expect(finish).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(1);
       expect(finish).toHaveLength(1);
       finish[0]('sharp');
       await vi.advanceTimersByTimeAsync(0);
       expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll-1', 'scroll-2', 'sharp']);
+      await stream.stop();
+    });
+
+    it('sends only live pictures while the user types, then one sharp picture when the typing stops', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture();
+      await stream.start();
+      for (let key = 1; key <= 8; key++) {
+        stream.markInteractive();
+        frame(`key-${key}`, key);
+        // A human gap between keys is longer than the 150 ms picture settle time.
+        await vi.advanceTimersByTimeAsync(250);
+      }
+      expect(finish).toHaveLength(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(Array.from({ length: 8 }, (_, i) => `key-${i + 1}`));
+      await vi.advanceTimersByTimeAsync(149);
+      expect(finish).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(finish).toHaveLength(1);
+      finish[0]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.at(-1)?.[0].data).toBe('sharp');
+      await stream.stop();
+    });
+
+    it('marks a sharp picture with its own format and leaves live pictures in the screencast format', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture({
+        format: 'jpeg',
+        sharp: { format: 'webp', quality: 80 },
+      });
+      await stream.start();
+      stream.markInteractive();
+      frame('live', 1);
+      await vi.advanceTimersByTimeAsync(400);
+      finish[0]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => [f.data, f.format])).toEqual([
+        ['live', undefined],
+        ['sharp', 'webp'],
+      ]);
       await stream.stop();
     });
 
@@ -234,7 +279,7 @@ describe('ScreencastStream', () => {
       finish[0]('stale');
       await vi.advanceTimersByTimeAsync(0);
       expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['after']);
-      await vi.advanceTimersByTimeAsync(150);
+      await vi.advanceTimersByTimeAsync(400);
       expect(finish).toHaveLength(2);
       finish[1]('sharp');
       await vi.advanceTimersByTimeAsync(0);

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium } from 'playwright-core';
 import type { Browser, BrowserContext } from 'playwright-core';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ViewerPreferences } from './viewer-preferences';
 
 describe('viewer preferences in Chromium', () => {
@@ -95,16 +95,105 @@ describe('viewer preferences in Chromium', () => {
     for (const maxSize of [4096, 844]) {
       const scrolled = (await settings.capture(page, { format: 'png', maxWidth: maxSize, maxHeight: maxSize }))!;
       const dimensions = Buffer.from(scrolled, 'base64');
-      expect([dimensions.readUInt32BE(16), dimensions.readUInt32BE(20)]).toEqual(maxSize === 4096 ? [780, 1688] : [390, 844]);
+      expect([dimensions.readUInt32BE(16), dimensions.readUInt32BE(20)]).toEqual(
+        maxSize === 4096 ? [780, 1688] : [390, 844],
+      );
       expect(await page.evaluate(() => [innerWidth, innerHeight, scrollY])).toEqual([390, 844, 500]);
       const pixel = await page.evaluate(async data => {
-        const image = new Image(); image.src = 'data:image/png;base64,' + data; await image.decode();
-        const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
-        const ctx = canvas.getContext('2d')!; ctx.drawImage(image, 0, 0);
+        const image = new Image();
+        image.src = 'data:image/png;base64,' + data;
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(image, 0, 0);
         return [...ctx.getImageData(image.width - 2, image.height - 2, 1, 1).data];
       }, scrolled);
       expect(pixel).toEqual([0, 255, 0, 255]);
     }
     await session.detach();
+  }, 20000);
+
+  it('captures the sharp picture in its own format and keeps it under the size limit', async () => {
+    // A context of its own: one preference owner per context, as in the product.
+    const own = await browser.newContext();
+    const page = await own.newPage();
+    const settings = new ViewerPreferences(own);
+    await settings.set({ width: 900, height: 700, deviceScaleFactor: 2, locale: 'en-US' });
+    await page.goto(baseUrl);
+    // Dense small text in many colours: a heavy picture, like a long article.
+    await page.evaluate(() => {
+      const words = Array.from(
+        { length: 4000 },
+        (_, i) => `<span style="color:hsl(${(i * 37) % 360} 70% 35%)">w${(i * 7919) % 10007}</span>`,
+      );
+      document.body.innerHTML = `<div style="font:11px monospace;word-break:break-all">${words.join(' ')}</div>`;
+    });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const bytes = (data: string) => Buffer.from(data, 'base64');
+    const kind = (data: string) => bytes(data).subarray(8, 12).toString();
+    const size = (data: string) => bytes(data).length;
+    const full = (await settings.capture(page, {
+      format: 'jpeg',
+      quality: 85,
+      maxWidth: 7680,
+      maxHeight: 4320,
+      sharp: { format: 'webp', quality: 90 },
+    }))!;
+    expect(kind(full)).toBe('WEBP');
+    const maxBytes = Math.round(size(full) * 0.4);
+    const sends: string[] = [];
+    const session = await (settings as any).pages.get(page).session;
+    const send = session.send.bind(session);
+    session.send = (method: string, params?: unknown) => {
+      if (method === 'Page.captureScreenshot') sends.push(method);
+      return send(method, params);
+    };
+    const options = {
+      format: 'jpeg' as const,
+      quality: 85,
+      maxWidth: 7680,
+      maxHeight: 4320,
+      sharp: { format: 'webp' as const, quality: 90, maxBytes },
+    };
+    const limited = (await settings.capture(page, options))!;
+    expect(kind(limited)).toBe('WEBP');
+    expect(size(limited)).toBeLessThanOrEqual(maxBytes);
+    const attempts = sends.length;
+    expect(attempts).toBeGreaterThan(1);
+    // The next picture of the same page starts from what fitted: one capture.
+    sends.length = 0;
+    const again = (await settings.capture(page, options))!;
+    expect(size(again)).toBeLessThanOrEqual(maxBytes);
+    expect(sends).toHaveLength(1);
+    // Without a sharp format, the screencast format is used as before.
+    const jpeg = (await settings.capture(page, { format: 'jpeg', quality: 85, maxWidth: 7680, maxHeight: 4320 }))!;
+    expect(bytes(jpeg).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));
+    await own.close();
+  }, 20000);
+
+  it('captures a normal-density screen only when a sharp format is configured', async () => {
+    const own = await browser.newContext();
+    const page = await own.newPage();
+    const settings = new ViewerPreferences(own);
+    await settings.set({ width: 800, height: 600, deviceScaleFactor: 1, locale: 'en-US' });
+    await page.goto(baseUrl);
+    const live = { format: 'jpeg' as const, quality: 60, maxWidth: 1440, maxHeight: 900 };
+    expect(await settings.capture(page, live)).toBeUndefined();
+    const sharp = (await settings.capture(page, {
+      ...live,
+      sharp: { format: 'webp', quality: 85, maxWidth: 7680, maxHeight: 4320 },
+    }))!;
+    const webp = Buffer.from(sharp, 'base64');
+    expect(webp.subarray(8, 12).toString()).toBe('WEBP');
+    const size = await page.evaluate(async data => {
+      const image = new Image();
+      image.src = 'data:image/webp;base64,' + data;
+      await image.decode();
+      return [image.naturalWidth, image.naturalHeight];
+    }, sharp);
+    expect(size).toEqual([800, 600]);
+    await own.close();
   }, 20000);
 });

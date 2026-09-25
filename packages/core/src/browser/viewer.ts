@@ -28,7 +28,7 @@ export type BrowserViewerEvent =
   | {
       type: 'frame';
       data: string;
-      format: 'jpeg' | 'png';
+      format: 'jpeg' | 'png' | 'webp';
       viewport: { width: number; height: number };
       /**
        * The latest agent action on this page. Every frame carries it, so a viewer
@@ -122,7 +122,7 @@ export class BrowserViewer {
         type: 'frame',
         ...frame,
         viewport: this.browser.getViewerViewport(this.threadId) ?? frame.viewport,
-        format: this.browser.getScreencastFormat(),
+        format: frame.format ?? this.browser.getScreencastFormat(),
         ...(this.agentAction ? { agentAction: this.agentAction } : {}),
       };
       this.publish(this.lastFrame);
