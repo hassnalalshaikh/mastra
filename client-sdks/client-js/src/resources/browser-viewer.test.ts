@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AgentControllerSession } from './agent-controller';
 
 describe('session browser client', () => {
@@ -141,6 +141,109 @@ describe('session browser client', () => {
     await Promise.all([first, pasted, next]);
     expect(requests.map(request => request.text.length)).toEqual([1, 65536, 1]);
     viewer.dispose();
+  });
+
+  describe('socket', () => {
+    class FakeSocket {
+      static instances: FakeSocket[] = [];
+      readyState = 0;
+      sent: any[] = [];
+      onopen?: () => void;
+      onerror?: () => void;
+      onclose?: (event: { code: number }) => void;
+      onmessage?: (event: { data: string }) => void;
+      constructor(
+        public url: string,
+        public protocols: string[],
+      ) {
+        FakeSocket.instances.push(this);
+      }
+      send(data: string) {
+        this.sent.push(JSON.parse(data));
+      }
+      close = vi.fn();
+      open() {
+        this.readyState = 1;
+        this.onopen?.();
+      }
+      receive(message: unknown) {
+        this.onmessage?.({ data: JSON.stringify(message) });
+      }
+    }
+    const original = (globalThis as any).WebSocket;
+    beforeEach(() => {
+      FakeSocket.instances = [];
+      (globalThis as any).WebSocket = FakeSocket;
+    });
+    afterEach(() => {
+      (globalThis as any).WebSocket = original;
+    });
+    const viewer = () =>
+      new AgentControllerSession(
+        { baseUrl: 'https://test.invalid', fetch: vi.fn() },
+        'code',
+        'user:a',
+        'thread:t',
+        't',
+      ).browser('launch');
+
+    it('opens the socket with the token as a subprotocol, never in the URL, and sends input without waiting', async () => {
+      const events = vi.fn();
+      const connecting = viewer().connect({ token: () => 'jwt.token.one', onEvent: events, onError: vi.fn() });
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+      const socket = FakeSocket.instances[0]!;
+      expect(socket.url).toMatch(
+        /^wss:\/\/test\.invalid\/api\/agent-controller\/code\/sessions\/user%3Aa\/browser\/socket\?/,
+      );
+      expect(socket.url).not.toContain('jwt.token.one');
+      expect(socket.protocols).toEqual(['mastra.browser.v1', 'mastra.bearer.jwt.token.one']);
+      socket.open();
+      const connection = await connecting;
+      const first = connection.command({ type: 'text', text: 'a' });
+      const second = connection.command({ type: 'keyboard', event: { type: 'keyDown', key: 'Backspace' } });
+      // Both left at once, in order, before any answer.
+      expect(socket.sent).toEqual([
+        { seq: 1, command: { type: 'text', text: 'a' } },
+        { seq: 2, command: { type: 'keyboard', event: { type: 'keyDown', key: 'Backspace' } } },
+      ]);
+      socket.receive({ type: 'command-error', seq: 2, message: 'Browser connection changed' });
+      socket.receive({ type: 'ack', seq: 1 });
+      await expect(first).resolves.toBeUndefined();
+      await expect(second).rejects.toThrow('Browser connection changed');
+      socket.receive({ type: 'state', state: null, incarnation: 'launch' });
+      expect(events).toHaveBeenCalledWith({ type: 'state', state: null, incarnation: 'launch' });
+      connection.close();
+      expect(socket.close).toHaveBeenCalledWith(1000);
+    });
+
+    it('reconnects once with a fresh token when the sign-in expires, and reports other closes', async () => {
+      const tokens = ['a.b.one', 'a.b.two'];
+      const errors = vi.fn();
+      const connecting = viewer().connect({ token: () => tokens.shift()!, onEvent: vi.fn(), onError: errors });
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+      FakeSocket.instances[0]!.open();
+      const connection = await connecting;
+      const lost = connection.command({ type: 'text', text: 'x' });
+      FakeSocket.instances[0]!.onclose?.({ code: 4401 });
+      await expect(lost).rejects.toThrow('Browser socket closed');
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+      expect(FakeSocket.instances[1]!.protocols[1]).toBe('mastra.bearer.a.b.two');
+      FakeSocket.instances[1]!.open();
+      await vi.waitFor(() => expect(FakeSocket.instances[1]!.onmessage).toBeTypeOf('function'));
+      const after = connection.command({ type: 'text', text: 'y' });
+      expect(FakeSocket.instances[1]!.sent.at(-1)).toMatchObject({ command: { type: 'text', text: 'y' } });
+      expect(errors).not.toHaveBeenCalled();
+      FakeSocket.instances[1]!.onclose?.({ code: 1011 });
+      await expect(after).rejects.toThrow('Browser socket closed');
+      expect(errors).toHaveBeenCalledWith(new Error('Browser socket closed (1011)'));
+    });
+
+    it('rejects when the server refuses the socket', async () => {
+      const connecting = viewer().connect({ token: () => 'bad', onEvent: vi.fn(), onError: vi.fn() });
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+      FakeSocket.instances[0]!.onclose?.({ code: 1006 });
+      await expect(connecting).rejects.toThrow('Browser socket refused (1006)');
+    });
   });
 
   it('uses auth headers and exact thread identity, parses split SSE and cancels', async () => {
