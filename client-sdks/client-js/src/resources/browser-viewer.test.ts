@@ -3,24 +3,38 @@ import { AgentControllerSession } from './agent-controller';
 
 describe('session browser client', () => {
   it.each([
-    { x: 101 }, { y: 101 }, { modifiers: 2 }, { deltaY: -10 },
-    { deltaX: 10 }, { deltaY: 10000 }, { button: 'right' as const },
+    { x: 101 },
+    { y: 101 },
+    { modifiers: 2 },
+    { deltaY: -10 },
+    { deltaX: 10 },
+    { deltaY: 10000 },
+    { button: 'right' as const },
   ])('keeps distinct scroll boundaries: %j', async change => {
     const requests: any[] = [];
     let unblock!: () => void;
-    const firstRequest = new Promise<void>(resolve => { unblock = resolve; });
+    const firstRequest = new Promise<void>(resolve => {
+      unblock = resolve;
+    });
     const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
       requests.push(JSON.parse(init.body as string));
       if (requests.length === 1) await firstRequest;
       return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
     });
-    const viewer = new AgentControllerSession({ baseUrl: 'https://test.invalid', fetch }, 'code', 'user:a', 'thread:t', 't').browser('launch');
+    const viewer = new AgentControllerSession(
+      { baseUrl: 'https://test.invalid', fetch },
+      'code',
+      'user:a',
+      'thread:t',
+      't',
+    ).browser('launch');
     const barrier = viewer.command({ type: 'text', text: 'a' });
     await vi.waitFor(() => expect(requests).toHaveLength(1));
     const event = { type: 'mouseWheel' as const, x: 100, y: 100, deltaX: 0, deltaY: 10 };
     const first = viewer.command({ type: 'mouse', event });
     const second = viewer.command({ type: 'mouse', event: { ...event, ...change } });
-    unblock(); await Promise.all([barrier, first, second]);
+    unblock();
+    await Promise.all([barrier, first, second]);
     expect(requests).toHaveLength(3);
     expect(requests[1].event).toEqual(event);
     expect(requests[2].event).toEqual({ ...event, ...change });
@@ -35,20 +49,97 @@ describe('session browser client', () => {
       await new Promise<void>(resolve => release.push(resolve));
       return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
     });
-    const viewer = new AgentControllerSession({ baseUrl: 'https://test.invalid', fetch }, 'code', 'user:a', 'thread:t', 't').browser('launch');
-    const scroll = () => viewer.command({ type: 'mouse', event: { type: 'mouseWheel', x: 100, y: 100, deltaX: 0, deltaY: 10 } });
+    const viewer = new AgentControllerSession(
+      { baseUrl: 'https://test.invalid', fetch },
+      'code',
+      'user:a',
+      'thread:t',
+      't',
+    ).browser('launch');
+    const scroll = () =>
+      viewer.command({ type: 'mouse', event: { type: 'mouseWheel', x: 100, y: 100, deltaX: 0, deltaY: 10 } });
     const first = scroll();
     await vi.waitFor(() => expect(requests).toHaveLength(1));
     const pending = Array.from({ length: 29 }, scroll);
     const click = viewer.command({ type: 'mouse', event: { type: 'mousePressed', x: 100, y: 100, button: 'left' } });
-    release[0](); await first;
+    release[0]();
+    await first;
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[1].event.deltaY).toBe(290);
-    release[1](); await Promise.all(pending);
+    release[1]();
+    await Promise.all(pending);
     await vi.waitFor(() => expect(requests).toHaveLength(3));
     expect(requests[2].event.type).toBe('mousePressed');
-    release[2](); await click;
+    release[2]();
+    await click;
     expect(requests.slice(0, 2).reduce((sum, request) => sum + request.event.deltaY, 0)).toBe(300);
+    viewer.dispose();
+  });
+
+  it('sends text typed during a request as one request, in order, around keys that stay separate', async () => {
+    const requests: any[] = [];
+    const release: Array<() => void> = [];
+    const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
+      requests.push(JSON.parse(init.body as string));
+      await new Promise<void>(resolve => release.push(resolve));
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    });
+    const viewer = new AgentControllerSession(
+      { baseUrl: 'https://test.invalid', fetch },
+      'code',
+      'user:a',
+      'thread:t',
+      't',
+    ).browser('launch');
+    const typed = [viewer.command({ type: 'text', text: 'c' })];
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    for (const text of ['o', 'f', 'f']) typed.push(viewer.command({ type: 'text', text }));
+    const backspace = { type: 'keyDown' as const, key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 };
+    typed.push(viewer.command({ type: 'keyboard', event: backspace }));
+    typed.push(viewer.command({ type: 'keyboard', event: { ...backspace, type: 'keyUp' } }));
+    for (const text of ['e', 'e']) typed.push(viewer.command({ type: 'text', text }));
+    for (let i = 0; i < 4; i++) {
+      release[i]();
+      await vi.waitFor(() => expect(requests).toHaveLength(Math.min(5, i + 2)));
+    }
+    release[4]();
+    await Promise.all(typed);
+    expect(requests).toEqual([
+      { type: 'text', text: 'c' },
+      { type: 'text', text: 'off' },
+      { type: 'keyboard', event: backspace },
+      { type: 'keyboard', event: { ...backspace, type: 'keyUp' } },
+      { type: 'text', text: 'ee' },
+    ]);
+    viewer.dispose();
+  });
+
+  it('keeps a pending text request within the command size limit', async () => {
+    const requests: any[] = [];
+    const release: Array<() => void> = [];
+    const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
+      requests.push(JSON.parse(init.body as string));
+      await new Promise<void>(resolve => release.push(resolve));
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    });
+    const viewer = new AgentControllerSession(
+      { baseUrl: 'https://test.invalid', fetch },
+      'code',
+      'user:a',
+      'thread:t',
+      't',
+    ).browser('launch');
+    const first = viewer.command({ type: 'text', text: 'a' });
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    const big = 'x'.repeat(65536);
+    const pasted = viewer.command({ type: 'text', text: big });
+    const next = viewer.command({ type: 'text', text: 'y' });
+    for (let i = 0; i < 3; i++) {
+      release[i]();
+      if (i < 2) await vi.waitFor(() => expect(requests).toHaveLength(i + 2));
+    }
+    await Promise.all([first, pasted, next]);
+    expect(requests.map(request => request.text.length)).toEqual([1, 65536, 1]);
     viewer.dispose();
   });
 
