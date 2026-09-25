@@ -10,7 +10,7 @@ import type { Agent } from '@mastra/core/agent';
 import type { Mastra } from '@mastra/core/mastra';
 import type { ApiRoute, CorsOptions } from '@mastra/core/server';
 import { Tool } from '@mastra/core/tools';
-import { MastraServer, setupBrowserStream, skipIfFrameworkPublic } from '@mastra/hono';
+import { MastraServer, skipIfFrameworkPublic } from '@mastra/hono';
 import type { HonoBindings, HonoVariables } from '@mastra/hono';
 import { InMemoryTaskStore } from '@mastra/server/a2a/store';
 import { findMatchingCustomRoute } from '@mastra/server/auth';
@@ -24,6 +24,7 @@ import { timeout } from 'hono/timeout';
 import { describeRoute } from 'hono-openapi';
 import type { DescribeRouteOptions } from 'hono-openapi';
 import { escapeStudioHtmlValue, injectStudioHtmlConfig, normalizeStudioBase } from '../build/utils';
+import { setupBrowserSockets } from './browser-sockets';
 import { agentLearningProxyHandler } from './handlers/agent-learning';
 import {
   closeRefreshStreams,
@@ -239,7 +240,8 @@ export async function createHonoServer(
   const browserStreamSetup =
     options.browserStream === false
       ? null
-      : await setupBrowserStream(app, {
+      : await setupBrowserSockets(app, {
+          mastra,
           getToolset: async (agentId: string) => {
             // Look up agent and return its browser if configured.
             // First try the runtime registry (code-defined + previously hydrated agents),
