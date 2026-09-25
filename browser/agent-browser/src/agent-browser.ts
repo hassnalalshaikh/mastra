@@ -652,6 +652,35 @@ export class AgentBrowser extends MastraBrowser {
     }
   }
 
+  /** Tell live viewers the agent is acting on the whole page (open, back, tabs, page scroll). */
+  private markPageAction(kind: BrowserAgentAction['kind'], page: Page | (() => Page), threadId?: string) {
+    if (!this.hasAgentActionListeners()) return;
+    try {
+      const size = (typeof page === 'function' ? page() : page).viewportSize();
+      if (size && size.width > 0 && size.height > 0)
+        this.notifyAgentAction({ kind, box: { x: 0, y: 0, width: size.width, height: size.height } }, threadId);
+    } catch {
+      // No page size only means no mark; the action reports its own errors.
+    }
+  }
+
+  /** A key press acts on the focused element; with nothing focused it acts on the page. */
+  private async markKeyAction(page: Page, threadId?: string) {
+    if (!this.hasAgentActionListeners()) return;
+    try {
+      const box = await page.evaluate(() => {
+        const element = (globalThis as any).document?.activeElement;
+        if (!element || element === (globalThis as any).document.body) return null;
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      });
+      if (box && box.width > 0 && box.height > 0) return this.notifyAgentAction({ kind: 'press', box }, threadId);
+    } catch {
+      // No box only means the page-level mark below.
+    }
+    this.markPageAction('press', page, threadId);
+  }
+
   private async getScrollInfo(threadId?: string): Promise<{
     scrollY: number;
     scrollHeight: number;
@@ -882,6 +911,7 @@ export class AgentBrowser extends MastraBrowser {
       try {
         const page = await this.getPage(threadId);
 
+        this.markPageAction('navigate', page, threadId);
         await page.goto(input.url, {
           timeout: input.timeout ?? this.defaultTimeout,
           waitUntil: input.waitUntil ?? 'domcontentloaded',
@@ -1146,6 +1176,7 @@ export class AgentBrowser extends MastraBrowser {
         const timeout = input.timeout ?? this.defaultTimeout;
         const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
 
+        await this.markKeyAction(page, threadId);
         await page.keyboard.press(input.key);
 
         await navigation;
@@ -1223,8 +1254,10 @@ export class AgentBrowser extends MastraBrowser {
           const locator = await this.requireLocator(input.ref, threadId);
           if (locator) {
             await locator.scrollIntoViewIfNeeded({ timeout: this.defaultTimeout });
+            await this.markAgentAction('scroll', locator, threadId);
           }
         } else {
+          this.markPageAction('scroll', page, threadId);
           const direction = input.direction;
           const amount = input.amount ?? 300;
 
@@ -1322,6 +1355,7 @@ export class AgentBrowser extends MastraBrowser {
     return this.runBrowserOperation(async () => {
       try {
         const page = await this.getPage(threadId);
+        this.markPageAction('navigate', page, threadId);
         await page.goBack({ timeout: this.defaultTimeout });
         const url = page.url();
         this.markActiveUrlChangeSource('agent', url, threadId);
@@ -1504,6 +1538,7 @@ export class AgentBrowser extends MastraBrowser {
                 'This browser provider does not support tab management.',
               );
             }
+            this.markPageAction('tab', () => browser.getPage(), threadId);
             const result = await browser.newTab();
             // If URL provided, navigate to it after creating the tab
             if (input.url) {
@@ -1528,6 +1563,7 @@ export class AgentBrowser extends MastraBrowser {
                 'This browser provider does not support tab management.',
               );
             }
+            this.markPageAction('tab', () => browser.getPage(), threadId);
             await browser.switchTo(input.index!);
             // Reconnect screencast to show the new active tab
             await this.reconnectScreencastForThread(threadId, 'tab switch');
@@ -1559,6 +1595,7 @@ export class AgentBrowser extends MastraBrowser {
                 'This browser provider does not support tab management.',
               );
             }
+            this.markPageAction('tab', () => browser.getPage(), threadId);
             await browser.closeTab(input.index);
             // Reconnect screencast - it may now be pointing to a different tab
             await this.reconnectScreencastForThread(threadId, 'tab close');

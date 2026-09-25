@@ -827,5 +827,49 @@ describe('AgentBrowser', () => {
       expect(mockLocator.click).toHaveBeenCalled();
       expect(listener).not.toHaveBeenCalled();
     });
+
+    it('marks page actions on the whole viewport: open, back, page scroll, tabs', async () => {
+      const seen: Array<{ kind: string; box: unknown }> = [];
+      const gotoCallsBefore: number[] = [];
+      const stop = browser.onAgentAction(action => {
+        seen.push({ kind: action.kind, box: action.box });
+        gotoCallsBefore.push(mockPage.goto.mock.calls.length);
+      });
+      const viewport = { x: 0, y: 0, width: 1280, height: 720 };
+      await browser.goto({ url: 'https://example.com/next' });
+      await browser.back();
+      await browser.scroll({ direction: 'down' });
+      await browser.tabs({ action: 'switch', index: 0 });
+      expect(seen).toEqual([
+        { kind: 'navigate', box: viewport },
+        { kind: 'navigate', box: viewport },
+        { kind: 'scroll', box: viewport },
+        { kind: 'tab', box: viewport },
+      ]);
+      // The page open is marked before the page changes.
+      expect(gotoCallsBefore[0]).toBe(0);
+      stop();
+    });
+
+    it('marks an element scroll and a key press on the focused element', async () => {
+      const seen: Array<{ kind: string; box: unknown }> = [];
+      browser.onAgentAction(action => seen.push({ kind: action.kind, box: action.box }));
+      await browser.scroll({ ref: '@e1', direction: 'down' });
+      mockPage.evaluate.mockResolvedValueOnce({ x: 5, y: 6, width: 70, height: 20 });
+      await browser.press({ key: 'Enter' });
+      mockPage.evaluate.mockResolvedValueOnce(null);
+      await browser.press({ key: 'PageDown' });
+      expect(seen).toEqual([
+        { kind: 'scroll', box },
+        { kind: 'press', box: { x: 5, y: 6, width: 70, height: 20 } },
+        { kind: 'press', box: { x: 0, y: 0, width: 1280, height: 720 } },
+      ]);
+    });
+
+    it('measures nothing for page actions while nobody watches', async () => {
+      mockPage.evaluate.mockClear();
+      await browser.press({ key: 'Enter' });
+      expect(mockPage.evaluate).not.toHaveBeenCalled();
+    });
   });
 });

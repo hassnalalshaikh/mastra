@@ -1,22 +1,15 @@
 import { Mastra } from '@mastra/core/mastra';
-import type * as MastraHono from '@mastra/hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 describe('deployer browser session probe', () => {
   afterEach(() => {
     vi.resetModules();
-    vi.doUnmock('@mastra/hono');
+    vi.doUnmock('../browser-sockets');
   });
 
   it('registers a fallback /api/agents/:agentId/browser/session route that reports screencast unavailable when setupBrowserStream is unavailable', async () => {
-    vi.doMock('@mastra/hono', async () => {
-      const actual = await vi.importActual<typeof MastraHono>('@mastra/hono');
-      return {
-        ...actual,
-        // Simulate `@hono/node-ws` / `ws` not being installed
-        setupBrowserStream: vi.fn().mockResolvedValue(null),
-      };
-    });
+    // Simulate `@hono/node-ws` / `ws` not being installed
+    vi.doMock('../browser-sockets', () => ({ setupBrowserSockets: vi.fn().mockResolvedValue(null) }));
 
     const { createHonoServer } = await import('../index');
     const mastra = new Mastra({ logger: false });
@@ -28,14 +21,12 @@ describe('deployer browser session probe', () => {
     await expect(response.json()).resolves.toEqual({ hasSession: false, screencastAvailable: false });
   });
 
-  it('does not register the fallback route when setupBrowserStream succeeds (the hono adapter owns the route in that case)', async () => {
-    vi.doMock('@mastra/hono', async () => {
-      const actual = await vi.importActual<typeof MastraHono>('@mastra/hono');
+  it('does not register the fallback route when setupBrowserStream succeeds (the browser sockets own the route in that case)', async () => {
+    vi.doMock('../browser-sockets', () => {
       const registeredRoutes: Array<{ method: string; path: string }> = [];
 
       return {
-        ...actual,
-        setupBrowserStream: vi.fn().mockImplementation(async (app: any) => {
+        setupBrowserSockets: vi.fn().mockImplementation(async (app: any) => {
           // Mimic the real adapter: register the probe route ourselves so we can prove
           // the fallback path doesn't double-register.
           app.get('/api/agents/:agentId/browser/session', (c: any) =>
@@ -60,13 +51,7 @@ describe('deployer browser session probe', () => {
 
   it('skips setupBrowserStream and registers fallback when browser streaming is disabled', async () => {
     const setupBrowserStreamMock = vi.fn().mockResolvedValue({ injectWebSocket: () => {}, registry: {} });
-    vi.doMock('@mastra/hono', async () => {
-      const actual = await vi.importActual<typeof MastraHono>('@mastra/hono');
-      return {
-        ...actual,
-        setupBrowserStream: setupBrowserStreamMock,
-      };
-    });
+    vi.doMock('../browser-sockets', () => ({ setupBrowserSockets: setupBrowserStreamMock }));
 
     const { createHonoServer } = await import('../index');
     const mastra = new Mastra({ logger: false });
@@ -79,15 +64,19 @@ describe('deployer browser session probe', () => {
     await expect(response.json()).resolves.toEqual({ hasSession: false, screencastAvailable: false });
   });
 
+  it('serves the Session browser socket only as a WebSocket upgrade', async () => {
+    const { createHonoServer } = await import('../index');
+    const mastra = new Mastra({ logger: false });
+    const app = await createHonoServer(mastra, { tools: {} });
+    const response = await app.request(
+      'http://localhost/api/agent-controller/code/sessions/user%3Aa/browser/socket?sessionThreadId=t&incarnation=one',
+    );
+    expect(response.status).toBe(426);
+  });
+
   it('mounts the fallback under a custom apiPrefix and forwards it to setupBrowserStream', async () => {
     const setupBrowserStreamMock = vi.fn().mockResolvedValue(null);
-    vi.doMock('@mastra/hono', async () => {
-      const actual = await vi.importActual<typeof MastraHono>('@mastra/hono');
-      return {
-        ...actual,
-        setupBrowserStream: setupBrowserStreamMock,
-      };
-    });
+    vi.doMock('../browser-sockets', () => ({ setupBrowserSockets: setupBrowserStreamMock }));
 
     const { createHonoServer } = await import('../index');
     const mastra = new Mastra({ logger: false, server: { apiPrefix: '/custom/v1' } });

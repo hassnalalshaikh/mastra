@@ -2,6 +2,11 @@ import type { BrowserViewerCommand, BrowserViewerEvent } from '@mastra/core/brow
 import type { ClientOptions } from '../types';
 import { BaseResource } from './base';
 
+/** The Session browser socket protocol (see `@mastra/server/browser-stream`). */
+const BROWSER_SOCKET_PROTOCOL = 'mastra.browser.v1';
+const BROWSER_SOCKET_TOKEN_PREFIX = 'mastra.bearer.';
+const BROWSER_SOCKET_TOKEN_EXPIRED = 4401;
+
 /** Authenticated viewer for an existing exact Controller Session browser launch. */
 export class SessionBrowserViewer extends BaseResource {
   private commands: Array<{
@@ -104,6 +109,100 @@ export class SessionBrowserViewer extends BaseResource {
     } finally {
       this.sending = false;
     }
+  }
+
+  /**
+   * One WebSocket for this viewer's input and events. Commands are sent at once, in order, without waiting for the
+   * previous answer; the server checks sign-in once when the socket opens. The token travels as a WebSocket
+   * subprotocol, never in the URL. When the server closes the socket because the sign-in expired, it reconnects
+   * once with a fresh token.
+   */
+  async connect(options: {
+    token: () => string | Promise<string>;
+    onEvent: (event: BrowserViewerEvent) => void;
+    onError: (error: Error) => void;
+    signal?: AbortSignal;
+  }): Promise<{ command(command: BrowserViewerCommand): Promise<void>; close(): void }> {
+    const Socket = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+    if (!Socket) throw new Error('WebSocket is not available');
+    const base = String(this.options.baseUrl).replace(/\/$/, '').replace(/^http/, 'ws');
+    const url = `${base}${this.apiPrefix}${this.path.replace('/browser/stream?', '/browser/socket?')}`;
+    const pending = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
+    let seq = 0;
+    let socket: WebSocket | undefined;
+    let closed = false;
+    const failPending = (error: Error) => {
+      for (const entry of pending.values()) entry.reject(error);
+      pending.clear();
+    };
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      options.signal?.removeEventListener('abort', close);
+      failPending(new Error('Browser socket closed'));
+      socket?.close(1000);
+    };
+    const open = async (): Promise<void> => {
+      const token = await options.token();
+      const next = new Socket(url, [BROWSER_SOCKET_PROTOCOL, `${BROWSER_SOCKET_TOKEN_PREFIX}${token}`]);
+      socket = next;
+      await new Promise<void>((resolve, reject) => {
+        next.onopen = () => resolve();
+        next.onerror = () => reject(new Error('Browser socket failed to open'));
+        next.onclose = event => reject(new Error(`Browser socket refused (${event.code})`));
+      });
+      next.onmessage = message => {
+        if (typeof message.data !== 'string') return;
+        let event: BrowserViewerEvent | { type: 'ack' | 'command-error'; seq: number; message?: string };
+        try {
+          event = JSON.parse(message.data);
+        } catch {
+          return;
+        }
+        if (event.type === 'ack' || event.type === 'command-error') {
+          const entry = pending.get(event.seq);
+          pending.delete(event.seq);
+          if (event.type === 'ack') entry?.resolve();
+          else entry?.reject(new Error(event.message ?? 'Browser command failed'));
+          return;
+        }
+        const viewerEvent = event as BrowserViewerEvent;
+        options.onEvent(viewerEvent);
+        if (viewerEvent.type === 'closed') close();
+      };
+      next.onerror = () => {};
+      next.onclose = event => {
+        if (closed || socket !== next) return;
+        failPending(new Error('Browser socket closed'));
+        if (event.code === BROWSER_SOCKET_TOKEN_EXPIRED) {
+          // A fresh sign-in keeps the same view; anything else is the viewer's error to handle.
+          open().catch(error => {
+            if (!closed) {
+              closed = true;
+              options.onError(error instanceof Error ? error : new Error(String(error)));
+            }
+          });
+          return;
+        }
+        closed = true;
+        options.onError(new Error(`Browser socket closed (${event.code})`));
+      };
+    };
+    if (options.signal?.aborted) throw new Error('Browser socket aborted');
+    options.signal?.addEventListener('abort', close, { once: true });
+    this.commandAbort.signal.addEventListener('abort', close, { once: true });
+    await open();
+    return {
+      command: command => {
+        if (closed || !socket || socket.readyState !== 1) return Promise.reject(new Error('Browser socket closed'));
+        if (pending.size >= 512) return Promise.reject(new Error('Browser input queue is full'));
+        const id = ++seq;
+        const answer = new Promise<void>((resolve, reject) => pending.set(id, { resolve, reject }));
+        socket.send(JSON.stringify({ seq: id, command }));
+        return answer;
+      },
+      close,
+    };
   }
 
   /** Stop this handle's pending input; does not close the remote browser. */

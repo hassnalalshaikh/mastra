@@ -465,7 +465,12 @@ export interface KeyboardEventParams {
  */
 export interface BrowserAgentAction {
   seq: number;
-  kind: 'click' | 'type' | 'select' | 'hover' | 'drag';
+  /**
+   * Element actions (`click`, `type`, `select`, `hover`, `drag`, and `press` on the focused element)
+   * carry the element's box. Page actions (`navigate`: open, back; `tab`: new, switch, close; `scroll`
+   * of the page, and `press` with nothing focused) carry the whole viewport.
+   */
+  kind: 'click' | 'type' | 'select' | 'hover' | 'drag' | 'press' | 'scroll' | 'navigate' | 'tab';
   box: { x: number; y: number; width: number; height: number };
 }
 
