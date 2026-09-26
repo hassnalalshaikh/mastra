@@ -39,12 +39,14 @@ export const snapshotInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Only list elements whose text contains these words (case-insensitive), e.g. a link or button a shortened snapshot left out',
+      'Use only after a snapshot said elements were left out: elements whose text contains these words (case-insensitive) are always kept in the snapshot and listed in matches.',
     ),
   showAll: z
     .boolean()
     .optional()
-    .describe('Return every element even on a very long page (costly; only when find is not enough)'),
+    .describe(
+      'Use only after a snapshot said elements were left out and find is not enough: returns every element (costly)',
+    ),
 });
 export type SnapshotInput = z.output<typeof snapshotInputSchema>;
 
