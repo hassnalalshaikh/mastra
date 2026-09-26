@@ -1,11 +1,12 @@
 /**
  * Fits an accessibility snapshot into a character budget without hiding the
- * controls the agent acts on. Long pages (an article with 1,500 links) keep
- * every form control, then fill the rest in page order; what was left out is
- * counted so the agent can ask for it with `find` or `showAll`.
+ * elements the agent acts on. A long page (an article with 1,500 links) keeps
+ * the elements matching `find` first, then every form control, then the rest
+ * in page order; what was left out is counted so the agent can bring it into
+ * view with `find` or ask for everything with `showAll`.
  */
 
-/** Roles an agent types into, clicks to submit, or chooses with. Always kept first. */
+/** Roles an agent types into, clicks to submit, or chooses with. */
 const CONTROL_ROLE =
   /^\s*- (textbox|searchbox|combobox|button|checkbox|radio|switch|slider|spinbutton|listbox|option|menuitem|menuitemcheckbox|menuitemradio|tab|treeitem)\b/;
 const ROLE = /^\s*- ([a-z]+)/;
@@ -13,16 +14,17 @@ const ROLE = /^\s*- ([a-z]+)/;
 export interface SnapshotBudgetOptions {
   /** Largest snapshot text in characters. Undefined or non-positive: no limit. */
   maxChars?: number;
-  /** Keep only element lines containing these words (case-insensitive). */
+  /** Words (case-insensitive) whose element lines are always kept and listed in `matches`. */
   find?: string;
   /** Return the whole snapshot regardless of the limit. */
   showAll?: boolean;
 }
 
 export interface SnapshotBudgetResult {
+  /** The page in page order: the whole page, or the lines that fit the limit. */
   snapshot: string;
-  /** Element lines matching `find`, or undefined when no `find` was given. */
-  matched?: number;
+  /** Element lines containing the `find` words (also inside `snapshot`); undefined without `find`. */
+  matches?: string[];
   /** Element lines left out by the limit, by role (e.g. { link: 1376 }). Undefined when nothing was left out. */
   omitted?: { total: number; byRole: Record<string, number> };
 }
@@ -37,20 +39,16 @@ const countRoles = (lines: readonly string[]): Record<string, number> => {
 };
 
 export function fitSnapshotToBudget(tree: string, options: SnapshotBudgetOptions = {}): SnapshotBudgetResult {
-  let lines = tree.split('\n');
-  let matched: number | undefined;
+  const lines = tree.split('\n');
   const words = options.find?.trim().toLowerCase();
-  if (words) {
-    lines = lines.filter(line => line.toLowerCase().includes(words));
-    matched = lines.length;
-  }
-  const text = lines.join('\n');
+  const isMatch = (line: string) => Boolean(words) && ROLE.test(line) && line.toLowerCase().includes(words!);
+  const matches = words ? lines.filter(isMatch).map(line => line.trim()) : undefined;
   const maxChars = options.maxChars;
-  if (options.showAll || !maxChars || maxChars <= 0 || text.length <= maxChars) {
-    return { snapshot: text, matched };
+  if (options.showAll || !maxChars || maxChars <= 0 || tree.length <= maxChars) {
+    return { snapshot: tree, matches };
   }
 
-  // Controls first (in page order), then everything else in page order, until the budget is spent.
+  // Matches first, then controls, then everything else in page order, until the budget is spent.
   const keep = new Array<boolean>(lines.length).fill(false);
   let used = 0;
   const take = (index: number) => {
@@ -61,7 +59,10 @@ export function fitSnapshotToBudget(tree: string, options: SnapshotBudgetOptions
     return true;
   };
   lines.forEach((line, index) => {
-    if (CONTROL_ROLE.test(line)) take(index);
+    if (isMatch(line)) take(index);
+  });
+  lines.forEach((line, index) => {
+    if (!keep[index] && CONTROL_ROLE.test(line)) take(index);
   });
   for (let index = 0; index < lines.length; index++) {
     if (!keep[index] && !take(index)) break;
@@ -69,7 +70,7 @@ export function fitSnapshotToBudget(tree: string, options: SnapshotBudgetOptions
   const left = lines.filter((_, index) => !keep[index]);
   return {
     snapshot: lines.filter((_, index) => keep[index]).join('\n'),
-    matched,
+    matches,
     omitted: { total: left.length, byRole: countRoles(left) },
   };
 }
@@ -81,7 +82,7 @@ export function describeOmittedElements(omitted: NonNullable<SnapshotBudgetResul
     .map(([role, count]) => `${count} ${role}${count === 1 ? '' : 's'}`);
   return (
     `Long page: ${omitted.total} more elements not shown (${parts.join(', ')}). ` +
-    'Every form control is listed. To see the others, call browser_snapshot with find:"<words from the element>" ' +
-    'to list matching elements, or showAll:true for the whole page.'
+    'Every form control is listed. To bring others into view, call browser_snapshot with find:"<words from the element>" ' +
+    '(matching elements are always kept and listed in matches), or showAll:true for the whole page.'
   );
 }

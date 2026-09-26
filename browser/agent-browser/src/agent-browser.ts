@@ -947,6 +947,7 @@ export class AgentBrowser extends MastraBrowser {
         title: string;
         elementCount: number;
         shownElementCount?: number;
+        matches?: string[];
         scroll: string;
         hint?: string;
       }
@@ -987,8 +988,8 @@ export class AgentBrowser extends MastraBrowser {
         const shownElementCount = new Set(snapshot.match(/@e\d+/g) || []).size;
 
         let hint: string | undefined;
-        if (fitted.omitted) hint = describeOmittedElements(fitted.omitted);
-        else if (fitted.matched === 0) hint = `No element contains "${input.find}". Try other words or showAll:true.`;
+        if (fitted.matches?.length === 0) hint = `No element contains "${input.find}". Try other words.`;
+        else if (fitted.omitted) hint = describeOmittedElements(fitted.omitted);
         else if (elementCount === 0)
           hint = 'No interactive elements found. Try scrolling or setting interactiveOnly:false.';
 
@@ -999,6 +1000,7 @@ export class AgentBrowser extends MastraBrowser {
           title: await page.title(),
           elementCount,
           ...(shownElementCount !== elementCount ? { shownElementCount } : {}),
+          ...(fitted.matches ? { matches: fitted.matches } : {}),
           scroll: scrollText,
           hint,
         };
