@@ -22,6 +22,34 @@ function makeMastra(agentIds: string[]) {
 }
 
 describe('mastra.schedules canonical service', () => {
+  it('assigns distinct claims to manual fires within the same millisecond', async () => {
+    const { mastra } = makeMastra(['a']);
+    const schedule = await mastra.schedules.create({ agentId: 'a', cron: '* * * * *', prompt: 'check', maxRuns: 2 });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(123456789);
+    try {
+      const [first, second] = await Promise.all([mastra.schedules.run(schedule.id), mastra.schedules.run(schedule.id)]);
+      expect(first.claimId).not.toBe(second.claimId);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('validates limits and preserves consumed budget across edits and resume', async () => {
+    const { mastra } = makeMastra(['a']);
+    await expect(
+      mastra.schedules.create({ agentId: 'a', cron: '* * * * *', prompt: 'check', maxRuns: 0 }),
+    ).rejects.toThrow('maxRuns');
+    const schedule = await mastra.schedules.create({ agentId: 'a', cron: '* * * * *', prompt: 'check', maxRuns: 1 });
+    const store = (await mastra.getStorage()!.getStore('schedules'))!;
+    await store.claimAgentScheduleRun(schedule.id, 'first', true);
+    expect(await mastra.schedules.resume(schedule.id)).toMatchObject({ status: 'paused', maxRuns: 1, runCount: 1 });
+    expect(await mastra.schedules.update(schedule.id, { maxRuns: 2 })).toMatchObject({ runCount: 1 });
+    expect(await mastra.schedules.resume(schedule.id)).toMatchObject({ status: 'active', runCount: 1 });
+    store.supportsRunLimits = false;
+    await expect(
+      mastra.schedules.create({ agentId: 'a', cron: '* * * * *', prompt: 'check', maxRuns: 2 }),
+    ).rejects.toThrow('not supported');
+  });
   it('creates agent schedules for any registered agent and gets them back', async () => {
     const { mastra } = makeMastra(['a', 'b']);
 

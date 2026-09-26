@@ -15,6 +15,18 @@ function cloneRow(row: Schedule): Schedule {
 }
 
 export class InMemorySchedulesStorage extends SchedulesStorage {
+  override supportsRunLimits = true;
+
+  override async claimAgentScheduleRun(id: string, claimId: string, manual: boolean): Promise<boolean> {
+    const row = this.db.schedules.get(id);
+    if (!row || row.maxRuns === undefined || (!manual && row.status !== 'active')) return false;
+    if ((row.runCount ?? 0) >= row.maxRuns || row.runClaims?.includes(claimId)) return false;
+    row.runCount = (row.runCount ?? 0) + 1;
+    row.runClaims = [...(row.runClaims ?? []), claimId];
+    if (row.runCount >= row.maxRuns) row.status = 'paused';
+    row.updatedAt = Date.now();
+    return true;
+  }
   private db: InMemoryDB;
 
   constructor({ db }: { db: InMemoryDB }) {
@@ -84,6 +96,7 @@ export class InMemorySchedulesStorage extends SchedulesStorage {
       updatedAt: Date.now(),
     };
     const stored = clone(updated);
+    if (stored.maxRuns !== undefined && (stored.runCount ?? 0) >= stored.maxRuns) stored.status = 'paused';
     this.db.schedules.set(id, stored);
     return cloneRow(stored);
   }

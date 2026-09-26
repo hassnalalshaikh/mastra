@@ -3279,6 +3279,9 @@ export interface ScheduleIfIdle {
  * Discriminate from workflow schedules by the presence of `agentId`.
  */
 export interface AgentSchedule {
+  /** Lifetime dispatch-attempt budget, including failed attempts. */
+  maxRuns?: number;
+  runCount?: number;
   id: string;
   agentId: string;
   /** Mirror of the workflow-schedule discriminator — always absent on agent schedules. */
@@ -3393,6 +3396,7 @@ export interface ListScheduleTriggersResponse {
  * service.
  */
 export interface CreateAgentScheduleInput {
+  maxRuns?: number;
   /** Optional stable id; normalized to `agent_<slug>`. A random id is generated when omitted. */
   id?: string;
   agentId: string;
@@ -3442,6 +3446,7 @@ export type CreateScheduleInput = CreateAgentScheduleInput | CreateWorkflowSched
  * and cannot be changed — to retarget, delete and recreate.
  */
 export interface UpdateScheduleInput {
+  maxRuns?: number;
   cron?: string;
   timezone?: string;
   status?: ScheduleStatus;

@@ -114,6 +114,26 @@ describe('Schedules handlers', () => {
     });
   });
 
+  it('round trips the native limit and count through create, update and response schemas', async () => {
+    const created = await CREATE_SCHEDULE_ROUTE.handler({
+      mastra,
+      ...baseCtx(),
+      agentId: 'agent-1',
+      prompt: 'check',
+      cron: '* * * * *',
+      maxRuns: 2,
+    } as any);
+    expect(created).toMatchObject({ maxRuns: 2, runCount: 0 });
+    const updated = await UPDATE_SCHEDULE_ROUTE.handler({
+      mastra,
+      ...baseCtx(),
+      scheduleId: created.id,
+      maxRuns: 3,
+    } as any);
+    expect(updated).toMatchObject({ maxRuns: 3, runCount: 0 });
+    expect(GET_SCHEDULE_ROUTE.responseSchema?.parse(updated)).toMatchObject({ maxRuns: 3, runCount: 0 });
+  });
+
   describe('LIST_SCHEDULES_ROUTE', () => {
     it('returns empty list when no schedules exist', async () => {
       const result = await LIST_SCHEDULES_ROUTE.handler({

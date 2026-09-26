@@ -3372,6 +3372,8 @@ type Shared_Type_148 = {
 };
 
 type Shared_Type_149 = {
+  maxRuns?: number | undefined;
+  runCount?: number | undefined;
   id: string;
   agentId: string;
   workflowId?: undefined | undefined;
@@ -19749,6 +19751,7 @@ export interface GetSchedulesScheduleId_RouteContract {
 // ============================================================================
 export type PostSchedules_Body =
   | {
+      maxRuns?: number | undefined;
       id?: string | undefined;
       agentId: string;
       cron: string;
@@ -19823,6 +19826,7 @@ export interface PostSchedules_RouteContract {
 export type PatchSchedulesScheduleId_PathParams = GetSchedulesScheduleId_PathParams;
 
 export type PatchSchedulesScheduleId_Body = {
+  maxRuns?: number | undefined;
   cron?: string | undefined;
   timezone?: string | undefined;
   status?: ('active' | 'paused') | undefined;

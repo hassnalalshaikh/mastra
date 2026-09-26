@@ -112,6 +112,12 @@ export type ScheduleOwnerType = 'agent' | (string & {});
  * polling the same storage.
  */
 export type Schedule = {
+  /** Optional hard lifetime limit on agent dispatch attempts. */
+  maxRuns?: number;
+  /** Native admission count, including failed attempts; never reconstructed from history. */
+  runCount?: number;
+  /** Native duplicate-delivery fences, bounded by maxRuns. */
+  runClaims?: string[];
   id: string;
   target: ScheduleTarget;
   cron: string;
@@ -230,7 +236,10 @@ export type ScheduleTriggerListOptions = {
 
 /** Fields that can be patched via {@link SchedulesStorage.updateSchedule}. */
 export type ScheduleUpdate = Partial<
-  Pick<Schedule, 'cron' | 'timezone' | 'status' | 'nextFireAt' | 'metadata' | 'target' | 'ownerType' | 'ownerId'>
+  Pick<
+    Schedule,
+    'cron' | 'timezone' | 'status' | 'nextFireAt' | 'metadata' | 'target' | 'ownerType' | 'ownerId' | 'maxRuns'
+  >
 >;
 
 /**
@@ -242,6 +251,12 @@ export type ScheduleUpdate = Partial<
  * the `workflows` pubsub topic, and records the trigger via `recordTrigger`.
  */
 export abstract class SchedulesStorage extends StorageDomain {
+  supportsRunLimits = false;
+
+  /** Atomically reserves one attempt, fences duplicate claims, and pauses at the limit. */
+  async claimAgentScheduleRun(_id: string, _claimId: string, _manual: boolean): Promise<boolean> {
+    throw new Error('Schedule run limits are not supported by this storage adapter');
+  }
   constructor() {
     super({
       component: 'STORAGE',

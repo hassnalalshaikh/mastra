@@ -841,6 +841,9 @@ export const TABLE_SCHEMAS: Record<TABLE_NAMES, Record<string, StorageColumn>> =
     completedAt: { type: 'timestamp', nullable: true },
   },
   [TABLE_SCHEDULES]: {
+    max_runs: { type: 'integer', nullable: true },
+    run_count: { type: 'integer', nullable: true },
+    run_claims: { type: 'jsonb', nullable: true },
     id: { type: 'text', nullable: false, primaryKey: true },
     target: { type: 'jsonb', nullable: false },
     cron: { type: 'text', nullable: false },

@@ -73,6 +73,11 @@ function rowToSchedule(row: Record<string, any>): Schedule {
   if (metadata !== undefined) schedule.metadata = metadata;
   if (row.owner_type != null) schedule.ownerType = String(row.owner_type) as Schedule['ownerType'];
   if (row.owner_id != null) schedule.ownerId = String(row.owner_id);
+  if (row.max_runs != null) {
+    schedule.maxRuns = toNumber(row.max_runs);
+    schedule.runCount = toNumber(row.run_count ?? 0);
+    schedule.runClaims = parseJson<string[]>(row.run_claims) ?? [];
+  }
   return schedule;
 }
 
@@ -95,6 +100,7 @@ function rowToTrigger(row: Record<string, any>): ScheduleTrigger {
 }
 
 export class SchedulesPG extends SchedulesStorage {
+  override supportsRunLimits = true;
   #db: PgDB;
   #client: DbClient;
   #schema: string;
@@ -128,6 +134,11 @@ export class SchedulesPG extends SchedulesStorage {
     await this.#db.createTable({
       tableName: TABLE_SCHEDULES,
       schema: TABLE_SCHEMAS[TABLE_SCHEDULES],
+    });
+    await this.#db.alterTable({
+      tableName: TABLE_SCHEDULES,
+      schema: TABLE_SCHEMAS[TABLE_SCHEDULES],
+      ifNotExists: ['max_runs', 'run_count', 'run_claims'],
     });
     await this.#db.createTable({
       tableName: TABLE_SCHEDULE_TRIGGERS,
@@ -286,6 +297,9 @@ export class SchedulesPG extends SchedulesStorage {
         metadata: schedule.metadata ?? null,
         owner_type: schedule.ownerType ?? null,
         owner_id: schedule.ownerId ?? null,
+        max_runs: schedule.maxRuns ?? null,
+        run_count: schedule.maxRuns === undefined ? null : 0,
+        run_claims: schedule.maxRuns === undefined ? null : [],
       },
     });
     return schedule;
@@ -360,7 +374,13 @@ export class SchedulesPG extends SchedulesStorage {
 
     if ('cron' in patch && patch.cron !== undefined) push('cron = ?', patch.cron);
     if ('timezone' in patch) push('timezone = ?', patch.timezone ?? null);
-    if ('status' in patch && patch.status !== undefined) push('status = ?', patch.status);
+    if (patch.maxRuns !== undefined) push('max_runs = ?', patch.maxRuns);
+    if (patch.status !== undefined || patch.maxRuns !== undefined) {
+      const limitSql = patch.maxRuns === undefined ? 'max_runs' : `$${params.length}::integer`;
+      params.push(patch.status ?? null);
+      setClauses.push(`status = CASE WHEN ${limitSql} IS NOT NULL AND COALESCE(run_count, 0) >= ${limitSql}
+        THEN 'paused' ELSE COALESCE($${params.length}::text, status) END`);
+    }
     if ('nextFireAt' in patch && patch.nextFireAt !== undefined) push('next_fire_at = ?', patch.nextFireAt);
     if ('target' in patch && patch.target !== undefined) {
       push('target = ?::jsonb', JSON.stringify(patch.target));
@@ -410,6 +430,21 @@ export class SchedulesPG extends SchedulesStorage {
   async deleteSchedule(id: string): Promise<void> {
     await this.#client.none(`DELETE FROM ${this.#table(TABLE_SCHEDULE_TRIGGERS)} WHERE schedule_id = $1`, [id]);
     await this.#client.none(`DELETE FROM ${this.#table(TABLE_SCHEDULES)} WHERE id = $1`, [id]);
+  }
+
+  override async claimAgentScheduleRun(id: string, claimId: string, manual: boolean): Promise<boolean> {
+    const result = await this.#client.query(
+      `UPDATE ${this.#table(TABLE_SCHEDULES)}
+       SET run_count = COALESCE(run_count, 0) + 1,
+           run_claims = COALESCE(run_claims, '[]'::jsonb) || jsonb_build_array($2::text),
+           status = CASE WHEN COALESCE(run_count, 0) + 1 >= max_runs THEN 'paused' ELSE status END,
+           updated_at = $4
+       WHERE id = $1 AND max_runs IS NOT NULL AND COALESCE(run_count, 0) < max_runs
+         AND NOT (COALESCE(run_claims, '[]'::jsonb) ? $2::text)
+         AND ($3::boolean OR status = 'active')`,
+      [id, claimId, manual, Date.now()],
+    );
+    return (result.rowCount ?? 0) === 1;
   }
 
   async recordTrigger(trigger: ScheduleTrigger): Promise<void> {

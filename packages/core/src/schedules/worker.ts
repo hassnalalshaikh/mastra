@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { bindToolApprovalContext } from '../agent/tool-approval-context';
 import type { AgentSignal, AgentSignalIfIdleOptions } from '../agent/types';
 import type { Event, EventCallback } from '../events/types';
@@ -150,6 +151,7 @@ export class AgentScheduleWorker extends MastraWorker {
     const actualFireAt = Date.now();
 
     const result = await executeAgentSchedule(mastra, scheduleId, target, {
+      claimId,
       triggerKind: data.triggerKind ?? 'schedule-fire',
       firedAt: new Date(actualFireAt),
       logger: this.deps?.logger,
@@ -230,6 +232,7 @@ type LooseLogger = {
 
 /** Optional context the `AgentScheduleWorker` passes to `executeAgentSchedule`. */
 export interface ExecuteAgentScheduleContext {
+  claimId?: string;
   triggerKind?: 'schedule-fire' | 'manual';
   firedAt?: Date;
   logger?: LooseLogger;
@@ -395,6 +398,35 @@ export async function executeAgentSchedule(
   // Run-level marker carried on the signal / agent run so consumers
   // (typing status, UI badges) can detect that this run was
   // schedule-driven.
+  // Reserve before any model/tool work. History is written after execution and
+  // cannot safely enforce a cap across overlapping deliveries or process restarts.
+  const scheduleStore = await mastra.getStorage()?.getStore('schedules');
+  const currentSchedule = await scheduleStore?.getSchedule(scheduleId);
+  const skipAdmission = async (reason: string) => {
+    await safeHookCall(log, () =>
+      hooks?.onFinish?.({
+        mastra,
+        agentId,
+        schedule: scheduleRef,
+        trigger,
+        outcome: 'skipped',
+        effective,
+      }),
+    );
+    return { status: 'fired' as const, outcome: 'skipped' as const, reason };
+  };
+  if (ctx.claimId && !currentSchedule) {
+    return skipAdmission('Schedule no longer exists');
+  }
+  if (currentSchedule?.maxRuns !== undefined) {
+    const accepted = await scheduleStore!.claimAgentScheduleRun(
+      scheduleId,
+      ctx.claimId ?? randomUUID(),
+      ctx.triggerKind === 'manual',
+    );
+    if (!accepted) return skipAdmission('Schedule paused, exhausted, or already claimed');
+  }
+
   const scheduleRunMeta = {
     scheduleId,
     ...(effective.threadId ? { threadId: effective.threadId } : {}),

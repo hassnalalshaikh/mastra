@@ -14,6 +14,14 @@ type WorkflowTarget = Extract<Schedule['target'], { type: 'workflow' }>;
 /** PubSub topic consumed by the workflow event processor. */
 const TOPIC_WORKFLOWS = 'workflows';
 
+function assertScheduleRunLimit(store: SchedulesStorage, maxRuns: number | undefined): void {
+  if (maxRuns === undefined) return;
+  if (!Number.isSafeInteger(maxRuns) || maxRuns < 1 || maxRuns > 10000) {
+    throw new Error('Schedule maxRuns must be an integer between 1 and 10000');
+  }
+  if (!store.supportsRunLimits) throw new Error('Schedule run limits are not supported by this storage adapter');
+}
+
 /**
  * Slugify the caller-facing portion of a schedule id into a canonical
  * `<prefix><slug>` shape. The slug part is lowercased and stripped of
@@ -57,6 +65,8 @@ function normalizeScheduleId(rawId: string, prefix: string): string {
  * `agentId` field.
  */
 export interface AgentSchedule {
+  maxRuns?: number;
+  runCount?: number;
   id: string;
   agentId: string;
   /** Discriminant mirror — always absent on agent schedules. Check `workflowId` to narrow {@link AnySchedule}. */
@@ -110,6 +120,8 @@ export type AnySchedule = AgentSchedule | WorkflowSchedule;
 
 /** Agent variant of {@link CreateScheduleInput}. */
 export interface CreateAgentScheduleInput {
+  /** Hard lifetime dispatch-attempt limit (1..10000), enforced by supported storage. */
+  maxRuns?: number;
   /**
    * Optional stable id. Normalized to `agent_<slug>` (the `agent_` prefix is
    * added if missing and the rest is slugified). When omitted, a random
@@ -169,6 +181,8 @@ export type CreateScheduleInput = CreateAgentScheduleInput | CreateWorkflowSched
 
 /** Agent variant of {@link UpdateScheduleInput}. */
 export interface UpdateAgentScheduleInput {
+  /** Changes the lifetime ceiling without resetting consumed attempts. */
+  maxRuns?: number;
   cron?: string;
   timezone?: string;
   prompt?: string;
@@ -309,6 +323,7 @@ export class Schedules {
 
     const store = await this.#getStore();
     // Make sure the scheduler + agent-schedule worker are running. Boot-time
+    assertScheduleRunLimit(store, input.maxRuns);
     // detection covers existing rows; imperative creates after
     // startWorkers() need to flip the request flag and lazily inject.
     await this.#mastra.__ensureScheduleRuntimeReady();
@@ -347,6 +362,7 @@ export class Schedules {
       updatedAt: now,
       ownerType: 'agent',
       ownerId: input.agentId,
+      ...(input.maxRuns !== undefined ? { maxRuns: input.maxRuns, runCount: 0, runClaims: [] } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
     };
 
@@ -452,6 +468,13 @@ export class Schedules {
     }
 
     const nextCron = patch.cron ?? existing.cron;
+    const maxRuns = (patch as UpdateAgentScheduleInput).maxRuns;
+    assertScheduleRunLimit(store, maxRuns);
+    if (maxRuns !== undefined && existing.target.type !== 'agent')
+      throw new Error('Run limits require an agent schedule');
+    if (maxRuns !== undefined && existing.maxRuns === undefined) {
+      throw new Error('Set maxRuns when creating a schedule; past attempts of unlimited schedules are not counted');
+    }
     const nextTimezone = patch.timezone !== undefined ? patch.timezone : existing.timezone;
     if (patch.cron !== undefined || patch.timezone !== undefined) {
       validateCron(nextCron, nextTimezone);
@@ -477,6 +500,7 @@ export class Schedules {
       ...(patch.cron !== undefined ? { cron: patch.cron } : {}),
       ...(patch.timezone !== undefined ? { timezone: patch.timezone } : {}),
       target: nextTarget,
+      ...(maxRuns !== undefined ? { maxRuns } : {}),
       ...(nextFireAt !== undefined ? { nextFireAt } : {}),
       ...(patch.metadata !== undefined ? { metadata: patch.metadata } : {}),
       ...(patch.status !== undefined ? { status: patch.status } : {}),
@@ -608,7 +632,7 @@ export class Schedules {
     }
     const now = Date.now();
     if (existing.target.type === 'agent') {
-      const claimId = `manual_${existing.id}_${now}`;
+      const claimId = `manual_${existing.id}_${now}_${randomUUID()}`;
       await this.#mastra.pubsub.publish('agent-schedules', {
         type: 'agent-schedule.fire',
         runId: claimId,
@@ -669,6 +693,7 @@ export function toAgentSchedule(schedule: Schedule): AgentSchedule | null {
   return {
     id: schedule.id,
     agentId: target.agentId,
+    ...(schedule.maxRuns !== undefined ? { maxRuns: schedule.maxRuns, runCount: schedule.runCount ?? 0 } : {}),
     ...(target.name !== undefined ? { name: target.name } : {}),
     ...(target.threadId ? { threadId: target.threadId } : {}),
     ...(target.resourceId ? { resourceId: target.resourceId } : {}),
