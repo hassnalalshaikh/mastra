@@ -13,7 +13,7 @@ const article = [
 describe('fitSnapshotToBudget', () => {
   it('returns a short page unchanged', () => {
     const tree = '- link "Home" @e1\n- button "Go" @e2';
-    expect(fitSnapshotToBudget(tree, { maxChars: 1000 })).toEqual({ snapshot: tree, matched: undefined });
+    expect(fitSnapshotToBudget(tree, { maxChars: 1000 })).toEqual({ snapshot: tree, matches: undefined });
   });
 
   it('keeps every control of a long page, fills the rest in page order and counts what was left out', () => {
@@ -31,20 +31,37 @@ describe('fitSnapshotToBudget', () => {
     );
     expect(result.omitted?.total).toBe(205 - lines.length);
     expect(result.omitted?.byRole).toEqual({ link: 205 - lines.length });
+    expect(result.matches).toBeUndefined();
   });
 
-  it('lists matching elements with find, whatever the limit', () => {
-    const result = fitSnapshotToBudget(article, { maxChars: 1200, find: 'number 150' });
-    expect(result.snapshot).toBe('- link "Article link number 150" @e154');
-    expect(result.matched).toBe(1);
-    expect(result.omitted).toBeUndefined();
-    expect(fitSnapshotToBudget(article, { find: 'nothing like this' })).toEqual({ snapshot: '', matched: 0 });
+  it('with find, keeps the matching elements in view (a left-out link comes back) and lists them', () => {
+    const plain = fitSnapshotToBudget(article, { maxChars: 1200 });
+    expect(plain.snapshot).not.toContain('Powered by MediaWiki');
+    const result = fitSnapshotToBudget(article, { maxChars: 1200, find: 'mediawiki' });
+    expect(result.matches).toEqual(['- link "Powered by MediaWiki" @e205']);
+    expect(result.snapshot.length).toBeLessThanOrEqual(1200);
+    const lines = result.snapshot.split('\n');
+    // Still a page, not a one-line answer: controls and the start of the page stay.
+    expect(lines).toContain('- link "Powered by MediaWiki" @e205');
+    expect(lines).toContain('- searchbox "Search Wikipedia" @e3');
+    expect(lines.length).toBeGreaterThan(10);
+    expect(lines.at(-1)).toBe('- link "Powered by MediaWiki" @e205');
+  });
+
+  it('reports no match with an empty list and keeps the page', () => {
+    const result = fitSnapshotToBudget(article, { maxChars: 1200, find: 'nothing like this' });
+    expect(result.matches).toEqual([]);
+    expect(result.snapshot).toBe(fitSnapshotToBudget(article, { maxChars: 1200 }).snapshot);
   });
 
   it('returns the whole page with showAll or without a limit', () => {
     expect(fitSnapshotToBudget(article, { maxChars: 1200, showAll: true }).snapshot).toBe(article);
     expect(fitSnapshotToBudget(article, {}).snapshot).toBe(article);
     expect(fitSnapshotToBudget(article, { maxChars: 0 }).snapshot).toBe(article);
+    expect(fitSnapshotToBudget(article, { find: 'number 150' })).toEqual({
+      snapshot: article,
+      matches: ['- link "Article link number 150" @e154'],
+    });
   });
 
   it('shortens the controls too when they alone exceed the limit', () => {
@@ -57,8 +74,8 @@ describe('fitSnapshotToBudget', () => {
   it('tells the agent what was left out and how to see it', () => {
     expect(describeOmittedElements({ total: 1377, byRole: { link: 1376, button: 1 } })).toBe(
       'Long page: 1377 more elements not shown (1376 links, 1 button). Every form control is listed. ' +
-        'To see the others, call browser_snapshot with find:"<words from the element>" to list matching elements, ' +
-        'or showAll:true for the whole page.',
+        'To bring others into view, call browser_snapshot with find:"<words from the element>" ' +
+        '(matching elements are always kept and listed in matches), or showAll:true for the whole page.',
     );
   });
 });
