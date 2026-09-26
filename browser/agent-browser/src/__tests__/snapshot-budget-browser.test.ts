@@ -69,8 +69,11 @@ describe.skipIf(!canLaunchBrowser)('AgentBrowser snapshot budget (real browser)'
   it('finds a left-out link by its words and can act on it', async () => {
     const found = await browser.snapshot({ find: 'Section link 350' });
     if (!('snapshot' in found)) throw new Error(`snapshot failed: ${JSON.stringify(found)}`);
-    const ref = /link "Section link 350" (@e\d+)/.exec(found.snapshot)?.[1];
+    expect(found.snapshot.length).toBeLessThanOrEqual(2_000);
+    expect(found.matches).toHaveLength(1);
+    const ref = /link "Section link 350" (@e\d+)/.exec(found.matches![0]!)?.[1];
     expect(ref).toBeDefined();
+    expect(found.snapshot).toContain(`link "Section link 350" ${ref}`);
     const clicked = await browser.click({ ref: ref! });
     expect(clicked).toMatchObject({ success: true });
     const button = /button "Send form" (@e\d+)/.exec(
