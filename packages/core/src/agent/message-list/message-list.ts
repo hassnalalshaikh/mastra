@@ -31,6 +31,7 @@ import { MessageMerger } from './merge';
 import { convertImageFilePart } from './prompt/convert-file';
 import { convertToV1Messages } from './prompt/convert-to-mastra-v1';
 import { downloadAssetsFromMessages } from './prompt/download-assets';
+import { moveCurrentStateSignalsToPromptEnd } from './prompt/state-signal-placement';
 import { MessageStateManager } from './state';
 import type {
   MastraDBMessage,
@@ -429,7 +430,7 @@ export class MessageList {
   }
 
   private getMessagesForModelPrompt(): MastraDBMessage[] {
-    return this.messages.flatMap(message => {
+    return moveCurrentStateSignalsToPromptEnd(this.messages).flatMap(message => {
       if ((message.role as string) !== 'signal') {
         return [message];
       }
