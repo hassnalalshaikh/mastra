@@ -59,6 +59,14 @@ export interface AgentBrowserConfigExtensions {
    * ```
    */
   excludeTools?: BrowserToolName[];
+
+  /**
+   * Largest browser_snapshot text, in characters, returned to the model.
+   * A longer page keeps every form control, fills the rest in page order and
+   * says how many elements were left out; the agent can list them with
+   * `find` or `showAll`. Default: no limit.
+   */
+  snapshotMaxChars?: number;
 }
 
 /**

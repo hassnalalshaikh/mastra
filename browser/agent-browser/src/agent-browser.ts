@@ -43,6 +43,7 @@ import type {
   EvaluateInput,
   ScreenshotInput,
 } from './schemas';
+import { describeOmittedElements, fitSnapshotToBudget } from './snapshot-budget';
 import { AgentBrowserThreadManager } from './thread-manager';
 import type { CreateAgentBrowserThreadManager } from './thread-manager';
 import { createAgentBrowserTools } from './tools';
@@ -945,6 +946,7 @@ export class AgentBrowser extends MastraBrowser {
         url: string;
         title: string;
         elementCount: number;
+        shownElementCount?: number;
         scroll: string;
         hint?: string;
       }
@@ -960,7 +962,13 @@ export class AgentBrowser extends MastraBrowser {
         });
 
         // Transform tree refs from [ref=e1] format to @e1 format for consistency
-        const snapshot = (rawSnapshot.tree ?? '').replace(/\[ref=(\w+)\]/g, '@$1');
+        const fullSnapshot = (rawSnapshot.tree ?? '').replace(/\[ref=(\w+)\]/g, '@$1');
+        const fitted = fitSnapshotToBudget(fullSnapshot, {
+          maxChars: this.browserConfig.snapshotMaxChars,
+          find: input.find,
+          showAll: input.showAll,
+        });
+        const snapshot = fitted.snapshot;
 
         // Get scroll position info
         const scrollInfo = await this.getScrollInfo(threadId);
@@ -973,9 +981,16 @@ export class AgentBrowser extends MastraBrowser {
           scrollText = `${scrollInfo.percentDown}% down`;
         }
 
-        // Count refs
-        const refs = snapshot.match(/@e\d+/g) || [];
+        // Count refs on the whole page; a fitted snapshot may list fewer
+        const refs = fullSnapshot.match(/@e\d+/g) || [];
         const elementCount = new Set(refs).size;
+        const shownElementCount = new Set(snapshot.match(/@e\d+/g) || []).size;
+
+        let hint: string | undefined;
+        if (fitted.omitted) hint = describeOmittedElements(fitted.omitted);
+        else if (fitted.matched === 0) hint = `No element contains "${input.find}". Try other words or showAll:true.`;
+        else if (elementCount === 0)
+          hint = 'No interactive elements found. Try scrolling or setting interactiveOnly:false.';
 
         return {
           success: true,
@@ -983,11 +998,9 @@ export class AgentBrowser extends MastraBrowser {
           url: page.url(),
           title: await page.title(),
           elementCount,
+          ...(shownElementCount !== elementCount ? { shownElementCount } : {}),
           scroll: scrollText,
-          hint:
-            elementCount === 0
-              ? 'No interactive elements found. Try scrolling or setting interactiveOnly:false.'
-              : undefined,
+          hint,
         };
       } catch (error) {
         return this.createErrorFromException(error, 'Snapshot');

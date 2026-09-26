@@ -35,6 +35,16 @@ export type GotoInput = z.output<typeof gotoInputSchema>;
 export const snapshotInputSchema = z.object({
   interactiveOnly: z.boolean().optional().describe('Only include interactive elements (default: true)'),
   maxDepth: z.number().optional().describe('Maximum depth of the tree to return'),
+  find: z
+    .string()
+    .optional()
+    .describe(
+      'Only list elements whose text contains these words (case-insensitive), e.g. a link or button a shortened snapshot left out',
+    ),
+  showAll: z
+    .boolean()
+    .optional()
+    .describe('Return every element even on a very long page (costly; only when find is not enough)'),
 });
 export type SnapshotInput = z.output<typeof snapshotInputSchema>;
 
