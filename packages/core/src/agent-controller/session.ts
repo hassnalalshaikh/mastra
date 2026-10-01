@@ -16,7 +16,7 @@ import type {
   ToolsetsInput,
 } from '../agent/types';
 import { isDurableAgentLike } from '../agent/types';
-import { getErrorFromUnknown, MastraError } from '../error';
+import { ErrorCategory, ErrorDomain, getErrorFromUnknown, MastraError } from '../error';
 import type { MastraModelGatewayInterface } from '../llm/model/gateways';
 import { ModelRouterLanguageModel } from '../llm/model/router';
 import type { MastraModelConfig } from '../llm/model/shared.types';
@@ -1354,12 +1354,14 @@ export class SessionFollowUps {
   }
 
   /** Put a new follow-up at the front so it is sent next (a steer), giving it an id. */
-  enqueueNext(followUp: FollowUp): void {
+  enqueueNext(followUp: FollowUp): string {
+    const id = followUp.id ?? this.#allocateId();
     this.#queue.unshift({
       ...followUp,
-      id: followUp.id ?? this.#allocateId(),
+      id,
       ...(followUp.files ? { files: followUp.files.map(file => ({ ...file })) } : {}),
     });
+    return id;
   }
 
   /** Remove one queued follow-up by id. Returns whether it was queued. */
@@ -4514,17 +4516,24 @@ export class Session<TState = unknown> {
     requestContext,
     followUpId,
   }: {
-    content: string;
+    content?: string;
     files?: FollowUp['files'];
     requestContext?: RequestContext;
     followUpId?: string;
   }): Promise<void> {
     // Claim the native row instead of a client remove/send race that can lose
     // attachments, request context or the entire row when steering fails.
-    const queuedIndex = followUpId ? this.followUps.list().findIndex(item => item.id === followUpId) : -1;
+    const originalQueue = this.followUps.list();
+    const queuedIndex = followUpId ? originalQueue.findIndex(item => item.id === followUpId) : -1;
     const queued = followUpId ? this.followUps.take(followUpId) : undefined;
     if (followUpId && !queued)
-      throw Object.assign(new Error('Queued follow-up is no longer available'), { status: 409 });
+      throw new MastraError({
+        id: 'AGENT_CONTROLLER_FOLLOW_UP_CONFLICT',
+        domain: ErrorDomain.AGENT,
+        category: ErrorCategory.USER,
+        text: 'Queued follow-up is no longer available',
+        details: { status: 409 },
+      });
     if (queued) {
       content = queued.content;
       files = queued.files;
@@ -4532,14 +4541,21 @@ export class Session<TState = unknown> {
     }
     let steeredId: string | undefined;
     try {
+      if (content === undefined)
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_STEER_INVALID_INPUT',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'A message or queued follow-up ID is required',
+          details: { status: 400 },
+        });
       this.createMessageInput({ content, files });
       if (!this.#hasRunInFlight()) {
-        await this.acceptIdleFollowUp({ content, files, requestContext });
         if (queued) this.emitFollowUpQueued();
+        await this.acceptIdleFollowUp({ content, files, requestContext });
         return;
       }
-      this.followUps.enqueueNext({ id: queued?.id, content, files, requestContext, interjection: true });
-      steeredId = this.followUps.list()[0]?.id;
+      steeredId = this.followUps.enqueueNext({ id: queued?.id, content, files, requestContext, interjection: true });
       this.emitFollowUpQueued();
       if (this.run.isRunning() || this.#isTearingDown() || this.#hasParkedRun()) {
         // The run's end (or, for a parked run, Stop itself) sends the queue on.
@@ -4548,11 +4564,17 @@ export class Session<TState = unknown> {
         this.#abortOnRunStart = true;
       }
     } catch (error) {
-      if (steeredId) this.followUps.remove(steeredId);
+      const removed = steeredId ? this.followUps.remove(steeredId) : false;
       if (queued) {
-        this.followUps.requeue(queued, queuedIndex);
-        this.emitFollowUpQueued();
+        const remaining = this.followUps.list();
+        const nextIndex = remaining.findIndex(item => item.id === originalQueue[queuedIndex + 1]?.id);
+        const previousIndex = remaining.findIndex(item => item.id === originalQueue[queuedIndex - 1]?.id);
+        this.followUps.requeue(
+          queued,
+          nextIndex >= 0 ? nextIndex : previousIndex >= 0 ? previousIndex + 1 : queuedIndex,
+        );
       }
+      if (queued || removed) this.emitFollowUpQueued();
       throw error;
     }
   }

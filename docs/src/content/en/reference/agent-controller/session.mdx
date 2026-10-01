@@ -196,7 +196,7 @@ To steer a queued message, pass its native ID. The Session moves that message wi
 
 ```typescript
 const [queued] = session.followUps.list()
-if (queued) await session.steer({ content: '', followUpId: queued.id })
+if (queued) await session.steer({ followUpId: queued.id })
 ```
 
 #### `followUp({ content, files?, requestContext? })`

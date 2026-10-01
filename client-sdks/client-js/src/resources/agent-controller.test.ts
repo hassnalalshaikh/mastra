@@ -128,8 +128,8 @@ describe('AgentController Resource', () => {
 
   it('promotes the queued follow-up by its native ID', async () => {
     mockJson({ ok: true });
-    await client.getAgentController('code').session('user-1').steer({ content: '', followUpId: 'follow-up-7' });
-    expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: '', followUpId: 'follow-up-7' });
+    await client.getAgentController('code').session('user-1').steer({ followUpId: 'follow-up-7' });
+    expect(JSON.parse(lastCall()[1].body as string)).toEqual({ followUpId: 'follow-up-7' });
     expect(lastCall()[0]).toContain('/steer');
   });
 

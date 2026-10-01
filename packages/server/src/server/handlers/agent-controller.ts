@@ -103,7 +103,7 @@ async function getSession(
  * Acknowledges a session operation that keeps running after the response is
  * sent.
  *
- * The messages/steer/follow-up routes answer `{ ok: true }` as soon as the
+ * The messages route answers `{ ok: true }` as soon as the
  * message is handed to the session: the reply itself arrives on the session's
  * SSE stream, so the request must not block for the whole turn. Those session
  * methods can still reject — `sendMessage` deliberately rejects when signal
@@ -140,6 +140,20 @@ function ackBackgroundSessionWork({
       // must not turn a logged failure into a second unhandled rejection.
     }
   });
+}
+
+/** Queue commands acknowledge native admission, not the completion of a turn. */
+async function awaitSessionAcceptance(work: Promise<void>, session: Session<any>): Promise<void> {
+  try {
+    await work;
+  } catch (error) {
+    try {
+      session.emit({ type: 'error', error: error instanceof Error ? error : new Error(String(error)) });
+    } catch {
+      // Preserve the admission error if the session was destroyed meanwhile.
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +211,11 @@ const sendMessageBodySchema = z.object({
     })
     .optional(),
 });
-const steerBodySchema = sendMessageBodySchema.extend({ followUpId: z.string().min(1).optional() });
+const steerBodySchema = sendMessageBodySchema
+  .extend({ message: z.string().optional(), followUpId: z.string().min(1).optional() })
+  .refine(body => body.followUpId !== undefined || body.message !== undefined, {
+    message: 'A message or queued follow-up ID is required',
+  });
 const toolApprovalBodySchema = z.object({
   toolCallId: z.string(),
   approved: z.boolean(),
@@ -890,7 +908,8 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   bodySchema: steerBodySchema,
   responseSchema: ackResponseSchema,
   summary: 'Steer the in-flight run',
-  description: 'Injects a message into the running turn (interjection) without starting a new run.',
+  description:
+    'Stop the current run and send this message next, or promote the original queued message by followUpId. Acknowledges native acceptance, before the reply finishes.',
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
@@ -913,7 +932,7 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      await session.steer({ content: message, files, followUpId, requestContext });
+      await awaitSessionAcceptance(session.steer({ content: message, files, followUpId, requestContext }), session);
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error steering controller session');
@@ -1561,7 +1580,7 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      await session.followUp({ content: message, files, requestContext });
+      await awaitSessionAcceptance(session.followUp({ content: message, files, requestContext }), session);
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error queuing controller follow-up');

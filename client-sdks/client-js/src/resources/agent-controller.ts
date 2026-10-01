@@ -5,9 +5,10 @@ import type {
   MastraMessagePart,
   SessionAbortOptions,
   SessionCommandReceipt,
+  Session,
 } from '@mastra/core/agent-controller';
 /** File data accepted by native Session message commands. */
-export type AgentControllerMessageFile = { data: string; mediaType: string; filename?: string };
+export type AgentControllerMessageFile = NonNullable<Parameters<Session['followUp']>[0]['files']>[number];
 
 export type { MastraDBMessage, MastraMessageContentV2, MastraMessagePart } from '@mastra/core/agent-controller';
 export type { SessionCommandReceipt, SessionAbortOptions } from '@mastra/core/agent-controller';
@@ -694,7 +695,10 @@ export class AgentControllerSession extends BaseResource {
 
   /** Stop the current run and send this message next. With followUpId, content/files are ignored and the original queued message is promoted. */
   async steer(
-    message: string | { content: string; files?: AgentControllerMessageFile[]; followUpId?: string },
+    message:
+      | string
+      | { content: string; files?: AgentControllerMessageFile[]; followUpId?: string }
+      | { content?: string; files?: AgentControllerMessageFile[]; followUpId: string },
     options?: AgentControllerRequestOptions,
   ): Promise<void> {
     const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;

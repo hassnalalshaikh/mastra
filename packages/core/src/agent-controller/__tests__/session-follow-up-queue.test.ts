@@ -45,6 +45,43 @@ function makeHeldRuns(id: string) {
 }
 
 describe('Session follow-up queue items', () => {
+  it('removes a claimed idle row from display immediately and restores it beside remaining neighbors on refusal', async () => {
+    const { agent } = makeHeldRuns('idle-claim-refusal');
+    const controller = new AgentController({
+      id: 'idle-claim-refusal-controller',
+      storage: new InMemoryStore(),
+      modes: [{ id: 'default', name: 'Default', default: true, agent }],
+    });
+    try {
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'idle-claim-owner' });
+      session.followUps.enqueue({ id: 'before', content: 'Before' });
+      session.followUps.enqueue({
+        id: 'selected',
+        content: 'Selected',
+        files: [{ data: 'KEPT', mediaType: 'text/plain' }],
+      });
+      session.followUps.enqueue({ id: 'after', content: 'After' });
+      let refuse!: (error: Error) => void;
+      const accepted = new Promise<never>((_resolve, reject) => {
+        refuse = reject;
+      });
+      vi.spyOn(session, 'sendMessageWithReceipt').mockReturnValue({ accepted } as any);
+      // Hold actual draining: this checks native claim/rollback ordering at the acceptance boundary.
+      vi.spyOn(session, 'drainFollowUpQueue').mockResolvedValue(false);
+      const pending = session.steer({ followUpId: 'selected' });
+      expect(session.displayState.get().queuedFollowUpItems.map(item => item.id)).toEqual(['before', 'after']);
+      session.followUps.remove('before');
+      session.followUps.enqueueNext({ id: 'new-front', content: 'New front' });
+      refuse(new Error('idle admission refused'));
+      await expect(pending).rejects.toThrow('idle admission refused');
+      expect(session.followUps.list().map(item => item.id)).toEqual(['new-front', 'selected', 'after']);
+      expect(session.followUps.take('selected')?.files).toEqual([{ data: 'KEPT', mediaType: 'text/plain' }]);
+    } finally {
+      await controller.destroy();
+    }
+  });
+
   it('keeps the original files and queue order when steering is refused', async () => {
     const { agent, prompts, finish } = makeHeldRuns('refused-steer-file');
     const controller = new AgentController({
@@ -66,6 +103,17 @@ describe('Session follow-up queue items', () => {
       });
       await expect(session.steer({ content: '', followUpId: rows[1]!.id })).rejects.toThrow('abort refused');
       expect(session.followUps.list()).toEqual(rows);
+      const queueEvents: AgentControllerEvent[] = [];
+      session.subscribe(event => {
+        if (event.type === 'follow_up_queued') queueEvents.push(event);
+      });
+      abort.mockImplementationOnce(() => {
+        throw new Error('plain steer refused');
+      });
+      await expect(session.steer({ content: 'New steer' })).rejects.toThrow('plain steer refused');
+      expect(session.followUps.list()).toEqual(rows);
+      expect(queueEvents).toHaveLength(2);
+      expect(queueEvents.at(-1)).toMatchObject({ type: 'follow_up_queued', items: rows });
       abort.mockRestore();
       session.followUps.clear();
       finish(0);
@@ -99,7 +147,7 @@ describe('Session follow-up queue items', () => {
       ).rejects.toThrow('no longer available');
       expect(session.followUps.count()).toBe(2);
       expect(session.run.isRunning()).toBe(true);
-      await session.steer({ content: 'must not replace the native row', followUpId: selected.id });
+      await session.steer({ followUpId: selected.id });
       expect(session.followUps.count()).toBe(2);
       expect(session.followUps.list()[0]!.id).toBe(selected.id);
       await vi.waitFor(() => expect(prompts).toHaveLength(2));

@@ -461,14 +461,17 @@ describe('agent-controller routes', () => {
     it('forwards the native queued ID and returns a conflict when it no longer exists', async () => {
       const session = await getRouteSession('queued-id');
       const spy = vi.spyOn(session, 'steer').mockResolvedValue(undefined);
-      const command = { mastra, controllerId: 'code', resourceId: 'queued-id', message: '', followUpId: 'follow-up-7' };
-      expect(
-        STEER_AGENT_CONTROLLER_SESSION_ROUTE.bodySchema!.safeParse({ message: '', followUpId: 'follow-up-7' }).success,
-      ).toBe(true);
+      const command = { mastra, controllerId: 'code', resourceId: 'queued-id', followUpId: 'follow-up-7' };
+      expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.bodySchema!.safeParse({ followUpId: 'follow-up-7' }).success).toBe(
+        true,
+      );
+      expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.bodySchema!.safeParse({}).success).toBe(false);
       await expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.handler(command as any)).resolves.toEqual({ ok: true });
       expect(spy).toHaveBeenCalledWith(expect.objectContaining({ followUpId: 'follow-up-7' }));
+      const emit = vi.spyOn(session, 'emit');
       spy.mockRejectedValueOnce(Object.assign(new Error('Queued follow-up is no longer available'), { status: 409 }));
       await expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.handler(command as any)).rejects.toMatchObject({ status: 409 });
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
     });
 
     it('forwards requestContext to session.followUp', async () => {
