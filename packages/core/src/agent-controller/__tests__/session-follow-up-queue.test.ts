@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Agent } from '../../agent';
 import { InMemoryStore } from '../../storage/mock';
 import { AgentController } from '../agent-controller';
+import { SessionFollowUps } from '../session';
 import type { AgentControllerEvent } from '../types';
 
 /** A model whose runs stay open until the test closes their stream. */
@@ -45,6 +46,65 @@ function makeHeldRuns(id: string) {
 }
 
 describe('Session follow-up queue items', () => {
+  it('rejects duplicate queue IDs without replacing the original file message', () => {
+    const queue = new SessionFollowUps();
+    const original = { id: 'same-id', content: 'Original', files: [{ data: 'KEPT', mediaType: 'text/plain' }] };
+    queue.enqueue(original);
+    expect(() => queue.enqueue({ id: 'same-id', content: 'Replacement' })).toThrow('already in use');
+    expect(() => queue.enqueueNext({ id: 'same-id', content: 'Replacement' })).toThrow('already in use');
+    expect(queue.count()).toBe(1);
+    expect(queue.take('same-id')).toEqual(original);
+    const revision = queue.revision();
+    queue.clear();
+    expect(queue.requeue(original, 0, revision)).toBe(false);
+    expect(queue.isEmpty()).toBe(true);
+  });
+
+  it.each(['steer', 'drain'] as const)('does not restore a refused %s into a new thread queue', async operation => {
+    const { agent } = makeHeldRuns(`thread-refusal-${operation}`);
+    const controller = new AgentController({
+      id: `thread-refusal-${operation}-controller`,
+      storage: new InMemoryStore(),
+      modes: [{ id: 'default', name: 'Default', default: true, agent }],
+    });
+    try {
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'thread-refusal-owner' });
+      const originalThread = await session.thread.create();
+      session.followUps.enqueue({
+        id: 'selected',
+        content: 'Old row',
+        files: [{ data: 'OLD', mediaType: 'text/plain' }],
+      });
+      let refuse!: (error: Error) => void;
+      const accepted = new Promise<never>((_resolve, reject) => {
+        refuse = reject;
+      });
+      if (operation === 'steer') {
+        vi.spyOn(session, 'sendMessageWithReceipt').mockReturnValue({ accepted } as any);
+        // Keep the new thread's legitimate row queued while checking the old command's rollback.
+        vi.spyOn(session, 'drainFollowUpQueue').mockResolvedValue(false);
+      } else vi.spyOn(agent, 'queueMessage').mockReturnValue({ accepted } as any);
+      const pending = operation === 'steer' ? session.steer({ followUpId: 'selected' }) : session.drainFollowUpQueue();
+      void pending.catch(() => {});
+      if (operation === 'drain') await vi.waitFor(() => expect(agent.queueMessage).toHaveBeenCalled());
+      await session.thread.create();
+      await session.thread.switch({ threadId: originalThread.id });
+      // Switching away and back must still invalidate the old queue, even with the same thread ID.
+      session.followUps.enqueue({
+        id: 'selected',
+        content: 'New row',
+        files: [{ data: 'NEW', mediaType: 'text/plain' }],
+      });
+      refuse(new Error('old admission refused'));
+      await expect(pending).rejects.toThrow('old admission refused');
+      expect(session.followUps.count()).toBe(1);
+      expect(session.followUps.take('selected')?.files).toEqual([{ data: 'NEW', mediaType: 'text/plain' }]);
+    } finally {
+      await controller.destroy();
+    }
+  });
+
   it('removes a claimed idle row from display immediately and restores it beside remaining neighbors on refusal', async () => {
     const { agent } = makeHeldRuns('idle-claim-refusal');
     const controller = new AgentController({

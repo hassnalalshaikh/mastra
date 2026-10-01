@@ -1307,6 +1307,12 @@ export class SessionFollowUps {
   /** Messages waiting to be sent after the current run, in arrival order. */
   #queue: FollowUp[] = [];
   #nextId = 0;
+  #clearRevision = 0;
+
+  /** Identifies the queue scope; clearing invalidates any pending rollback. */
+  revision(): number {
+    return this.#clearRevision;
+  }
 
   /** Number of messages currently queued. */
   count(): number {
@@ -1336,6 +1342,7 @@ export class SessionFollowUps {
 
   /** Append a follow-up to the back of the queue, giving it an id when it has none. */
   enqueue(followUp: FollowUp): void {
+    this.#assertUniqueId(followUp.id);
     this.#queue.push({
       ...followUp,
       id: followUp.id ?? this.#allocateId(),
@@ -1349,12 +1356,16 @@ export class SessionFollowUps {
   }
 
   /** Put a follow-up back at the front (e.g. when draining it failed). */
-  requeue(followUp: FollowUp, index = 0): void {
+  requeue(followUp: FollowUp, index = 0, revision = this.#clearRevision): boolean {
+    if (revision !== this.#clearRevision) return false;
+    this.#assertUniqueId(followUp.id);
     this.#queue.splice(Math.max(0, index), 0, followUp);
+    return true;
   }
 
   /** Put a new follow-up at the front so it is sent next (a steer), giving it an id. */
   enqueueNext(followUp: FollowUp): string {
+    this.#assertUniqueId(followUp.id);
     const id = followUp.id ?? this.#allocateId();
     this.#queue.unshift({
       ...followUp,
@@ -1380,7 +1391,19 @@ export class SessionFollowUps {
 
   /** Drop all queued follow-ups (e.g. on thread switch). */
   clear(): void {
+    this.#clearRevision += 1;
     this.#queue = [];
+  }
+
+  #assertUniqueId(id: string | undefined): void {
+    if (id !== undefined && this.#queue.some(followUp => followUp.id === id))
+      throw new MastraError({
+        id: 'AGENT_CONTROLLER_FOLLOW_UP_CONFLICT',
+        domain: ErrorDomain.AGENT,
+        category: ErrorCategory.USER,
+        text: 'Queued follow-up ID is already in use',
+        details: { status: 409 },
+      });
   }
 
   #allocateId(): string {
@@ -4523,6 +4546,7 @@ export class Session<TState = unknown> {
   }): Promise<void> {
     // Claim the native row instead of a client remove/send race that can lose
     // attachments, request context or the entire row when steering fails.
+    const queueRevision = this.followUps.revision();
     const originalQueue = this.followUps.list();
     const queuedIndex = followUpId ? originalQueue.findIndex(item => item.id === followUpId) : -1;
     const queued = followUpId ? this.followUps.take(followUpId) : undefined;
@@ -4564,15 +4588,16 @@ export class Session<TState = unknown> {
         this.#abortOnRunStart = true;
       }
     } catch (error) {
+      if (queueRevision !== this.followUps.revision()) throw error;
       const removed = steeredId ? this.followUps.remove(steeredId) : false;
       if (queued) {
         const remaining = this.followUps.list();
         const nextIndex = remaining.findIndex(item => item.id === originalQueue[queuedIndex + 1]?.id);
         const previousIndex = remaining.findIndex(item => item.id === originalQueue[queuedIndex - 1]?.id);
-        this.followUps.requeue(
-          queued,
-          nextIndex >= 0 ? nextIndex : previousIndex >= 0 ? previousIndex + 1 : queuedIndex,
-        );
+        let restoreIndex = queuedIndex;
+        if (nextIndex >= 0) restoreIndex = nextIndex;
+        else if (previousIndex >= 0) restoreIndex = previousIndex + 1;
+        this.followUps.requeue(queued, restoreIndex, queueRevision);
       }
       if (queued || removed) this.emitFollowUpQueued();
       throw error;
@@ -4743,6 +4768,7 @@ export class Session<TState = unknown> {
     // the next queued message waits for either to end.
     if (this.followUps.isEmpty() || this.#hasParkedRun() || this.#startingRuns > 0) return false;
 
+    const queueRevision = this.followUps.revision();
     const next = this.followUps.dequeue()!;
     const threadId = this.thread.getId();
     const runStart = this.#holdRunStart();
@@ -4784,8 +4810,7 @@ export class Session<TState = unknown> {
       return true;
     } catch (error) {
       runStart.release();
-      this.followUps.requeue(next);
-      this.emitFollowUpQueued();
+      if (this.followUps.requeue(next, 0, queueRevision)) this.emitFollowUpQueued();
       throw error;
     }
   }
