@@ -20979,7 +20979,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdSteer_QueryParams =
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_Body = {
-  message: string;
+  message?: string | undefined;
   requestContext?:
     | {
         [key: string]: unknown;
