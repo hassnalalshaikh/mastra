@@ -142,20 +142,6 @@ function ackBackgroundSessionWork({
   });
 }
 
-/** Queue commands acknowledge native admission, not the completion of a turn. */
-async function awaitSessionAcceptance(work: Promise<void>, session: Session<any>): Promise<void> {
-  try {
-    await work;
-  } catch (error) {
-    try {
-      session.emit({ type: 'error', error: error instanceof Error ? error : new Error(String(error)) });
-    } catch {
-      // Preserve the admission error if the session was destroyed meanwhile.
-    }
-    throw error;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
@@ -932,7 +918,9 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      await awaitSessionAcceptance(session.steer({ content: message, files, followUpId, requestContext }), session);
+      // Admission refusal belongs to this request. Do not emit a terminal
+      // run error: another run or resumed tool may still be active.
+      await session.steer({ content: message, files, followUpId, requestContext });
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error steering controller session');
@@ -1580,7 +1568,7 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      await awaitSessionAcceptance(session.followUp({ content: message, files, requestContext }), session);
+      await session.followUp({ content: message, files, requestContext });
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error queuing controller follow-up');

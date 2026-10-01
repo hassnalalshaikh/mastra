@@ -471,7 +471,7 @@ describe('agent-controller routes', () => {
       const emit = vi.spyOn(session, 'emit');
       spy.mockRejectedValueOnce(Object.assign(new Error('Queued follow-up is no longer available'), { status: 409 }));
       await expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.handler(command as any)).rejects.toMatchObject({ status: 409 });
-      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
+      expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
     });
 
     it('forwards requestContext to session.followUp', async () => {
