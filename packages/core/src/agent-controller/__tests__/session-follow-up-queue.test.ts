@@ -45,6 +45,117 @@ function makeHeldRuns(id: string) {
 }
 
 describe('Session follow-up queue items', () => {
+  it('keeps the original files and queue order when steering is refused', async () => {
+    const { agent, prompts, finish } = makeHeldRuns('refused-steer-file');
+    const controller = new AgentController({
+      id: 'refused-steer-file-controller',
+      storage: new InMemoryStore(),
+      modes: [{ id: 'default', name: 'Default', default: true, agent }],
+    });
+    try {
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'refused-steer-owner' });
+      const first = session.sendMessage({ content: 'Hold.' });
+      void first.catch(() => {});
+      await vi.waitFor(() => expect(prompts).toHaveLength(1));
+      await session.followUp({ content: 'Earlier row' });
+      await session.followUp({ content: '', files: [{ data: 'KEPT', mediaType: 'text/plain', filename: 'kept.txt' }] });
+      const rows = session.followUps.list();
+      const abort = vi.spyOn(session, 'abort').mockImplementationOnce(() => {
+        throw new Error('abort refused');
+      });
+      await expect(session.steer({ content: '', followUpId: rows[1]!.id })).rejects.toThrow('abort refused');
+      expect(session.followUps.list()).toEqual(rows);
+      abort.mockRestore();
+      session.followUps.clear();
+      finish(0);
+      await first;
+    } finally {
+      await controller.destroy();
+    }
+  }, 15_000);
+
+  it('promotes a queued file message by native id without a remove/send race', async () => {
+    const { agent, prompts, finish } = makeHeldRuns('promote-file');
+    const controller = new AgentController({
+      id: 'promote-file-controller',
+      storage: new InMemoryStore(),
+      modes: [{ id: 'default', name: 'Default', default: true, agent }],
+    });
+    try {
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'promote-file-owner' });
+      const first = session.sendMessage({ content: 'Hold.' });
+      void first.catch(() => {});
+      await vi.waitFor(() => expect(prompts).toHaveLength(1));
+      await session.followUp({ content: 'Other queued message' });
+      await session.followUp({
+        content: '',
+        files: [{ data: 'PROMOTED_FILE', mediaType: 'text/plain', filename: 'promoted.txt' }],
+      });
+      const selected = session.followUps.list()[1]!;
+      await expect(
+        session.steer({ content: 'must not replace the native row', followUpId: 'missing' }),
+      ).rejects.toThrow('no longer available');
+      expect(session.followUps.count()).toBe(2);
+      expect(session.run.isRunning()).toBe(true);
+      await session.steer({ content: 'must not replace the native row', followUpId: selected.id });
+      expect(session.followUps.count()).toBe(2);
+      expect(session.followUps.list()[0]!.id).toBe(selected.id);
+      await vi.waitFor(() => expect(prompts).toHaveLength(2));
+      expect(JSON.stringify(prompts[1])).toContain('PROMOTED_FILE');
+      expect(JSON.stringify(prompts[1])).not.toContain('must not replace');
+      expect(session.followUps.list().map(item => item.content)).toEqual(['Other queued message']);
+      finish(1);
+      await vi.waitFor(() => expect(prompts).toHaveLength(3));
+      finish(2);
+      await first.catch(() => {});
+      await vi.waitFor(() => expect(session.displayState.get().isRunning).toBe(false));
+    } finally {
+      await controller.destroy();
+    }
+  }, 15_000);
+
+  it('keeps files in native queue snapshots and converts them when a queued message runs', async () => {
+    const { agent, prompts, finish } = makeHeldRuns('queued-files');
+    const controller = new AgentController({
+      id: 'queued-files-controller',
+      storage: new InMemoryStore(),
+      modes: [{ id: 'default', name: 'Default', default: true, agent }],
+    });
+    try {
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'queued-files-owner' });
+      const first = session.sendMessage({ content: 'Hold.' });
+      void first.catch(() => {});
+      await vi.waitFor(() => expect(prompts).toHaveLength(1));
+      const files = [
+        {
+          data: 'data:text/plain;base64,' + Buffer.from('KEPT_FILE_DATA').toString('base64'),
+          mediaType: 'text/plain',
+          filename: 'notes.txt',
+        },
+      ];
+      await session.followUp({ content: '', files });
+      const queued = session.followUps.list()[0]!;
+      expect(queued.files).toEqual([{ mediaType: 'text/plain', filename: 'notes.txt' }]);
+      expect(JSON.stringify(session.displayState.get().queuedFollowUpItems)).not.toContain('base64,');
+      files[0]!.data = 'changed by caller';
+      queued.files![0]!.filename = 'changed display copy';
+      expect(session.followUps.list()[0]!.files![0]!.filename).toBe('notes.txt');
+      finish(0);
+      await first;
+      await vi.waitFor(() => expect(prompts).toHaveLength(2));
+      expect(JSON.stringify(prompts[1])).toContain('KEPT_FILE_DATA');
+      expect(JSON.stringify(prompts[1])).toContain('notes.txt');
+      expect(JSON.stringify(prompts[1])).not.toContain('changed');
+      finish(1);
+      await vi.waitFor(() => expect(session.displayState.get().isRunning).toBe(false));
+    } finally {
+      await controller.destroy();
+    }
+  }, 15_000);
+
   it('lists queued follow-ups with ids, removes one by id, and drains the rest in order', async () => {
     const { agent, prompts, finish } = makeHeldRuns('follow-up-queue-items');
     const controller = new AgentController({
@@ -122,10 +233,16 @@ describe('Session follow-up queue items', () => {
       const first = session.sendMessage({ content: 'Hold the first instruction.' });
       void first.catch(() => {});
       await vi.waitFor(() => expect(session.displayState.get().isRunning).toBe(true));
-      await session.followUp({ content: 'Queued first.' });
+      await session.followUp({
+        content: 'Queued first.',
+        files: [{ data: 'FIRST_FILE_DATA', mediaType: 'text/plain', filename: 'first.txt' }],
+      });
       await session.followUp({ content: 'Queued second.' });
 
-      await session.steer({ content: 'Change course now.' });
+      await session.steer({
+        content: 'Change course now.',
+        files: [{ data: 'STEER_FILE_DATA', mediaType: 'text/plain', filename: 'steer.txt' }],
+      });
       // The steered message is next; the queue keeps its order behind it.
       expect(session.followUps.list().map(item => item.content)).toEqual([
         'Change course now.',
@@ -136,12 +253,14 @@ describe('Session follow-up queue items', () => {
       // The aborted run ends, then each message runs on its own.
       await vi.waitFor(() => expect(prompts).toHaveLength(2));
       expect(JSON.stringify(prompts[1])).toContain('Change course now.');
+      expect(JSON.stringify(prompts[1])).toContain('STEER_FILE_DATA');
       expect(JSON.stringify(prompts[1])).not.toContain('Queued first.');
       expect(session.followUps.list().map(item => item.content)).toEqual(['Queued first.', 'Queued second.']);
 
       finish(1);
       await vi.waitFor(() => expect(prompts).toHaveLength(3));
       expect(JSON.stringify(prompts[2])).toContain('Queued first.');
+      expect(JSON.stringify(prompts[2])).toContain('FIRST_FILE_DATA');
       expect(JSON.stringify(prompts[2])).not.toContain('Queued second.');
 
       finish(2);
@@ -165,81 +284,96 @@ describe('Session follow-up queue items', () => {
     }
   }, 20_000);
 
-  it('queues messages sent while a run is still starting and runs each on its own', async () => {
-    const { agent, prompts, finish } = makeHeldRuns('follow-up-queue-starting');
-    const controller = new AgentController({
-      id: 'follow-up-queue-starting-controller',
-      storage: new InMemoryStore(),
-      modes: [{ id: 'default', name: 'Default', default: true, agent }],
-    });
-    try {
-      await controller.init();
-      const session = await controller.createSession({ resourceId: 'owner-starting' });
-      const first = session.sendMessage({ content: 'First instruction.' });
-      void first.catch(() => {});
-      // The run has not started yet: these must not be folded into its first request.
-      await session.followUp({ content: 'Second instruction.' });
-      await session.followUp({ content: 'Third instruction.' });
-      expect(session.followUps.list().map(item => item.content)).toEqual(['Second instruction.', 'Third instruction.']);
-
-      await vi.waitFor(() => expect(prompts).toHaveLength(1));
-      expect(JSON.stringify(prompts[0])).toContain('First instruction.');
-      expect(JSON.stringify(prompts[0])).not.toContain('Second instruction.');
-
-      finish(0);
-      await vi.waitFor(() => expect(prompts).toHaveLength(2));
-      expect(JSON.stringify(prompts[1])).toContain('Second instruction.');
-      expect(JSON.stringify(prompts[1])).not.toContain('Third instruction.');
-
-      finish(1);
-      await vi.waitFor(() => expect(prompts).toHaveLength(3));
-      expect(JSON.stringify(prompts[2])).toContain('Third instruction.');
-
-      finish(2);
-      await first;
-      await vi.waitFor(() => {
-        expect(session.displayState.get().isRunning).toBe(false);
-        expect(session.followUps.count()).toBe(0);
+  it.each(['sendMessage', 'followUp', 'steer'] as const)(
+    '%s keeps messages separate while an idle run starts',
+    async method => {
+      const { agent, prompts, finish } = makeHeldRuns('follow-up-queue-starting');
+      const controller = new AgentController({
+        id: 'follow-up-queue-starting-controller',
+        storage: new InMemoryStore(),
+        modes: [{ id: 'default', name: 'Default', default: true, agent }],
       });
-    } finally {
-      await controller.destroy();
-    }
-  }, 20_000);
+      try {
+        await controller.init();
+        const session = await controller.createSession({ resourceId: 'owner-starting' });
+        const first = session[method]({ content: 'First instruction.' });
+        void first.catch(() => {});
+        // The run has not started yet: these must not be folded into its first request.
+        await session.followUp({ content: 'Second instruction.' });
+        await session.followUp({ content: 'Third instruction.' });
+        expect(session.followUps.list().map(item => item.content)).toEqual([
+          'Second instruction.',
+          'Third instruction.',
+        ]);
 
-  it('moves the queue on when the send ahead of it never becomes a run', async () => {
-    const { agent, prompts, finish } = makeHeldRuns('follow-up-queue-refused');
-    const controller = new AgentController({
-      id: 'follow-up-queue-refused-controller',
-      storage: new InMemoryStore(),
-      modes: [{ id: 'default', name: 'Default', default: true, agent }],
-    });
-    try {
-      await controller.init();
-      const session = await controller.createSession({ resourceId: 'owner-refused' });
-      vi.spyOn(agent, 'sendSignal').mockImplementationOnce(
-        () =>
-          ({
-            signal: { id: 'refused', type: 'user-message', contents: 'Refused instruction.' },
-            accepted: Promise.reject(new Error('refused before start')),
-          }) as any,
-      );
-      const first = session.sendMessage({ content: 'Refused instruction.' });
-      await session.followUp({ content: 'Queued behind the refused send.' });
-      expect(session.followUps.count()).toBe(1);
-      await expect(first).rejects.toThrow('refused before start');
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(JSON.stringify(prompts[0])).toContain('First instruction.');
+        expect(JSON.stringify(prompts[0])).not.toContain('Second instruction.');
 
-      // Nothing started, so no run end will send the queue: it moves on at once.
-      await vi.waitFor(() => expect(prompts).toHaveLength(1));
-      expect(JSON.stringify(prompts[0])).toContain('Queued behind the refused send.');
-      finish(0);
-      await vi.waitFor(() => {
-        expect(session.displayState.get().isRunning).toBe(false);
-        expect(session.followUps.count()).toBe(0);
+        finish(0);
+        await vi.waitFor(() => expect(prompts).toHaveLength(2));
+        expect(JSON.stringify(prompts[1])).toContain('Second instruction.');
+        expect(JSON.stringify(prompts[1])).not.toContain('Third instruction.');
+
+        finish(1);
+        await vi.waitFor(() => expect(prompts).toHaveLength(3));
+        expect(JSON.stringify(prompts[2])).toContain('Third instruction.');
+
+        finish(2);
+        await first;
+        await vi.waitFor(() => {
+          expect(session.displayState.get().isRunning).toBe(false);
+          expect(session.followUps.count()).toBe(0);
+        });
+      } finally {
+        await controller.destroy();
+      }
+    },
+    20_000,
+  );
+
+  it.each(['sendMessage', 'followUp', 'steer'] as const)(
+    '%s releases a refused idle send so queued files can run',
+    async method => {
+      const { agent, prompts, finish } = makeHeldRuns('follow-up-queue-refused');
+      const controller = new AgentController({
+        id: 'follow-up-queue-refused-controller',
+        storage: new InMemoryStore(),
+        modes: [{ id: 'default', name: 'Default', default: true, agent }],
       });
-    } finally {
-      await controller.destroy();
-    }
-  }, 20_000);
+      try {
+        await controller.init();
+        const session = await controller.createSession({ resourceId: 'owner-refused' });
+        vi.spyOn(agent, 'sendSignal').mockImplementationOnce(
+          () =>
+            ({
+              signal: { id: 'refused', type: 'user-message', contents: 'Refused instruction.' },
+              accepted: Promise.reject(new Error('refused before start')),
+            }) as any,
+        );
+        const first = session[method]({ content: 'Refused instruction.' });
+        await session.followUp({
+          content: 'Queued behind the refused send.',
+          files: [{ data: 'KEPT_AFTER_REFUSAL', mediaType: 'text/plain', filename: 'kept.txt' }],
+        });
+        expect(session.followUps.count()).toBe(1);
+        await expect(first).rejects.toThrow('refused before start');
+
+        // Nothing started, so no run end will send the queue: it moves on at once.
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(JSON.stringify(prompts[0])).toContain('Queued behind the refused send.');
+        expect(JSON.stringify(prompts[0])).toContain('KEPT_AFTER_REFUSAL');
+        finish(0);
+        await vi.waitFor(() => {
+          expect(session.displayState.get().isRunning).toBe(false);
+          expect(session.followUps.count()).toBe(0);
+        });
+      } finally {
+        await controller.destroy();
+      }
+    },
+    20_000,
+  );
 });
 
 describe('Session follow-ups behind a parked run', () => {

@@ -20985,6 +20985,14 @@ export type PostAgentControllerControllerIdSessionsResourceIdSteer_Body = {
         [key: string]: unknown;
       }
     | undefined;
+  files?:
+    | {
+        data: string;
+        mediaType: string;
+        filename?: string | undefined;
+      }[]
+    | undefined;
+  followUpId?: string | undefined;
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_Response =
@@ -21025,7 +21033,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_QueryParam
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
 export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Body =
-  PostAgentControllerControllerIdSessionsResourceIdSteer_Body;
+  PostAgentControllerControllerIdSessionsResourceIdMessages_Body;
 
 export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Response =
   DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;

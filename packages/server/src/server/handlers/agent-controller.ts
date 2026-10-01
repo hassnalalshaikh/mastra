@@ -197,7 +197,7 @@ const sendMessageBodySchema = z.object({
     })
     .optional(),
 });
-const steerBodySchema = z.object({ message: z.string(), requestContext: bodyRequestContextSchema });
+const steerBodySchema = sendMessageBodySchema.extend({ followUpId: z.string().min(1).optional() });
 const toolApprovalBodySchema = z.object({
   toolCallId: z.string(),
   approved: z.boolean(),
@@ -251,7 +251,7 @@ const listThreadsQuerySchema = z.object({
     }, z.record(z.string(), z.string()).optional())
     .optional(),
 });
-const followUpBodySchema = z.object({ message: z.string(), requestContext: bodyRequestContextSchema });
+const followUpBodySchema = sendMessageBodySchema;
 
 const sendNotificationBodySchema = z.object({
   source: z.string(),
@@ -894,7 +894,17 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, sessionThreadId, message, requestContext }) => {
+  handler: async ({
+    mastra,
+    controllerId,
+    resourceId,
+    sessionScope,
+    sessionThreadId,
+    message,
+    files,
+    followUpId,
+    requestContext,
+  }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(
@@ -903,12 +913,7 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      ackBackgroundSessionWork({
-        work: session.steer({ content: message, requestContext }),
-        session,
-        mastra,
-        operation: 'steer',
-      });
+      await session.steer({ content: message, files, followUpId, requestContext });
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error steering controller session');
@@ -1538,7 +1543,16 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, sessionThreadId, message, requestContext }) => {
+  handler: async ({
+    mastra,
+    controllerId,
+    resourceId,
+    sessionScope,
+    sessionThreadId,
+    message,
+    files,
+    requestContext,
+  }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(
@@ -1547,12 +1561,7 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      ackBackgroundSessionWork({
-        work: session.followUp({ content: message, requestContext }),
-        session,
-        mastra,
-        operation: 'followUp',
-      });
+      await session.followUp({ content: message, files, requestContext });
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error queuing controller follow-up');

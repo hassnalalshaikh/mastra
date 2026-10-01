@@ -326,11 +326,7 @@ describe('agent-controller routes', () => {
       return controller.createSession({ resourceId, id: resourceId, ownerId: controller.id });
     }
 
-    const cases = [
-      { name: 'sendMessage', method: 'sendMessage', route: SEND_AGENT_CONTROLLER_MESSAGE_ROUTE },
-      { name: 'steer', method: 'steer', route: STEER_AGENT_CONTROLLER_SESSION_ROUTE },
-      { name: 'followUp', method: 'followUp', route: FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE },
-    ] as const;
+    const cases = [{ name: 'sendMessage', method: 'sendMessage', route: SEND_AGENT_CONTROLLER_MESSAGE_ROUTE }] as const;
 
     for (const { name, method, route } of cases) {
       it(`still acks, logs, and emits an error event when session.${name} rejects`, async () => {
@@ -454,7 +450,25 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'change course', requestContext });
+      expect(spy).toHaveBeenCalledWith({
+        content: 'change course',
+        files: undefined,
+        followUpId: undefined,
+        requestContext,
+      });
+    });
+
+    it('forwards the native queued ID and returns a conflict when it no longer exists', async () => {
+      const session = await getRouteSession('queued-id');
+      const spy = vi.spyOn(session, 'steer').mockResolvedValue(undefined);
+      const command = { mastra, controllerId: 'code', resourceId: 'queued-id', message: '', followUpId: 'follow-up-7' };
+      expect(
+        STEER_AGENT_CONTROLLER_SESSION_ROUTE.bodySchema!.safeParse({ message: '', followUpId: 'follow-up-7' }).success,
+      ).toBe(true);
+      await expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.handler(command as any)).resolves.toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ followUpId: 'follow-up-7' }));
+      spy.mockRejectedValueOnce(Object.assign(new Error('Queued follow-up is no longer available'), { status: 409 }));
+      await expect(STEER_AGENT_CONTROLLER_SESSION_ROUTE.handler(command as any)).rejects.toMatchObject({ status: 409 });
     });
 
     it('forwards requestContext to session.followUp', async () => {
@@ -470,7 +484,7 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', requestContext });
+      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', files: undefined, requestContext });
     });
 
     it('removes one queued follow-up by id', async () => {
@@ -486,6 +500,28 @@ describe('agent-controller routes', () => {
 
       expect(res).toEqual({ ok: true });
       expect(spy).toHaveBeenCalledWith({ id: 'follow-up-7-abc123' });
+    });
+
+    it.each([
+      ['steer', STEER_AGENT_CONTROLLER_SESSION_ROUTE],
+      ['followUp', FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE],
+    ] as const)('%s validates and forwards files, and refuses failed native acceptance', async (method, route) => {
+      const session = await getRouteSession(`attached-${method}`);
+      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+      expect(route.bodySchema!.safeParse({ message: '', files }).success).toBe(true);
+      expect(
+        route.bodySchema!.safeParse({ message: '', files: [{ ...files[0], data: 'a'.repeat(14 * 1024 * 1024 + 1) }] })
+          .success,
+      ).toBe(false);
+      const spy = vi.spyOn(session, method).mockResolvedValue(undefined);
+      await expect(
+        route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
+      ).resolves.toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ content: '', files }));
+      spy.mockRejectedValueOnce(new Error('Native command refused'));
+      await expect(
+        route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
+      ).rejects.toThrow('Native command refused');
     });
 
     it('forwards requestContext to session.respondToToolApproval', async () => {

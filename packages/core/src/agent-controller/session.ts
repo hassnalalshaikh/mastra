@@ -1284,6 +1284,8 @@ export interface FollowUp {
   id?: string;
   /** The message text to send. */
   content: string;
+  /** Original file data, converted through the normal message path when dispatched. */
+  files?: Array<{ data: string; mediaType: string; filename?: string }>;
   /** Optional request context to apply when the queued message is sent. */
   requestContext?: RequestContext;
   /**
@@ -1318,12 +1320,27 @@ export class SessionFollowUps {
 
   /** The queued follow-ups in send order, as a UI lists them (id and text). */
   list(): QueuedFollowUpItem[] {
-    return this.#queue.map(followUp => ({ id: followUp.id ?? '', content: followUp.content }));
+    return this.#queue.map(followUp => ({
+      id: followUp.id ?? '',
+      content: followUp.content,
+      ...(followUp.files?.length
+        ? {
+            files: followUp.files.map(({ mediaType, filename }) => ({
+              mediaType,
+              ...(filename === undefined ? {} : { filename }),
+            })),
+          }
+        : {}),
+    }));
   }
 
   /** Append a follow-up to the back of the queue, giving it an id when it has none. */
   enqueue(followUp: FollowUp): void {
-    this.#queue.push(followUp.id ? followUp : { ...followUp, id: this.#allocateId() });
+    this.#queue.push({
+      ...followUp,
+      id: followUp.id ?? this.#allocateId(),
+      ...(followUp.files ? { files: followUp.files.map(file => ({ ...file })) } : {}),
+    });
   }
 
   /** Remove and return the next follow-up, or undefined when empty. */
@@ -1332,13 +1349,17 @@ export class SessionFollowUps {
   }
 
   /** Put a follow-up back at the front (e.g. when draining it failed). */
-  requeue(followUp: FollowUp): void {
-    this.#queue.unshift(followUp);
+  requeue(followUp: FollowUp, index = 0): void {
+    this.#queue.splice(Math.max(0, index), 0, followUp);
   }
 
   /** Put a new follow-up at the front so it is sent next (a steer), giving it an id. */
   enqueueNext(followUp: FollowUp): void {
-    this.#queue.unshift(followUp.id ? followUp : { ...followUp, id: this.#allocateId() });
+    this.#queue.unshift({
+      ...followUp,
+      id: followUp.id ?? this.#allocateId(),
+      ...(followUp.files ? { files: followUp.files.map(file => ({ ...file })) } : {}),
+    });
   }
 
   /** Remove one queued follow-up by id. Returns whether it was queued. */
@@ -1347,6 +1368,12 @@ export class SessionFollowUps {
     if (index === -1) return false;
     this.#queue.splice(index, 1);
     return true;
+  }
+
+  /** Claim one queued message, including its files and original request context. */
+  take(id: string): FollowUp | undefined {
+    const index = this.#queue.findIndex(followUp => followUp.id === id);
+    return index < 0 ? undefined : this.#queue.splice(index, 1)[0];
   }
 
   /** Drop all queued follow-ups (e.g. on thread switch). */
@@ -4481,18 +4508,52 @@ export class Session<TState = unknown> {
    * Queued follow-ups stay queued and run after it, one at a time. From an idle
    * session the message is sent right away.
    */
-  async steer({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
-    if (!this.#hasRunInFlight()) {
-      await this.sendMessage({ content, requestContext });
-      return;
+  async steer({
+    content,
+    files,
+    requestContext,
+    followUpId,
+  }: {
+    content: string;
+    files?: FollowUp['files'];
+    requestContext?: RequestContext;
+    followUpId?: string;
+  }): Promise<void> {
+    // Claim the native row instead of a client remove/send race that can lose
+    // attachments, request context or the entire row when steering fails.
+    const queuedIndex = followUpId ? this.followUps.list().findIndex(item => item.id === followUpId) : -1;
+    const queued = followUpId ? this.followUps.take(followUpId) : undefined;
+    if (followUpId && !queued)
+      throw Object.assign(new Error('Queued follow-up is no longer available'), { status: 409 });
+    if (queued) {
+      content = queued.content;
+      files = queued.files;
+      requestContext = queued.requestContext;
     }
-    this.followUps.enqueueNext({ content, requestContext, interjection: true });
-    this.emitFollowUpQueued();
-    if (this.run.isRunning() || this.#isTearingDown() || this.#hasParkedRun()) {
-      // The run's end (or, for a parked run, Stop itself) sends the queue on.
-      this.abort();
-    } else {
-      this.#abortOnRunStart = true;
+    let steeredId: string | undefined;
+    try {
+      this.createMessageInput({ content, files });
+      if (!this.#hasRunInFlight()) {
+        await this.acceptIdleFollowUp({ content, files, requestContext });
+        if (queued) this.emitFollowUpQueued();
+        return;
+      }
+      this.followUps.enqueueNext({ id: queued?.id, content, files, requestContext, interjection: true });
+      steeredId = this.followUps.list()[0]?.id;
+      this.emitFollowUpQueued();
+      if (this.run.isRunning() || this.#isTearingDown() || this.#hasParkedRun()) {
+        // The run's end (or, for a parked run, Stop itself) sends the queue on.
+        this.abort();
+      } else {
+        this.#abortOnRunStart = true;
+      }
+    } catch (error) {
+      if (steeredId) this.followUps.remove(steeredId);
+      if (queued) {
+        this.followUps.requeue(queued, queuedIndex);
+        this.emitFollowUpQueued();
+      }
+      throw error;
     }
   }
 
@@ -4593,13 +4654,37 @@ export class Session<TState = unknown> {
    * into any of those would be folded into that run together with every other
    * message sent meanwhile, so those wait in the queue and run one at a time.
    */
-  async followUp({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
+  async followUp({
+    content,
+    files,
+    requestContext,
+  }: {
+    content: string;
+    files?: FollowUp['files'];
+    requestContext?: RequestContext;
+  }): Promise<void> {
+    this.createMessageInput({ content, files });
     if (this.#hasRunInFlight()) {
-      this.followUps.enqueue({ content, requestContext });
+      this.followUps.enqueue({ content, files, requestContext });
       this.emitFollowUpQueued();
       return;
     }
-    await this.sendMessage({ content, requestContext });
+    await this.acceptIdleFollowUp({ content, files, requestContext });
+  }
+
+  /** Keep the native run-start hold until the accepted idle message starts. */
+  private async acceptIdleFollowUp(input: {
+    content: string;
+    files?: FollowUp['files'];
+    requestContext?: RequestContext;
+  }): Promise<void> {
+    const hold = this.#holdRunStart();
+    try {
+      await this.sendMessageWithReceipt(input).accepted;
+    } catch (error) {
+      this.#settleRunStart(hold, true);
+      throw error;
+    }
   }
 
   /**
@@ -4650,7 +4735,7 @@ export class Session<TState = unknown> {
           tracingContext: options?.tracingContext,
           tracingOptions: options?.tracingOptions,
         });
-        const contents = this.createMessageInput({ content: next.content });
+        const contents = this.createMessageInput({ content: next.content, files: next.files });
         const message = next.interjection ? { contents, attributes: { delivery: 'while-active' as const } } : contents;
         const result = agent.queueMessage(message, {
           resourceId: this.identity.getResourceId(),
@@ -4668,6 +4753,7 @@ export class Session<TState = unknown> {
         this.emitFollowUpQueued();
         await this.sendMessage({
           content: next.content,
+          files: next.files,
           requestContext: next.requestContext,
           tracingContext: options?.tracingContext,
           tracingOptions: options?.tracingOptions,

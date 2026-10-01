@@ -184,20 +184,32 @@ await session.sendMessage({
 })
 ```
 
-#### `steer({ content, requestContext? })`
+#### `steer({ content, files?, followUpId?, requestContext? })`
 
-Queue steering content into an active run.
+Stop the current run and send this message next. Files use the same conversion as `sendMessage`. Other queued messages keep their order. The promise resolves after queue acceptance or idle delivery acceptance, without waiting for the answer.
 
 ```typescript
 await session.steer({ content: 'Focus on the failing tests.' })
 ```
 
-#### `followUp({ content, requestContext? })`
+To steer a queued message, pass its native ID. The Session moves that message with its files and original request context. A missing ID rejects before changing the queue or stopping the run.
+
+```typescript
+const [queued] = session.followUps.list()
+if (queued) await session.steer({ content: '', followUpId: queued.id })
+```
+
+#### `followUp({ content, files?, requestContext? })`
 
 Queue a follow-up while a run is active, or send it immediately while idle.
 
+Files stay in the native queue and appear in `displayState.queuedFollowUpItems`. They use normal message conversion when dispatched. The promise resolves after queue acceptance or idle delivery acceptance. Follow-ups remain in memory and don't survive process recreation.
+
 ```typescript
-await session.followUp({ content: 'Then propose a fix.' })
+await session.followUp({
+  content: 'Then review these notes.',
+  files: [{ data: notes, mediaType: 'text/plain', filename: 'notes.txt' }],
+})
 ```
 
 #### `removeFollowUp({ id })`

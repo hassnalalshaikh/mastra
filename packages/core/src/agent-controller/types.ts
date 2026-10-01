@@ -724,6 +724,8 @@ export interface AgentControllerDisplayState {
 export interface QueuedFollowUpItem {
   id: string;
   content: string;
+  /** Display metadata only. Original file data stays in the native queue. */
+  files?: Array<{ mediaType: string; filename?: string }>;
 }
 
 export function defaultDisplayState(): AgentControllerDisplayState {
