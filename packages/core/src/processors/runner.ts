@@ -29,7 +29,6 @@ import type { MastraModelOutput } from '../stream/base/output';
 import type { LanguageModelUsage, ProviderMetadata } from '../stream/types';
 import { isProcessorWorkflow } from './is-processor-workflow';
 import { normalizeProcessedText, textParts } from './processed-text';
-import { isMaybeAnthropicWithoutAssistantPrefill } from './provider-history-compat';
 import { createProcessorSendSignal } from './send-signal';
 import {
   summarizeActiveToolsForSpan,
@@ -40,7 +39,7 @@ import {
 } from './span-payload';
 import type { ProcessorStepOutput } from './step-schema';
 import { REPROCESS_PART_KEY } from './stream-reprocess';
-import { TrailingAssistantGuard } from './trailing-assistant-guard';
+import { needsTrailingAssistantGuard, TrailingAssistantGuard } from './trailing-assistant-guard';
 import type {
   CachedLLMStepChunk,
   CachedLLMStepResponse,
@@ -1408,9 +1407,8 @@ export class ProcessorRunner {
       retryCount: args.retryCount ?? 0,
     };
 
-    // Append the trailing assistant guard when the resolved model does not support assistant prefill
     const processors =
-      stepInput.model && isMaybeAnthropicWithoutAssistantPrefill(stepInput.model)
+      stepInput.model && needsTrailingAssistantGuard(stepInput.model, this.inputProcessors)
         ? [...this.inputProcessors, new TrailingAssistantGuard()]
         : this.inputProcessors;
 
@@ -1477,6 +1475,13 @@ export class ProcessorRunner {
       const computeStateSignal = processor.computeStateSignal?.bind(processor);
       if (!processMethod && !computeStateSignal) {
         // Skip processors that don't implement per-step input hooks
+        continue;
+      }
+
+      // The guard is attached speculatively whenever a processor could have swapped the
+      // model. Now that every user processor has run, `stepInput.model` is final: skip the
+      // guard before creating a span so a no-op never shows up in exported traces.
+      if (processorOrWorkflow instanceof TrailingAssistantGuard && !processorOrWorkflow.appliesTo(stepInput.model)) {
         continue;
       }
 
