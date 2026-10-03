@@ -2,6 +2,7 @@ import type { IMastraLogger } from '../../logger';
 import type { MemoryConfigInternal } from '../../memory';
 import type { MastraMemory } from '../../memory/memory';
 import type { MessageList } from '../message-list';
+import { hasToolCompletion, indexToolCompletions } from '../message-list/tool-completion-index';
 import { noteThreadMessagesSaved } from '../thread-saves';
 
 export class SaveQueueManager {
@@ -120,7 +121,22 @@ export class SaveQueueManager {
       const savedAt = Date.now();
       await memory.saveMessages({ messages, memoryConfig });
       noteThreadMessagesSaved({ threadId, resourceId: messages.find(m => m.resourceId)?.resourceId, savedAt });
+      if (hasToolCompletion(messages)) await this.indexCompletions(messages);
     });
+  }
+
+  /**
+   * Record saved tool completions in the bounded thread-state display index.
+   * The messages are already durable; an index failure only narrows what a
+   * bounded history window can surface, so it is reported, never retried as a save.
+   */
+  private async indexCompletions(messages: Parameters<typeof indexToolCompletions>[1]) {
+    try {
+      const store = await this.memory?.storage.getStore('threadState');
+      if (store) await indexToolCompletions(store, messages);
+    } catch (error) {
+      this.logger?.warn('Failed to index saved tool completions', { error });
+    }
   }
 
   /**
