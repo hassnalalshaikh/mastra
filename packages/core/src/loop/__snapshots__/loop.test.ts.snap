@@ -855,7 +855,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
         "value": "value",
       },
       "providerExecuted": undefined,
-      "providerMetadata": undefined,
+      "providerMetadata": {
+        "mastra": {
+          "toolCompletion": {},
+        },
+      },
       "result": "value-result",
       "toolCallId": "call-1",
       "toolName": "tool1",
@@ -885,6 +889,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -901,6 +910,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -918,6 +932,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -934,6 +953,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -977,6 +1001,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1059,6 +1088,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -1075,6 +1109,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -1208,6 +1247,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1224,6 +1268,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -1250,6 +1299,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1266,6 +1320,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -1318,6 +1377,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1400,6 +1464,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -1416,6 +1485,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -1501,6 +1575,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1517,6 +1596,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -1543,6 +1627,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1559,6 +1648,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -1611,6 +1705,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -1693,6 +1792,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -1709,6 +1813,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -4798,7 +4907,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
         "value": "value",
       },
       "providerExecuted": undefined,
-      "providerMetadata": undefined,
+      "providerMetadata": {
+        "mastra": {
+          "toolCompletion": {},
+        },
+      },
       "result": "value-result",
       "toolCallId": "call-1",
       "toolName": "tool1",
@@ -4828,6 +4941,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -4844,6 +4962,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -4861,6 +4984,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -4877,6 +5005,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -4920,6 +5053,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5002,6 +5140,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -5018,6 +5161,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -5151,6 +5299,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5167,6 +5320,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -5193,6 +5351,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5209,6 +5372,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -5261,6 +5429,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5343,6 +5516,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -5359,6 +5537,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -5444,6 +5627,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5460,6 +5648,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -5486,6 +5679,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5502,6 +5700,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -5554,6 +5757,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -5636,6 +5844,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -5652,6 +5865,11 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -6516,7 +6734,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
         "value": "value",
       },
       "error": [Error: test error],
-      "providerMetadata": undefined,
+      "providerMetadata": {
+        "mastra": {
+          "toolCompletion": {
+            "completedAt": "2024-01-01T00:00:00.000Z",
+          },
+        },
+      },
       "toolCallId": "call-1",
       "toolName": "tool1",
     },
@@ -6550,6 +6774,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -6566,6 +6797,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                 "output": {
                   "type": "error-text",
                   "value": "test error",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -6583,6 +6821,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -6599,6 +6844,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                 "output": {
                   "type": "error-text",
                   "value": "test error",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -6647,6 +6899,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -6739,6 +6998,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -6755,6 +7021,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                       "output": {
                         "type": "error-text",
                         "value": "test error",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -6899,6 +7172,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -6915,6 +7195,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                 "output": {
                   "type": "error-text",
                   "value": "test error",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -6946,6 +7233,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -6962,6 +7256,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                 "output": {
                   "type": "error-text",
                   "value": "test error",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -7024,6 +7325,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -7116,6 +7424,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -7132,6 +7447,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                       "output": {
                         "type": "error-text",
                         "value": "test error",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -7227,6 +7549,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -7243,6 +7572,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                 "output": {
                   "type": "error-text",
                   "value": "test error",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -7274,6 +7610,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -7290,6 +7633,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                 "output": {
                   "type": "error-text",
                   "value": "test error",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -7352,6 +7702,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -7444,6 +7801,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -7460,6 +7824,13 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
                       "output": {
                         "type": "error-text",
                         "value": "test error",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -8813,7 +9184,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
         "value": "value",
       },
       "providerExecuted": undefined,
-      "providerMetadata": undefined,
+      "providerMetadata": {
+        "mastra": {
+          "toolCompletion": {},
+        },
+      },
       "result": "value-result",
       "toolCallId": "call-1",
       "toolName": "tool1",
@@ -8843,6 +9218,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -8859,6 +9239,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -8876,6 +9261,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -8892,6 +9282,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -8935,6 +9330,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9023,6 +9423,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -9039,6 +9444,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -9184,6 +9594,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9200,6 +9615,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -9226,6 +9646,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9242,6 +9667,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -9294,6 +9724,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9382,6 +9817,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -9398,6 +9838,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -9495,6 +9940,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9511,6 +9961,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -9537,6 +9992,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9553,6 +10013,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -9605,6 +10070,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -9693,6 +10163,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -9709,6 +10184,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -12954,7 +13434,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
         "value": "value",
       },
       "providerExecuted": undefined,
-      "providerMetadata": undefined,
+      "providerMetadata": {
+        "mastra": {
+          "toolCompletion": {},
+        },
+      },
       "result": "value-result",
       "toolCallId": "call-1",
       "toolName": "tool1",
@@ -12984,6 +13468,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13000,6 +13489,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -13017,6 +13511,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13033,6 +13532,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -13076,6 +13580,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13164,6 +13673,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -13180,6 +13694,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -13325,6 +13844,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13341,6 +13865,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -13367,6 +13896,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13383,6 +13917,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -13435,6 +13974,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13523,6 +14067,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -13539,6 +14088,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -13636,6 +14190,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13652,6 +14211,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -13678,6 +14242,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13694,6 +14263,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                 "output": {
                   "type": "text",
                   "value": "value-result",
+                },
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
                 },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -13746,6 +14320,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                   "value": "value",
                 },
                 "providerExecuted": undefined,
+                "providerOptions": {
+                  "mastra": {
+                    "toolCompletion": {},
+                  },
+                },
                 "toolCallId": "call-1",
                 "toolName": "tool1",
                 "type": "tool-call",
@@ -13834,6 +14413,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -13850,6 +14434,11 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
                       "output": {
                         "type": "text",
                         "value": "value-result",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {},
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
