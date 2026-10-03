@@ -197,8 +197,9 @@ export class EventedAgent<
           // status 'failed' — mirror DurableAgent.executeWorkflow and publish
           // an ERROR event, otherwise the caller's stream never terminates
           // (#17727's idle-start gap on the evented transport).
-          if (result?.status === 'failed') {
-            const error = new Error((result as any).error?.message || 'Workflow execution failed');
+          // A guard refusal (tripwire) is terminal too and keeps its details.
+          const error = this.getWorkflowFailure(result, 'Workflow execution failed');
+          if (error) {
             // Background variant: a pubsub already closing during shutdown must
             // not turn the run's own failure into an unhandledRejection (#23168).
             this.emitErrorInBackground(runId, error);

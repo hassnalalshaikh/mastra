@@ -125,6 +125,7 @@ export const durableAgenticOutputSchema = z.object({
   stepResult: z.any(),
   output: z.object({
     text: z.string().optional(),
+    processedText: z.string().optional(),
     usage: z.any(),
     steps: z.array(z.any()),
   }),

@@ -4729,6 +4729,7 @@ export class AgentThreadStreamRuntime {
                 const finishReason = typedPart.finishReason ?? typedPart.payload?.finishReason;
                 const terminalBoundary =
                   typedPart.type === 'error' ||
+                  typedPart.type === 'tripwire' ||
                   typedPart.type === 'abort' ||
                   (typedPart.type === 'finish' && finishReason !== 'tool-calls');
                 if (terminalBoundary) {

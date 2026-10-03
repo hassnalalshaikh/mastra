@@ -10,6 +10,7 @@ import { RequestContext } from '../../../request-context';
 import type { Agent } from '../../agent';
 import { convertMessages, coreContentToString, MessageList } from '../../message-list';
 import type { SerializedMessageListState } from '../../message-list/state';
+import { responseText } from '../../message-list/utils/response-text';
 import { globalRunRegistry } from '../run-registry';
 import type { DurableAgenticWorkflowInput, RunRegistryEntry } from '../types';
 import { resolveRuntimeDependencies } from '../utils/resolve-runtime';
@@ -32,6 +33,8 @@ export interface DurableFinishSideEffectsResult {
   messageListState: SerializedMessageListState;
   outputText: string;
   titleGeneration?: Promise<void>;
+  /** Complete response text changed by final processors; empty means deletion. */
+  processedText?: string;
 }
 
 function restoreRequestContext(
@@ -112,6 +115,7 @@ export async function runDurableFinishSideEffects({
         runId,
         error,
       });
+      throw error;
     }
   }
 
@@ -130,6 +134,7 @@ export async function runDurableFinishSideEffects({
     registryEntry.messageList = messageList;
   }
 
+  const textBeforeProcessing = responseText(messageList);
   // Keep this MessageList for every later phase. ProcessorRunner applies
   // returned message arrays back onto it, including removals and replacements.
   if (registryEntry?.outputProcessors?.length) {
@@ -162,12 +167,17 @@ export async function runDurableFinishSideEffects({
       );
     } catch (error) {
       effectiveLogger.warn('[DurableAgent] Error running output processors', { runId, error });
+      // A failed final output pass can leave the turn unsaved. Let the native
+      // workflow error path terminate it before any success event is emitted.
+      throw error;
     }
   }
 
   // SaveQueueManager may reclassify flushed response messages as persisted
   // memory, so resolve the final response text before persistence runs.
   const outputText = resolveOutputText(messageList);
+  const textAfterProcessing = responseText(messageList);
+  const processedText = textAfterProcessing !== textBeforeProcessing ? textAfterProcessing : undefined;
 
   const saveQueueManager = registryEntry?.saveQueueManager ?? rebuiltSaveQueueManager;
   const memory = registryEntry?.memory ?? rebuiltMemory;
@@ -196,6 +206,7 @@ export async function runDurableFinishSideEffects({
         threadId: durableState.threadId,
         error,
       });
+      throw error;
     }
   }
 
@@ -241,6 +252,7 @@ export async function runDurableFinishSideEffects({
     messageListState: messageList.serialize(),
     outputText,
     titleGeneration,
+    ...(processedText !== undefined ? { processedText } : {}),
   };
 }
 
