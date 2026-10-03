@@ -1,4 +1,5 @@
 import type { Agent } from '../agent';
+import { globalRunRegistry } from '../agent/durable/run-registry';
 import type { MastraDBMessage, MastraProviderMetadata } from '../agent/message-list/state/types';
 import { createSignal, resolveDeliveryAttributes } from '../agent/signals';
 import type {
@@ -3589,89 +3590,120 @@ export class Session<TState = unknown> {
     }
 
     // The live run scope records the agent that parked each run. Without it (a
-    // mode switch away from a saved run, or a recreated Session), the owner is
-    // discovered across this controller's backing agents.
+    // durable run, or a recreated Session), the owner is discovered across this
+    // controller's backing agents.
     const parkedOwners = new Map<string, Agent | undefined>(
       [...parkedRuns].map(runId => [runId, this.machinery.getRunScope(runId)?.get(SUSPENDED_RUN_AGENT_KEY)]),
     );
-    const agents = userStop ? [...new Set(this.machinery.getAgents?.() ?? [this.machinery.getAgent()])] : [];
     const unownedParkedRuns = new Set([...parkedOwners].flatMap(([runId, owner]) => (owner ? [] : [runId])));
-    const discoverParkedOwner = unownedParkedRuns.size > 0 && agents.length > 1;
     // A restored Session has neither a run id nor a locally armed run. A run this
     // Session is driving itself is stopped through its own stream below.
     const restoredStop =
       userStop && !localRunId && !this.run.isRunning() && !!threadId && suspendedToolCalls.length === 0;
+    const agents =
+      unownedParkedRuns.size > 0 || restoredStop
+        ? [...new Set(this.machinery.getAgents?.() ?? [this.machinery.getAgent()])]
+        : [];
+    const discoverParkedOwner = unownedParkedRuns.size > 0 && agents.length > 1;
 
-    const cancelDiscoveredRuns = () => {
-      if (!threadId) return;
-      const agent = this.machinery.getAgent();
-      // Use the same scoped native discovery as cold resume across this
-      // controller's backing agents, bounded to runs that existed when Stop
-      // arrived. Warm Stop selects only its parked run IDs.
-      const scope = { threadId, resourceId, toDate: new Date() };
-      const cancel = async () => {
-        const discovery = await Promise.allSettled(
-          agents.flatMap(owner => [
-            owner.listSuspendedRuns(scope).then(result => ({ owner, runs: result.runs })),
-            ...(isDurableAgentLike(owner)
-              ? [owner.listActiveRuns(scope).then(result => ({ owner, runs: result.runs }))]
-              : []),
-          ]),
-        );
-        const discoveryErrors = discovery.flatMap(result =>
-          result.status === 'rejected' &&
-          !(result.reason instanceof MastraError && result.reason.id === 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE')
-            ? [result.reason]
-            : [],
-        );
-        if (discoveryErrors.length) throw new AggregateError(discoveryErrors, 'Failed to discover runs for Stop');
-        const results = discovery.flatMap(result => (result.status === 'fulfilled' ? [result.value] : []));
-        // Stop owns the captured saved scope even if turn cleanup or navigation
-        // changes this Session while discovery waits. The native query excludes
-        // runs created after Stop; parked IDs further narrow warm cancellation.
-        const owners = new Map<string, Agent>();
-        for (const { owner, runs } of results) {
-          for (const { runId } of runs) {
-            if (discoverParkedOwner && !unownedParkedRuns.has(runId)) continue;
-            const previous = owners.get(runId);
-            if (previous && previous.id !== owner.id) throw new Error('Multiple agents own a run selected for Stop');
-            owners.set(runId, previous ?? owner);
-          }
-        }
-        if (discoverParkedOwner && owners.size !== unownedParkedRuns.size) {
-          throw new Error('Could not find the owning agent for a parked run selected for Stop');
-        }
-        const cancellations = await Promise.allSettled(
-          [...owners].map(async ([runId, owner]) => {
-            if (isDurableAgentLike(owner) && owner.__abortRunStreamAndWait) {
-              await owner.__abortRunStreamAndWait(runId);
-            } else {
-              owner.abortRunStream(runId);
-            }
-          }),
-        );
-        const errors = cancellations.flatMap(result => (result.status === 'rejected' ? [result.reason] : []));
-        if (errors.length) throw new AggregateError(errors, 'Failed to cancel discovered runs');
-      };
-      const mastra = agent.getMastraInstance();
-      const cancellation = mastra ? mastra.__runDurableAgentCancellation(cancel) : cancel();
+    // Saved cancellation is admitted on the owning Mastra synchronously, at
+    // Stop time, so shutdown keeps storage open until it finishes. Failures stay
+    // observable through the native error event.
+    const admitCancellation = (operation: () => Promise<void>) => {
+      const mastra = this.machinery.getAgent().getMastraInstance();
+      const cancellation = mastra ? mastra.__runDurableAgentCancellation(operation) : operation();
       void cancellation.catch(error => {
         if (!(error instanceof MastraError) || error.id !== 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE') {
           this.emit({ type: 'error', error: getErrorFromUnknown(error) });
         }
       });
     };
-    if (restoredStop) cancelDiscoveredRuns();
-
-    // Close the parked runs only after their prompts are settled as denied, so
-    // the settlement still finds the run that owns each suspension.
-    const abortParkedRuns = () => {
-      for (const [runId, owner] of parkedOwners) {
-        if (owner) owner.abortRunStream(runId);
-        else if (!discoverParkedOwner) this.machinery.getAgent().abortRunStream(runId);
+    const cancelThroughOwner = async (owner: Agent, runId: string) => {
+      if (isDurableAgentLike(owner) && owner.__abortRunStreamAndWait) {
+        await owner.__abortRunStreamAndWait(runId);
+      } else {
+        owner.abortRunStream(runId);
       }
-      if (discoverParkedOwner) cancelDiscoveredRuns();
     };
+    const cancelDiscoveredRuns = async () => {
+      if (!threadId) return;
+      // Use the same scoped native discovery as cold resume across this
+      // controller's backing agents, bounded to runs that existed when Stop
+      // arrived. Warm Stop selects only its parked run IDs.
+      const scope = { threadId, resourceId, toDate: new Date() };
+      const discovery = await Promise.allSettled(
+        agents.flatMap(owner => [
+          owner.listSuspendedRuns(scope).then(result => ({ owner, runs: result.runs })),
+          ...(isDurableAgentLike(owner)
+            ? [owner.listActiveRuns(scope).then(result => ({ owner, runs: result.runs }))]
+            : []),
+        ]),
+      );
+      const discoveryErrors = discovery.flatMap(result =>
+        result.status === 'rejected' &&
+        !(result.reason instanceof MastraError && result.reason.id === 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE')
+          ? [result.reason]
+          : [],
+      );
+      if (discoveryErrors.length) throw new AggregateError(discoveryErrors, 'Failed to discover runs for Stop');
+      const results = discovery.flatMap(result => (result.status === 'fulfilled' ? [result.value] : []));
+      // Stop owns the captured saved scope even if turn cleanup or navigation
+      // changes this Session while discovery waits. The native query excludes
+      // runs created after Stop; parked IDs further narrow warm cancellation.
+      const owners = new Map<string, Agent>();
+      for (const { owner, runs } of results) {
+        for (const { runId } of runs) {
+          if (discoverParkedOwner && !unownedParkedRuns.has(runId)) continue;
+          const previous = owners.get(runId);
+          if (previous && previous.id !== owner.id) throw new Error('Multiple agents own a run selected for Stop');
+          owners.set(runId, previous ?? owner);
+        }
+      }
+      if (discoverParkedOwner && owners.size !== unownedParkedRuns.size) {
+        throw new Error('Could not find the owning agent for a parked run selected for Stop');
+      }
+      const cancellations = await Promise.allSettled(
+        [...owners].map(([runId, owner]) => cancelThroughOwner(owner, runId)),
+      );
+      const errors = cancellations.flatMap(result => (result.status === 'rejected' ? [result.reason] : []));
+      if (errors.length) throw new AggregateError(errors, 'Failed to cancel discovered runs');
+    };
+    if (restoredStop) admitCancellation(cancelDiscoveredRuns);
+
+    // Parked runs are closed only after their prompts are settled as denied, so
+    // the settlement still finds the run that owns each suspension.
+    const settlement =
+      suspendedToolCalls.length > 0
+        ? this.runEngine
+            .settleSuspendedToolCallsAsDenied(suspendedToolCalls)
+            .catch(error => this.emit({ type: 'error', error: getErrorFromUnknown(error) }))
+        : undefined;
+    if (settlement && parkedRuns.size > 0) {
+      admitCancellation(async () => {
+        await settlement;
+        const cancellations = await Promise.allSettled(
+          [...parkedOwners].flatMap(([runId, owner]) =>
+            owner
+              ? [cancelThroughOwner(owner, runId)]
+              : discoverParkedOwner
+                ? []
+                : [cancelThroughOwner(this.machinery.getAgent(), runId)],
+          ),
+        );
+        if (discoverParkedOwner) {
+          // 1.74 publishes a durable suspension before its snapshot is saved.
+          // Let each parked run's in-process execution settle so discovery reads
+          // the saved suspension instead of missing its owner.
+          await Promise.allSettled(
+            [...unownedParkedRuns].map(runId => globalRunRegistry.get(runId)?.workflowExecution),
+          );
+          cancellations.push(...(await Promise.allSettled([cancelDiscoveredRuns()])));
+        }
+        const errors = cancellations.flatMap(result => (result.status === 'rejected' ? [result.reason] : []));
+        if (errors.length === 1) throw errors[0];
+        if (errors.length) throw new AggregateError(errors, 'Failed to cancel parked runs');
+      });
+    }
 
     // The teardown may be deferred (below), so remember whether this abort should
     // stay local for when it actually runs.
@@ -3697,13 +3729,7 @@ export class Session<TState = unknown> {
         this.#releaseApprovalGates({ threadId: abortThreadId });
         return;
       }
-      void this.runEngine
-        .settleSuspendedToolCallsAsDenied(suspendedToolCalls)
-        .catch(error => this.emit({ type: 'error', error: getErrorFromUnknown(error) }))
-        .finally(() => {
-          abortParkedRuns();
-          this.#releaseApprovalGates({ threadId: abortThreadId });
-        });
+      void settlement!.finally(() => this.#releaseApprovalGates({ threadId: abortThreadId }));
       return;
     }
 
@@ -3713,13 +3739,7 @@ export class Session<TState = unknown> {
       // and start a successor run before it lands. Bind the teardown to this
       // binding and abort mode so it cannot abort that successor.
       const origin = { bindingGeneration: this.run.bindingGeneration(), localOnly: this.#localOnlyAbort };
-      void this.runEngine
-        .settleSuspendedToolCallsAsDenied(suspendedToolCalls)
-        .catch(error => this.emit({ type: 'error', error: getErrorFromUnknown(error) }))
-        .finally(() => {
-          abortParkedRuns();
-          this.completeDeferredAbort(origin);
-        });
+      void settlement!.finally(() => this.completeDeferredAbort(origin));
       return;
     }
 
