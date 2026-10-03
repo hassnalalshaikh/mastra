@@ -375,6 +375,7 @@ type ProcessorLoadedToolsProvider = {
   getLoadedToolsForRequestContext?: (args: {
     requestContext: RequestContext;
     tools?: Record<string, unknown>;
+    includeMetaTools?: boolean;
   }) => Record<string, ToolToConvert> | Promise<Record<string, ToolToConvert>>;
 };
 
@@ -395,6 +396,9 @@ export interface AgentRunToolCall {
   args?: unknown;
   /** True when the run is waiting on a tool-call approval. */
   requiresApproval: boolean;
+  /** The saved run requires an explicit decision, regardless of Session grants. */
+  toolApprovalPolicy?: 'manual' | 'auto';
+  toolApprovalContext?: import('./tool-approval-context').ToolApprovalContext;
   /** The tool-defined suspend payload when the tool itself called `suspend()`. */
   suspendPayload?: unknown;
 }
@@ -1185,8 +1189,9 @@ export class Agent<
   async __listLLMRequestProcessors(
     requestContext?: RequestContext,
     errorProcessorOverrides?: ErrorProcessorOrWorkflow[],
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
   ): Promise<LLMRequestProcessorOrWorkflow[]> {
-    return this.listResolvedLLMRequestProcessors(requestContext, undefined, errorProcessorOverrides);
+    return this.listResolvedLLMRequestProcessors(requestContext, configuredProcessorOverrides, errorProcessorOverrides);
   }
 
   /**
@@ -2255,8 +2260,11 @@ export class Agent<
   /**
    * Returns the input processors for this agent, resolving function-based processors if necessary.
    */
-  public async listInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]> {
-    return this.listResolvedInputProcessors(requestContext);
+  public async listInputProcessors(
+    requestContext?: RequestContext,
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
+  ): Promise<InputProcessorOrWorkflow[]> {
+    return this.listResolvedInputProcessors(requestContext, configuredProcessorOverrides);
   }
 
   /**
@@ -4579,7 +4587,11 @@ export class Agent<
         return;
       }
 
-      const loadedTools = await toolProvider.getLoadedToolsForRequestContext({ requestContext, tools });
+      const loadedTools = await toolProvider.getLoadedToolsForRequestContext({
+        requestContext,
+        tools,
+        includeMetaTools: true,
+      });
       if (!loadedTools || Object.keys(loadedTools).length === 0) {
         return;
       }
@@ -6417,6 +6429,25 @@ export class Agent<
               },
               required: ['runId', 'error'],
             },
+            {
+              type: 'object',
+              properties: {
+                runId: { type: 'string', description: 'Unique identifier for the workflow run' },
+                status: { const: 'tripwire' },
+                tripwire: {
+                  type: 'object',
+                  properties: {
+                    reason: { type: 'string' },
+                    retry: { type: 'boolean' },
+                    metadata: {},
+                    processorId: { type: 'string' },
+                  },
+                  required: ['reason'],
+                  additionalProperties: true,
+                },
+              },
+              required: ['runId', 'status', 'tripwire'],
+            },
           ],
         };
 
@@ -6432,7 +6463,11 @@ export class Agent<
             const invocationActor = getInvocationActor(context);
             const savedMastraMemory = requestContext.get('MastraMemory');
             let runIdToUse: string | undefined;
+            const abortSignal = context?.abortSignal;
+            let removeAbortListener: (() => void) | undefined;
+            let cancellation: Promise<void> | undefined;
             try {
+              abortSignal?.throwIfAborted();
               const { initialState, inputData: workflowInputData } = inputData as any;
               const { resumeData, suspendedToolRunId, suspend } = context?.agent ?? {};
               // Use a unique runId for every fresh workflow delegation. Only a run ID
@@ -6451,6 +6486,17 @@ export class Agent<
               });
 
               const run = await workflow.createRun({ runId: runIdToUse, resourceId });
+              const cancelRun = () => {
+                cancellation ??= run.cancel();
+                // Observe immediately; finally awaits and propagates a failed cancellation.
+                void cancellation.catch(() => {});
+              };
+              abortSignal?.addEventListener('abort', cancelRun, { once: true });
+              removeAbortListener = () => abortSignal?.removeEventListener('abort', cancelRun);
+              if (abortSignal?.aborted) {
+                await run.cancel();
+                abortSignal.throwIfAborted();
+              }
 
               let result: WorkflowResult<any, any, any, any> | undefined = undefined;
 
@@ -6524,6 +6570,8 @@ export class Agent<
                   error: workflowOutputError?.message || String(workflowOutputError) || 'Workflow execution failed',
                   runId: run.runId,
                 };
+              } else if (result?.status === 'tripwire') {
+                return { status: 'tripwire', tripwire: result.tripwire, runId: run.runId };
               } else if (result?.status === 'suspended') {
                 const suspendedStep = result?.suspended?.[0]?.[0]!;
                 const suspendPayload = result?.steps?.[suspendedStep]?.suspendPayload;
@@ -6569,6 +6617,8 @@ export class Agent<
                 requestContext.set('MastraMemory', savedMastraMemory);
               }
 
+              abortSignal?.throwIfAborted();
+
               const mastraError = new MastraError(
                 {
                   id: 'AGENT_WORKFLOW_TOOL_EXECUTION_FAILED',
@@ -6586,6 +6636,9 @@ export class Agent<
               );
               this.logger.trackException(mastraError);
               throw mastraError;
+            } finally {
+              removeAbortListener?.();
+              await cancellation;
             }
           },
         });
@@ -6648,6 +6701,7 @@ export class Agent<
     backgroundTaskEnabled?: boolean;
     backgroundTaskPolicy?: AgentExecutionOptionsBase<any>['backgroundTaskPolicy'];
     model?: MastraLanguageModel | MastraLegacyLanguageModel;
+    inputProcessors?: InputProcessorOrWorkflow[];
   }): Promise<Record<string, CoreTool>> {
     const requestContext = options.requestContext ?? new RequestContext();
     const defaultOptions = await this.getDefaultOptions({ requestContext });
@@ -6686,6 +6740,7 @@ export class Agent<
       backgroundTaskEnabled: options.backgroundTaskEnabled,
       backgroundTaskPolicy: mergedOptions.backgroundTaskPolicy,
       model: options.model,
+      inputProcessors: mergedOptions.inputProcessors,
     });
   }
 
@@ -7336,6 +7391,7 @@ export class Agent<
           toolName: payload.requireToolApproval.toolName,
           args: payload.requireToolApproval.args,
           requiresApproval: true,
+          ...(payload.toolApprovalPolicy === 'manual' ? { toolApprovalPolicy: 'manual' as const } : {}),
         });
       } else if (payload.type === 'approval' && payload.toolCallId) {
         // Durable tool-call step suspending a directly approval-gated tool.
@@ -7344,6 +7400,12 @@ export class Agent<
           toolName: payload.toolName,
           args: payload.args,
           requiresApproval: true,
+          ...(payload.toolApprovalPolicy === 'manual' || payload.toolApprovalPolicy === 'auto'
+            ? {
+                toolApprovalPolicy: payload.toolApprovalPolicy as 'manual' | 'auto',
+                toolApprovalContext: payload.toolApprovalContext,
+              }
+            : {}),
         });
       } else if (payload.toolCallSuspended || payload.toolName || payload.toolCallId) {
         toolCalls.push({
@@ -7351,6 +7413,12 @@ export class Agent<
           toolName: payload.toolName,
           requiresApproval: false,
           suspendPayload: payload.toolCallSuspended,
+          ...(payload.toolApprovalPolicy === 'manual' || payload.toolApprovalPolicy === 'auto'
+            ? {
+                toolApprovalPolicy: payload.toolApprovalPolicy as 'manual' | 'auto',
+                toolApprovalContext: payload.toolApprovalContext,
+              }
+            : {}),
         });
       }
     };
@@ -7635,6 +7703,15 @@ export class Agent<
   }: InnerAgentExecutionOptions<OUTPUT> & { _threadStreamPubSub?: PubSub }) {
     const threadStreamPubSub = _threadStreamPubSub ?? this.getPubSub();
     const existingSnapshot = resumeContext?.snapshot;
+    // A saved run keeps its manual policy when resumed through any public API.
+    const savedToolPolicies = this.#getSuspendedToolCalls(existingSnapshot);
+    const toolApprovalPolicy = savedToolPolicies.some(call => call.toolApprovalPolicy === 'manual')
+      ? 'manual'
+      : savedToolPolicies.some(call => call.toolApprovalPolicy === 'auto')
+        ? 'auto'
+        : options.toolApprovalPolicy;
+    const toolApprovalContext =
+      savedToolPolicies.find(call => call.toolApprovalContext)?.toolApprovalContext ?? options.toolApprovalContext;
     const snapshotMemoryInfo = this.#getSnapshotMemoryInfo(existingSnapshot);
     const requestContext = options.requestContext || new RequestContext();
 
@@ -8008,6 +8085,8 @@ export class Agent<
       saveQueueManager,
       returnScorerData: options.returnScorerData,
       requireToolApproval: options.requireToolApproval,
+      toolApprovalPolicy,
+      toolApprovalContext,
       toolCallConcurrency: options.toolCallConcurrency,
       // Resolved to a boolean here, at the one entry point the contract covers, rather
       // than left undefined and defaulted deep in the loop. Anything that reaches the

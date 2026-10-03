@@ -26,6 +26,7 @@ import type { Mastra } from '../../mastra';
 import { SpanType, wrapMastra, EntityType, getOrCreateSpan, createObservabilityContext } from '../../observability';
 import type { AnySpan } from '../../observability';
 import { executeWithContext } from '../../observability/utils';
+import { PROCESSOR_TOOL_OWNER, getProcessorToolOwner } from '../../processors/tool-provenance';
 import { RequestContext } from '../../request-context';
 import { isStandardSchemaWithJSON, toStandardSchema, standardSchemaToJSONSchema } from '../../schema';
 import type { StandardSchemaWithJSON } from '../../schema';
@@ -36,6 +37,7 @@ import { isZodObject, safeExtendZodObject } from '../../utils/zod-utils';
 import type { SuspendOptions } from '../../workflows';
 import { markBuilderValidatedInput } from '../builder-validation-context';
 import { createToolObserve } from '../observe';
+import { captureToolInput, restoreToolInput, TOOL_INPUT_STATE } from '../resumable-input';
 import { ToolStream } from '../stream';
 import type {
   CoreTool,
@@ -642,10 +644,12 @@ export class CoreToolBuilder extends MastraBase {
         let suspendData = null;
 
         if (isVercelTool(tool)) {
+          // Internal accepted-input state never reaches an AI SDK tool.
+          const { [TOOL_INPUT_STATE]: _toolInputState, ...publicOptions } = execOptions ?? {};
           // Handle Vercel tools (AI SDK tools)
           result = await executeWithContext({
             span: contextSpan,
-            fn: async () => tool?.execute?.(args, execOptions as ToolExecutionOptions),
+            fn: async () => tool?.execute?.(args, (execOptions ? publicOptions : execOptions) as ToolExecutionOptions),
           });
         } else {
           // Handle Mastra tools - wrap mastra instance with tracing context for context propagation
@@ -811,16 +815,9 @@ export class CoreToolBuilder extends MastraBase {
           result = await executeWithContext({
             span: contextSpan,
             fn: async () => {
-              if (inputValidationSchema || this.injectedInputSchema) {
-                // The injected keys are only declared on the builder-local
-                // schema. `Tool.execute` validates against the user's original
-                // schema, which would strip them (breaking sub-agent/workflow
-                // resume via `suspendedToolRunId`), so once this builder has
-                // validated the args itself — against the injected schema or a
-                // compat-processed version of it — mark the context to skip
-                // that second validation.
-                markBuilderValidatedInput(toolContext);
-              }
+              // createExecute already validated (or restored) this input even
+              // when the provider needs no compatibility layer.
+              markBuilderValidatedInput(toolContext);
               return tool?.execute?.(executionArgs, toolContext);
             },
           });
@@ -937,14 +934,23 @@ export class CoreToolBuilder extends MastraBase {
       try {
         logger.debug(start, { ...logData, ...rest, model: logModelObject });
 
-        // When a tool is being resumed (resumeData present in execOptions), skip input
-        // validation unless the builder injected additional fields. The original args
-        // were already validated during the initial execution, but builder-local fields
-        // still need validation before Tool.execute skips its own validation.
+        // Resume with the input accepted by the first invocation. Revalidating
+        // would repeat user transforms; using raw model args loses conversion.
+        // Snapshots written before accepted input was persisted keep the 1.74
+        // resume validation of builder-injected fields.
         const isResuming = execOptions?.resumeData != null;
+        const restoredArgs = isResuming
+          ? restoreToolInput(
+              execOptions,
+              args,
+              options.name.startsWith('agent-') || options.name.startsWith('workflow-'),
+            )
+          : args;
+        const restoredAcceptedInput = restoredArgs !== args;
+        args = restoredArgs;
 
         const parameters = inputValidationSchema ?? this.getParameters();
-        if (!isResuming || this.injectedInputSchema) {
+        if (!restoredAcceptedInput && (!isResuming || this.injectedInputSchema)) {
           const { data, error } = validateToolInput(
             parameters as StandardSchemaWithJSON | undefined,
             args,
@@ -962,6 +968,8 @@ export class CoreToolBuilder extends MastraBase {
             args = data;
           }
         }
+
+        captureToolInput(execOptions, args, { toolName: options.name, toolCallId: execOptions?.toolCallId });
 
         // there is a small delay in stream output so we add an immediate to ensure the stream is ready
         return await new Promise((resolve, reject) => {
@@ -1195,8 +1203,10 @@ export class CoreToolBuilder extends MastraBase {
         : undefined,
     };
 
+    const processorToolOwner = getProcessorToolOwner(this.originalTool);
     const builtTool = {
       ...definition,
+      ...(processorToolOwner === undefined ? {} : { [PROCESSOR_TOOL_OWNER]: processorToolOwner }),
       id: 'id' in this.originalTool ? this.originalTool.id : undefined,
       title: 'title' in this.originalTool ? this.originalTool.title : undefined,
       parameters: processedInputSchema ?? z.object({}),

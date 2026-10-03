@@ -58,14 +58,29 @@ export class SaveQueueManager {
    * @param messageList - The MessageList instance containing unsaved messages.
    * @param memoryConfig - Optional memory configuration to use for saving.
    */
-  private enqueueSave(threadId: string, messageList: MessageList, memoryConfig?: MemoryConfigInternal) {
+  private enqueueSave(
+    threadId: string,
+    messageList: MessageList,
+    memoryConfig?: MemoryConfigInternal,
+    onError?: (error: unknown) => void | Promise<void>,
+  ) {
     const prev = this.saveQueues.get(threadId) || Promise.resolve();
     const next = prev
+      // The earlier caller receives its failure; a later explicit save may
+      // still proceed once that write has settled.
+      .catch(() => undefined)
       .then(() => this.persistUnsavedMessages(threadId, messageList, memoryConfig))
-      .catch(err => {
+      .catch(async err => {
         this.logger?.error?.('Error in enqueueSave', { err, threadId });
+        try {
+          // Finish caller cleanup before this operation releases a queued write.
+          await onError?.(err);
+        } catch (cleanupError) {
+          this.logger?.error?.('Error cleaning up failed message save', { err: cleanupError, threadId });
+        }
+        throw err;
       })
-      .then(() => {
+      .finally(() => {
         if (this.saveQueues.get(threadId) === next) {
           this.saveQueues.delete(threadId);
         }
@@ -98,15 +113,14 @@ export class SaveQueueManager {
     messageList: MessageList,
     memoryConfig?: MemoryConfigInternal,
   ) {
-    const newMessages = messageList.drainUnsavedMessages();
-    if (newMessages.length > 0 && this.memory) {
+    const memory = this.memory;
+    if (!memory) return;
+    // A failed write restores the unsaved markers so a later explicit save can retry.
+    await messageList.persistUnsavedMessages(async messages => {
       const savedAt = Date.now();
-      await this.memory.saveMessages({
-        messages: newMessages,
-        memoryConfig,
-      });
-      noteThreadMessagesSaved({ threadId, resourceId: newMessages.find(m => m.resourceId)?.resourceId, savedAt });
-    }
+      await memory.saveMessages({ messages, memoryConfig });
+      noteThreadMessagesSaved({ threadId, resourceId: messages.find(m => m.resourceId)?.resourceId, savedAt });
+    });
   }
 
   /**
@@ -138,9 +152,14 @@ export class SaveQueueManager {
    * @param threadId - The ID of the thread whose messages are being saved.
    * @param memoryConfig - Optional memory configuration for saving.
    */
-  async flushMessages(messageList: MessageList, threadId?: string, memoryConfig?: MemoryConfigInternal) {
+  async flushMessages(
+    messageList: MessageList,
+    threadId?: string,
+    memoryConfig?: MemoryConfigInternal,
+    onError?: (error: unknown) => void | Promise<void>,
+  ) {
     if (!threadId) return;
     this.clearDebounce(threadId);
-    return this.enqueueSave(threadId, messageList, memoryConfig);
+    return this.enqueueSave(threadId, messageList, memoryConfig, onError);
   }
 }

@@ -264,6 +264,8 @@ interface FinishPayload<Tools extends ToolSet = ToolSet, OUTPUT extends OutputSc
   };
   output: {
     usage: LanguageModelUsage;
+    /** Complete response text changed by final processors, including deliberate deletion. */
+    processedText?: string;
     /** Steps array - uses MastraStepResult which extends AI SDK StepResult with tripwire data */
     steps?: MastraStepResult<Tools>[];
   };
@@ -817,6 +819,8 @@ interface ToolExecutionAbortPayload {
 }
 
 interface ToolCallApprovalPayload {
+  toolApprovalPolicy?: 'manual' | 'auto';
+  toolApprovalContext?: import('../agent/tool-approval-context').ToolApprovalContext;
   toolCallId: string;
   toolName: string;
   args: Record<string, any>;

@@ -22,6 +22,7 @@ import { InMemoryStore } from '../../../storage';
 import type { WorkflowRunState, WorkflowRunStatus } from '../../../workflows/types';
 import { Agent } from '../../agent';
 import { agentThreadStreamRuntime } from '../../thread-stream-runtime';
+import { TripWire } from '../../trip-wire';
 import { AGENT_STREAM_TOPIC, AgentStreamEventTypes, DurableStepIds } from '../constants';
 import { createDurableAgent } from '../create-durable-agent';
 import type { DurableAgent } from '../durable-agent';
@@ -87,12 +88,12 @@ function createDurableWithStore(agentId: string, store = new InMemoryStore(), pu
     model: makeMockModel(),
   });
   const agent = createDurableAgent({ agent: baseAgent, pubsub, ...(pubsub ? { cache: false } : {}) });
-  void new Mastra({
+  const mastra = new Mastra({
     agents: { [agentId]: agent as any },
     storage: store,
     ...(pubsub ? { pubsub } : {}),
   });
-  return { agent, store };
+  return { agent, store, mastra };
 }
 
 /** Persists matching outer and inner workflow snapshots for a recoverable run. */
@@ -152,6 +153,75 @@ async function readThreadRun(stream: AsyncIterable<any>) {
 }
 
 describe('DurableAgent.recover(runId)', () => {
+  it.each(['snapshot', 'lease', 'registration', 'createRun'] as const)(
+    'preserves snapshots and releases ownership when shutdown starts during %s',
+    async boundary => {
+      const runId = `shutdown-${boundary}`;
+      const pubsub = new EventEmitterPubSub();
+      const { agent, store, mastra } = createDurableWithStore(runId, new InMemoryStore(), pubsub);
+      await seed(store, runId, 'running', runId);
+      const workflow = stubWorkflow(agent, 'success');
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const workflows = (await store.getStore('workflows'))!;
+      const releaseLease = vi.spyOn(pubsub, 'releaseLease');
+      const publish = vi.spyOn(pubsub, 'publish');
+      const gate = async () => {
+        entered.resolve();
+        await release.promise;
+      };
+      const receiver =
+        boundary === 'snapshot'
+          ? workflows
+          : boundary === 'lease'
+            ? pubsub
+            : boundary === 'registration'
+              ? agentThreadStreamRuntime
+              : workflow;
+      const method =
+        boundary === 'snapshot'
+          ? 'getWorkflowRunById'
+          : boundary === 'lease'
+            ? 'acquireLease'
+            : boundary === 'registration'
+              ? 'registerRun'
+              : 'createRun';
+      const actual = (receiver as any)[method].bind(receiver);
+      const intercept = vi.spyOn(receiver as any, method);
+      intercept.mockImplementationOnce(async (...args: any[]) => {
+        const result = await actual(...args);
+        await gate();
+        return result;
+      });
+      const recovery = mastra.recoverAllDurableAgents();
+      void recovery.then(result =>
+        entered.reject(new Error(`Recovery ended before ${boundary}: ${JSON.stringify(result)}`)),
+      );
+      await entered.promise;
+      const shutdown = mastra.shutdown();
+      try {
+        release.resolve();
+        expect(await recovery).toEqual({ agents: 1, recovered: 0, succeeded: 0, failed: 0 });
+        await shutdown;
+        expect(workflow.restart).not.toHaveBeenCalled();
+        expect(globalRunRegistry.get(runId)).toBeUndefined();
+        expect((await readSnapshot(store, DurableStepIds.AGENTIC_LOOP, runId))?.snapshot.status).toBe('running');
+        expect(
+          publish.mock.calls.filter(
+            ([topic, event]) => topic === AGENT_STREAM_TOPIC(runId) && event.type === AgentStreamEventTypes.ERROR,
+          ),
+        ).toHaveLength(0);
+        if (boundary !== 'snapshot')
+          expect(releaseLease.mock.calls.some(([key]) => key.startsWith('mastra:durable-agent-recovery:'))).toBe(true);
+      } finally {
+        release.resolve();
+        await recovery;
+        await shutdown;
+        intercept.mockRestore();
+      }
+    },
+  );
+
   let agent: DurableAgent;
   let store: InMemoryStore;
 
@@ -855,6 +925,50 @@ describe('DurableAgent.recover(runId)', () => {
     expect((errorEvents[0]?.[1] as any).data.error.message).toBe('terminal failure');
     recovered.cleanup();
   });
+
+  it('publishes a recovered workflow tripwire once without losing its native payload', async () => {
+    const runId = 'run-recovered-tripwire';
+    const store = new InMemoryStore();
+    const pubsub = new EventEmitterPubSub();
+    const publish = vi.spyOn(pubsub, 'publish');
+    const { agent, mastra } = createDurableWithStore('agent-recovered-tripwire', store, pubsub);
+    await seed(store, runId, 'running', agent.id);
+    const tripwire = {
+      reason: 'Recovered output rejected',
+      retry: true,
+      metadata: { policy: 'recovery-policy' },
+      processorId: 'recovered-output-check',
+    };
+    // Only the workflow terminal is stubbed. Recovery ownership, snapshot
+    // cleanup, native pubsub and the public output stream are exercised.
+    const restart = vi.fn(async () => ({ status: 'tripwire' as const, tripwire }));
+    vi.spyOn(agent, 'getWorkflow').mockReturnValue({
+      createRun: vi.fn(async () => ({ restart, runId })),
+      deleteWorkflowRunById: vi.fn(async () => {}),
+    } as any);
+    const recovered = await agent.recover(runId);
+    try {
+      await expect(globalRunRegistry.get(runId)?.workflowExecution).rejects.toBeInstanceOf(TripWire);
+      const output = await recovered.output.getFullOutput();
+      expect(output.tripwire).toEqual(tripwire);
+      expect(recovered.output.status).toBe('tripwire');
+      const terminals = publish.mock.calls.filter(
+        ([topic, event]) =>
+          topic === AGENT_STREAM_TOPIC(runId) &&
+          (event.type === AgentStreamEventTypes.ERROR ||
+            event.type === AgentStreamEventTypes.FINISH ||
+            (event.type === AgentStreamEventTypes.CHUNK && (event.data as { type?: string }).type === 'tripwire')),
+      );
+      expect(terminals).toHaveLength(1);
+      expect(terminals[0]?.[1].data).toMatchObject({ type: 'tripwire', payload: tripwire });
+      expect(restart).toHaveBeenCalledOnce();
+      expect(await readSnapshot(store, DurableStepIds.AGENTIC_EXECUTION, runId)).toBeNull();
+    } finally {
+      recovered.cleanup();
+      await mastra.shutdown();
+      await pubsub.close();
+    }
+  }, 15_000);
 
   it('rolls back thread registration when terminal error publication fails', async () => {
     const runId = 'run-terminal-publish-fail';

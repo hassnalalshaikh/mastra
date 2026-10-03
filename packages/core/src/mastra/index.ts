@@ -832,6 +832,11 @@ export class Mastra<
   #storageExplicit = false;
   #storageFallbackWarningPending = false;
   #recoveryConfig: MastraRecoveryConfig = { durableAgents: 'off' };
+  #durableAgentRecoveries = new Set<Promise<unknown>>();
+  #durableAgentCancellations = new Set<Promise<void>>();
+  #durableAgentCancellationErrors: unknown[] = [];
+  #shutdownStarted = false;
+  #shutdownPromise?: Promise<void>;
   #scorers?: TScorers;
   #classifiers?: TClassifiers;
   #tools?: TTools;
@@ -4129,6 +4134,11 @@ export class Mastra<
     return this.#recoveryConfig;
   }
 
+  /** Whether shutdown has closed admission for new durable-agent recovery. */
+  get isShuttingDown(): boolean {
+    return this.#shutdownStarted;
+  }
+
   /**
    * Re-drive every orphaned RUNNING durable-agent run across every registered
    * `DurableAgent`. Delegates to `DurableAgent.recoverActiveRuns()` on each
@@ -4146,6 +4156,29 @@ export class Mastra<
    * counts.
    */
   public async recoverAllDurableAgents(): Promise<{
+    agents: number;
+    recovered: number;
+    succeeded: number;
+    failed: number;
+  }> {
+    if (this.#shutdownStarted) {
+      throw new MastraError({
+        id: 'MASTRA_DURABLE_RECOVERY_SHUTDOWN',
+        domain: ErrorDomain.AGENT,
+        category: ErrorCategory.USER,
+        text: 'Cannot recover durable agents after Mastra shutdown has started.',
+      });
+    }
+    const recovery = this.#recoverAllDurableAgents();
+    this.#durableAgentRecoveries.add(recovery);
+    try {
+      return await recovery;
+    } finally {
+      this.#durableAgentRecoveries.delete(recovery);
+    }
+  }
+
+  async #recoverAllDurableAgents(): Promise<{
     agents: number;
     recovered: number;
     succeeded: number;
@@ -4176,6 +4209,7 @@ export class Mastra<
     let failed = 0;
 
     for (const agent of durableAgents) {
+      if (this.#shutdownStarted) break;
       try {
         const result = await agent.recoverActiveRuns();
         recovered += result.recovered.length;
@@ -7374,9 +7408,43 @@ export class Mastra<
    * pubsub subscriptions are torn down. Runs that do not settle within the
    * window are abandoned with a warning.
    */
-  async shutdown(options?: { drainTimeout?: number }): Promise<void> {
-    const drainTimeout = assertDrainTimeout(options?.drainTimeout ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS, 'shutdown');
+  shutdown(options?: { drainTimeout?: number }): Promise<void> {
+    // Repeated shutdown calls share one completion promise.
+    if (this.#shutdownPromise) return this.#shutdownPromise;
+    let drainTimeout: number;
+    try {
+      drainTimeout = assertDrainTimeout(options?.drainTimeout ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS, 'shutdown');
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    // Close durable-agent recovery and cancellation admission synchronously,
+    // before any awaited teardown.
+    this.#shutdownStarted = true;
+    this.#shutdownPromise = Promise.resolve().then(() => this.#shutdown(drainTimeout));
+    return this.#shutdownPromise;
+  }
 
+  /**
+   * Admit a native Stop before its first storage read. The operation must await
+   * all discovered cancellation writes; it must not dispatch detached cleanup.
+   * @internal
+   */
+  __runDurableAgentCancellation(operation: () => Promise<void>): Promise<void> {
+    if (this.#shutdownStarted)
+      return Promise.reject(new Error('Mastra is shutting down; cancellation admission is closed'));
+    const cancellation = Promise.resolve().then(operation);
+    this.#durableAgentCancellations.add(cancellation);
+    void cancellation.then(
+      () => this.#durableAgentCancellations.delete(cancellation),
+      error => {
+        this.#durableAgentCancellationErrors.push(error);
+        this.#durableAgentCancellations.delete(cancellation);
+      },
+    );
+    return cancellation;
+  }
+
+  async #shutdown(drainTimeout: number): Promise<void> {
     // `drainTimeout` is a single deadline shared by every drain in this method
     // (evented runs here, then worker transports and push events inside
     // stopWorkers()). They all end up waiting on the same in-flight steps, so a
@@ -7433,6 +7501,46 @@ export class Mastra<
     // SchedulerWorker is stopped as part of stopWorkers().
     await this.stopWorkers({ drainTimeout: Math.max(0, deadline - Date.now()) });
 
+    // Discovery can still be reading storage before a run enters the registry.
+    // Admission is closed; keep storage open until these reads settle, within
+    // the same shared shutdown deadline.
+    if (this.#durableAgentRecoveries.size > 0) {
+      await this.#awaitBounded(
+        Promise.allSettled(this.#durableAgentRecoveries),
+        Math.max(0, deadline - Date.now()),
+        `${this.#durableAgentRecoveries.size} durable-agent recovery discovery call(s)`,
+      );
+    }
+
+    // A recovery admitted before shutdown started can register its execution
+    // after the drain above. Keep storage open until it settles too.
+    const lateDurableExecutions = getActiveDurableAgentWorkflowExecutions(this).filter(run => !awaited.has(run));
+    if (lateDurableExecutions.length > 0) {
+      const durableExecutionResults = await this.#awaitBounded(
+        Promise.allSettled(lateDurableExecutions),
+        Math.max(0, deadline - Date.now()),
+        `${lateDurableExecutions.length} recovered durable agent run(s)`,
+      );
+      durableExecutionResults?.forEach(result => {
+        if (result.status === 'rejected') {
+          this.#logger?.error('Durable agent execution failed during shutdown', {
+            error: result.reason,
+          });
+        }
+      });
+    }
+
+    // Accepted cold Stop discovery is not an executing workflow. Its promise
+    // includes every discovered cancellation, so no child write can outlive it.
+    // New admission closed synchronously in shutdown(), before teardown began.
+    if (this.#durableAgentCancellations.size > 0) {
+      await this.#awaitBounded(
+        Promise.allSettled(this.#durableAgentCancellations),
+        Math.max(0, deadline - Date.now()),
+        `${this.#durableAgentCancellations.size} accepted durable-agent Stop cancellation(s)`,
+      );
+    }
+
     // Stop — don't destroy — registered workspaces. Remote sandboxes
     // suspend/pause and stay resumable across process restarts, and
     // LocalSandbox.stop() kills its background processes, so nothing leaks.
@@ -7477,6 +7585,12 @@ export class Mastra<
     // Shutdown observability registry, exporters, etc...
     await this.#observability.shutdown();
 
+    if (this.#durableAgentCancellationErrors.length) {
+      throw new AggregateError(
+        this.#durableAgentCancellationErrors,
+        'Durable agent cancellation failed during shutdown',
+      );
+    }
     this.#logger?.info('Mastra shutdown completed');
   }
 

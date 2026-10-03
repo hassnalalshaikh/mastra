@@ -35,6 +35,7 @@ import type { AgentExecutionOptions, DelegationConfig } from '../agent.types';
 import { assertThreadOwnedByResource } from '../memory-thread-ownership';
 import { MessageList } from '../message-list';
 import type { MessageListInput } from '../message-list';
+import type { SerializedMessageListState } from '../message-list/state';
 import { SaveQueueManager } from '../save-queue';
 import type { CreatedAgentSignal } from '../signals';
 import { mastraDBMessageToSignal } from '../signals';
@@ -167,8 +168,13 @@ interface DurablePreparationAgent {
     backgroundTaskEnabled?: boolean;
     backgroundTaskPolicy?: AgentExecutionOptions<any>['backgroundTaskPolicy'];
     model?: MastraLanguageModel;
+    inputProcessors?: InputProcessorOrWorkflow[];
   }): Promise<Record<string, CoreTool>>;
-  listInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]>;
+  listConfiguredInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]>;
+  listInputProcessors(
+    requestContext?: RequestContext,
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
+  ): Promise<InputProcessorOrWorkflow[]>;
   listOutputProcessors(requestContext?: RequestContext): Promise<OutputProcessorOrWorkflow[]>;
   __resolveRunErrorProcessors(
     requestContext: RequestContext,
@@ -183,6 +189,7 @@ interface DurablePreparationAgent {
   __listLLMRequestProcessors(
     requestContext?: RequestContext,
     errorProcessorOverrides?: ErrorProcessorOrWorkflow[],
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
   ): Promise<LLMRequestProcessorOrWorkflow[]>;
 }
 
@@ -210,6 +217,8 @@ export interface PreparationResult<_OUTPUT = undefined> {
  * Options for preparation phase
  */
 export interface PreparationOptions<OUTPUT = undefined> {
+  /** Already-processed native input used only to rebuild a saved run's runtime resources. */
+  resumeMessageListState?: SerializedMessageListState;
   /** The agent instance (wrapped agent — used for config resolution: tools, model, instructions, memory) */
   agent: Agent<string, any, OUTPUT>;
   /** User messages to process */
@@ -272,6 +281,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     methodType = 'stream',
     durableAgentId,
     durableAgentName,
+    resumeMessageListState,
   } = options;
 
   // Public-facing identity: use the durable wrapper's ID/name for all
@@ -423,6 +433,9 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
 
   // Add user messages
   messageList.add(messages, 'input');
+  // A saved state that carries only memory identity has no messages to restore;
+  // it still marks this preparation as a rebuild of a saved run.
+  if (Array.isArray(resumeMessageListState?.messages)) messageList.deserialize(resumeMessageListState);
 
   // 6. Establish the memory/thread context BEFORE resolving input processors.
   //
@@ -466,6 +479,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
 
   // Resolve input processors now that the memory context is in place.
   const processorStates = new Map<string, ProcessorState>();
+  let configuredInputProcessors: InputProcessorOrWorkflow[] = [];
   let inputProcessors: InputProcessorOrWorkflow[] = [];
   let llmRequestInputProcessors: LLMRequestProcessorOrWorkflow[] = [];
   let outputProcessors: OutputProcessorOrWorkflow[] = [];
@@ -473,7 +487,12 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
   let hasConfiguredErrorProcessors = false;
 
   try {
-    inputProcessors = await typedAgent.listInputProcessors(requestContext);
+    // Resolve configuration once for this preparation, including an explicit
+    // empty override. Later preparations resolve again, even with the same
+    // RequestContext, so dynamic permissions are never cached across runs.
+    configuredInputProcessors =
+      execOptions?.inputProcessors ?? (await typedAgent.listConfiguredInputProcessors(requestContext));
+    inputProcessors = await typedAgent.listInputProcessors(requestContext, configuredInputProcessors);
     // Call-time outputProcessors replace constructor-level ones (parity with
     // Agent.listResolvedOutputProcessors which uses overrides-first semantics).
     outputProcessors = execOptions?.outputProcessors
@@ -491,9 +510,16 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     ));
     // Uncombined processors for processLLMRequest — combined (workflow-wrapped)
     // processors are skipped by ProcessorRunner.runProcessLLMRequest.
-    llmRequestInputProcessors = await typedAgent.__listLLMRequestProcessors(requestContext, errorProcessors);
+    llmRequestInputProcessors = await typedAgent.__listLLMRequestProcessors(
+      requestContext,
+      errorProcessors,
+      configuredInputProcessors,
+    );
   } catch (error) {
     logger?.warn?.(`[DurableAgent] Error resolving processors: ${error}`);
+    // Required checks must be available before the run can call the model.
+    // Continuing with a partially resolved pipeline silently bypasses them.
+    throw error;
   }
 
   // Open AGENT_RUN here so processor_run spans (and their MEMORY_OPERATION
@@ -538,7 +564,10 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
   // above, before processor resolution, so processors that need it (working
   // memory, OM, message history) can access it here.
   let tripwireData: RunRegistryEntry['tripwire'];
-  if (inputProcessors.length > 0) {
+  // A saved run already processed its input. Cold resume rebuilds live handles,
+  // not a new request; running these hooks again can repeat side effects or
+  // reject an empty input before the durable workflow restores its messages.
+  if (inputProcessors.length > 0 && !resumeMessageListState) {
     try {
       const { ProcessorRunner } = await import('../../processors/runner');
       const runner = new ProcessorRunner({
@@ -621,6 +650,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       backgroundTaskEnabled: Boolean(backgroundTaskManager),
       backgroundTaskPolicy: execOptions?.backgroundTaskPolicy,
       model,
+      inputProcessors: configuredInputProcessors,
     });
   } catch (error) {
     logger?.warn?.(`[DurableAgent] Error converting tools: ${error}`);
@@ -628,7 +658,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
 
   // Client-executed results fire only after processors accept the request and
   // the required runtime model has resolved.
-  if (!tripwireData) {
+  if (!tripwireData && !resumeMessageListState) {
     await fireClientToolOutputHooks({
       messages,
       tools,
@@ -761,6 +791,8 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       // restart), which is the safe default.
       requireToolApproval:
         typeof execOptions?.requireToolApproval === 'function' ? true : execOptions?.requireToolApproval,
+      toolApprovalPolicy: execOptions?.toolApprovalPolicy,
+      toolApprovalContext: execOptions?.toolApprovalContext,
       toolCallConcurrency: execOptions?.toolCallConcurrency,
       autoResumeSuspendedTools: execOptions?.autoResumeSuspendedTools,
       maxProcessorRetries: execOptions?.maxProcessorRetries ?? typedAgent.__getMaxProcessorRetries?.(),
@@ -860,7 +892,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     // Signal messages already in the messageList at run start (from persisted
     // history). Echoed as data-signal parts on the first LLM step so the client
     // sees them without refetching. Spliced once, never re-emitted.
-    initialSignalEchoes: getInitialSignalEchoes(messageList),
+    initialSignalEchoes: resumeMessageListState ? [] : getInitialSignalEchoes(messageList),
     // Agent-level goal config (judge resolver, tools resolver, scorer).
     // Non-serializable — cross-process engines skip goal evaluation.
     goal: agent.__getGoalConfig(),

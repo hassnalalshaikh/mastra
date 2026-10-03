@@ -183,6 +183,15 @@ Queue a follow-up while a run is active, or send it immediately while idle.
 await session.followUp({ content: 'Then propose a fix.' })
 ```
 
+#### `removeFollowUp({ id })`
+
+Remove one queued follow-up by the `id` a UI read from `displayState.queuedFollowUpItems`. The other queued messages keep their order. Returns whether it was still queued; a follow-up already drained into a run is not affected. Emits `follow_up_queued` with the new `count` and `items`.
+
+```typescript
+const [next] = session.displayState.get().queuedFollowUpItems
+if (next) session.removeFollowUp({ id: next.id })
+```
+
 #### `getCurrentRunId()`
 
 Return the active stream run identifier, the tracked run identifier, or `null` while idle.
@@ -196,6 +205,8 @@ Returns: `string | null`
 #### `abort()`
 
 Abort the active run and clear pending suspension display state.
+
+This synchronous method requests cancellation. Its return does not confirm that storage has saved a terminal state. Native cancellation errors are reported through the session's error events. A restored session uses native run discovery for its exact resource and thread when it has no local run identity.
 
 ```typescript
 session.abort()
@@ -735,7 +746,7 @@ Resume a suspended tool with [`session.respondToToolSuspension()`](#tool-approva
 
 ## Follow-ups
 
-`session.followUps` owns the FIFO queue of messages submitted while a run is in progress.
+`session.followUps` lists the messages this session queued while a run is in progress. The Agent runtime owns the queue itself.
 
 ### `session.followUps.count()`
 
@@ -754,6 +765,19 @@ if (!session.followUps.isEmpty()) {
   // Messages are waiting to be processed
 }
 ```
+
+### `session.followUps.list()`
+
+Return the queued follow-ups in send order, each with a stable `id` and its `content`. The same list is mirrored on `displayState.queuedFollowUpItems` next to the `queuedFollowUps` count, and travels on every `follow_up_queued` event as `items`.
+
+```typescript
+const waiting = session.followUps.list()
+// [{ id: 'follow-up-1-k3j9x2', content: 'Then propose a fix.' }]
+```
+
+### `session.followUps.remove(id)`
+
+Remove one queued follow-up by id without touching the rest of the queue. Returns whether it was still queued. Same as [`session.removeFollowUp()`](#messages-and-run-control).
 
 ## Approval
 
@@ -826,7 +850,11 @@ const added = await session.state.update(current => ({
 
 ## Persistence boundaries
 
-A `Session` is a live runtime object. Its event bus, arbitrary `session.state`, permission rules, permission grants, pending approvals, suspensions, follow-ups, run state, and stream state don't automatically survive controller or process recreation. The host must restore any of this state when recreating a session.
+A `Session` is a live runtime object. Its event bus, arbitrary `session.state`, permission rules, permission grants, ordinary tool suspensions, follow-ups, run state, and stream state don't automatically survive controller or process recreation. The host must restore any of this state when recreating a session.
+
+When a session attaches to a stored thread, it reads saved approvals from the current mode's backing agent, scoped to the same thread and resource. A single saved approval restores its `displayState.pendingApprovals` entry and an approval gate for that tool call. Reconnecting doesn't execute the tool or start a model call. Respond through `session.respondToToolApproval()` with the displayed `toolCallId` to approve or decline the original saved run. Respond to that approval or stop its run before sending another message.
+
+Recovery requires native run storage. Multiple saved approvals on the same thread are rejected rather than selecting one arbitrarily. Storage failures remain errors. After a failed decision, the session reads saved work again and can restore its prompt; it never retries the decision automatically. Auto-approval grants remain ephemeral.
 
 Configured storage persists threads and messages along with token usage, while thread settings restore mode and model choices. Restored settings can include observational memory and subagent model selections with per-agent-type overrides. A chat channel can map back to stored threads. However, `AgentControllerChannels` keeps channel-to-session and auto-approval state in memory.
 

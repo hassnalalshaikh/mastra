@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { resolveSuspendedToolRunId } from '../agent/utils';
 import { InternalSpans } from '../observability';
 import { stripModelSnapshots } from '../stream/strip-model-snapshots';
+import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../tools/resumable-input';
 import { createStep, createWorkflow } from '../workflows';
 import type { SuspendOptions } from '../workflows';
 import type { BackgroundTaskManager } from './manager';
@@ -188,7 +189,10 @@ export function buildBackgroundTaskWorkflow(manager: BackgroundTaskManager) {
       // safely run all its side effects synchronously inside the
       // tool's call.
       let pendingSuspend: { data?: unknown; suspendOptions?: SuspendOptions } | undefined;
+      const toolInputState = createToolInputState(suspendData);
       const wrappedSuspend = async (data?: unknown, suspendOptions?: SuspendOptions) => {
+        // A tool input that cannot survive snapshot storage fails the suspension.
+        persistedToolInput(toolInputState);
         // Suspend is non-terminal but still fenced on ownership: a superseded
         // worker must not park a task another worker is now running. Clearing
         // the lease marks the task unowned while it waits to be resumed.
@@ -219,14 +223,19 @@ export function buildBackgroundTaskWorkflow(manager: BackgroundTaskManager) {
       try {
         const args = { ...task.args };
         delete args.suspendedToolRunId;
+        // The engine suspend data wraps the tool's own payload beside its accepted input.
+        const originalSuspendData =
+          (suspendData as { __mastraBackgroundPayload?: unknown } | undefined)?.__mastraBackgroundPayload ??
+          suspendData;
         const suspendedToolRunId = resolveSuspendedToolRunId(
-          (suspendData as { suspendedToolRunId?: unknown } | undefined)?.suspendedToolRunId,
+          (originalSuspendData as { suspendedToolRunId?: unknown } | undefined)?.suspendedToolRunId,
         );
         if (resumeData !== undefined && suspendedToolRunId) {
           args.suspendedToolRunId = suspendedToolRunId;
         }
 
         const result = await executor.execute(args, {
+          [TOOL_INPUT_STATE]: toolInputState,
           abortSignal: abortController.signal,
           onProgress,
           suspend: wrappedSuspend,
@@ -250,7 +259,10 @@ export function buildBackgroundTaskWorkflow(manager: BackgroundTaskManager) {
             : pendingSuspend.data && typeof pendingSuspend.data === 'object'
               ? { ...(pendingSuspend.data as Record<string, unknown>), suspendedToolRunId: agentRunId }
               : { suspendedToolRunId: agentRunId };
-          return suspend(engineData, opts as SuspendOptions);
+          return suspend(
+            { __mastraBackgroundPayload: engineData, __mastraToolInput: persistedToolInput(toolInputState) },
+            opts as SuspendOptions,
+          );
         }
 
         return { taskId, outcome: 'success' as const, result };

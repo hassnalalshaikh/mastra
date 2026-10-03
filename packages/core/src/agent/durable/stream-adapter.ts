@@ -261,6 +261,7 @@ export function createDurableAgentStream<OUTPUT = undefined>(
   let lastErrorStack: string | undefined;
   let lastErrorName: string | undefined;
   let lastErrorCause: unknown;
+  let deferredErrorChunk: ChunkType<OUTPUT> | undefined;
 
   // Idle/liveness watchdog. A durable run whose driving process crashed stops
   // emitting chunks but never publishes a terminal FINISH/ERROR/ABORT event, so
@@ -376,8 +377,25 @@ export function createDurableAgentStream<OUTPUT = undefined>(
             lastErrorStack = typeof errPayload?.error?.stack === 'string' ? errPayload.error.stack : undefined;
             lastErrorName = typeof errPayload?.error?.name === 'string' ? errPayload.error.name : undefined;
             lastErrorCause = errPayload?.error ?? errPayload;
+            // A handled model error still runs final output processors and saves
+            // history. Consumers treat this chunk as terminal, so deliver it only
+            // when the workflow publishes FINISH after those side effects.
+            deferredErrorChunk = chunk as ChunkType<OUTPUT>;
+            break;
           }
           safeEnqueue(controller, chunk as ChunkType<OUTPUT>);
+          if (chunk.type === 'tripwire') {
+            safeClose(controller);
+            markTerminated();
+            // A guard refusal is terminal too. Notify the native lifecycle
+            // before user callbacks, which may throw, so registry and topic
+            // cleanup cannot be skipped by a failed observer.
+            try {
+              await onStreamFinished?.();
+            } catch (callbackError) {
+              logError(`[DurableAgentStream] onStreamFinished callback error:`, callbackError);
+            }
+          }
           await onChunk?.(chunk as ChunkType<OUTPUT>);
           break;
         }
@@ -399,6 +417,9 @@ export function createDurableAgentStream<OUTPUT = undefined>(
 
         case AgentStreamEventTypes.FINISH: {
           const data = streamEvent.data as AgentFinishEventData;
+          const errorChunk = deferredErrorChunk;
+          deferredErrorChunk = undefined;
+          if (errorChunk) safeEnqueue(controller, errorChunk);
           // Enqueue finish chunk and close stream even if callback throws
           const finishChunk = {
             type: 'finish' as const,
@@ -413,6 +434,14 @@ export function createDurableAgentStream<OUTPUT = undefined>(
           safeClose(controller);
           markTerminated();
 
+          if (errorChunk) {
+            try {
+              await onChunk?.(errorChunk);
+            } catch (callbackError) {
+              logError(`[DurableAgentStream] onChunk callback error:`, callbackError);
+            }
+          }
+
           // Build rich onFinish payload from finish event data.
           // The pubsub FINISH event carries output.text, output.steps, and
           // stepResult — enough to reconstruct the fields scenario tests expect
@@ -424,8 +453,11 @@ export function createDurableAgentStream<OUTPUT = undefined>(
               const allToolCalls = steps.flatMap((s: any) => s?.toolCalls ?? []);
               await onFinish({
                 // Every step's streamed text, retried attempts included — matches the main loop,
-                // whose onFinish text is everything the run streamed.
-                text: steps.length > 0 ? steps.map((s: any) => s?.text ?? '').join('') : (data.output?.text ?? ''),
+                // whose onFinish text is everything the run streamed. Text changed or removed
+                // by final processors replaces it, as in the main loop.
+                text:
+                  data.output?.processedText ??
+                  (steps.length > 0 ? steps.map((s: any) => s?.text ?? '').join('') : (data.output?.text ?? '')),
                 steps,
                 toolResults: allToolResults,
                 toolCalls: allToolCalls,

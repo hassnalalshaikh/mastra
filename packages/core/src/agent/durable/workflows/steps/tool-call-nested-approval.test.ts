@@ -34,7 +34,7 @@ afterEach(() => {
 });
 
 describe('durable agent-as-tool nested approval details', () => {
-  it('emits inner tool details while preserving the outer tool call id for resume', async () => {
+  it.each([undefined, 'manual'] as const)('preserves nested details and run policy %s', async toolApprovalPolicy => {
     const suspend = vi.fn().mockResolvedValue(undefined);
     const execute = vi.fn(async (_args: unknown, options: any) => {
       await options.suspend(
@@ -49,7 +49,8 @@ describe('durable agent-as-tool nested approval details', () => {
       mastra: { getLogger: () => undefined },
       suspend,
       requestContext: new Map(),
-      getInitData: () => ({ runId: RUN_ID, agentId: 'supervisor', options: {}, state: {} }),
+      resumeData: toolApprovalPolicy ? { approved: true } : undefined,
+      getInitData: () => ({ runId: RUN_ID, agentId: 'supervisor', options: { toolApprovalPolicy }, state: {} }),
       [PUBSUB_SYMBOL]: { publish: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn(), flush: vi.fn() },
     });
 
@@ -62,6 +63,7 @@ describe('durable agent-as-tool nested approval details', () => {
           toolCallId: TOOL_CALL_ID,
           toolName: INNER_APPROVAL.toolName,
           args: INNER_APPROVAL.args,
+          toolApprovalPolicy,
         }),
       }),
     );
@@ -83,6 +85,7 @@ describe('durable agent-as-tool nested approval details', () => {
           args: INNER_APPROVAL.args,
         },
         suspendedToolRunId: 'inner-run',
+        toolApprovalPolicy,
       }),
       { resumeLabel: TOOL_CALL_ID },
     );

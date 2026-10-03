@@ -212,6 +212,9 @@ export interface SerializableDurableOptions {
   agentMaxRetriesConfigured?: boolean;
   /** Whether to require tool approval globally */
   requireToolApproval?: boolean;
+  /** Run-scoped explicit approval; retained across resume and process recreation. */
+  toolApprovalPolicy?: 'manual' | 'auto';
+  toolApprovalContext?: import('../tool-approval-context').ToolApprovalContext;
   /** Concurrency limit / strategy for parallel tool calls (JSON-safe union) */
   toolCallConcurrency?: ToolCallConcurrency;
   /** Whether to auto-resume suspended tools */
@@ -413,8 +416,9 @@ export interface DurableToolCallOutput extends DurableToolCallInput {
   /** Whether toModelOutput was evaluated before the result crossed the durable boundary */
   modelOutputComputed?: boolean;
   /**
-   * Set when execution was interrupted by request abort (not a tool error).
-   * The call carries no result/error so the mapping step leaves it incomplete.
+   * Set when execution was interrupted by request abort (not a tool error), or
+   * when the call was canceled before execution. The call carries no
+   * result/error so the mapping step leaves it incomplete.
    */
   aborted?: boolean;
   /**
@@ -518,6 +522,8 @@ export interface DurableAgenticLoopOutput {
   /** Accumulated output from all iterations */
   output: {
     text?: string;
+    /** Complete response text changed by final processors; empty means deletion. */
+    processedText?: string;
     usage: LanguageModelUsage;
     steps: unknown[];
   };

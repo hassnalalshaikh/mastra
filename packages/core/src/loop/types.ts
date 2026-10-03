@@ -247,6 +247,8 @@ export type LoopOptions<TOOLS extends ToolSet = ToolSet, OUTPUT = undefined> = {
   downloadConcurrency?: number;
   modelSpanTracker?: IModelSpanTracker;
   requireToolApproval?: RequireToolApproval;
+  toolApprovalPolicy?: 'manual' | 'auto';
+  toolApprovalContext?: import('../agent/tool-approval-context').ToolApprovalContext;
   autoResumeSuspendedTools?: boolean;
   agentId: string;
   /**

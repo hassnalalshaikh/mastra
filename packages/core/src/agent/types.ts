@@ -73,7 +73,7 @@ import type { AnyWorkspace } from '../workspace';
 import type { SkillFormat } from '../workspace/skills';
 import type { Agent } from './agent';
 import type { AgentExecutionOptions, NetworkOptions } from './agent.types';
-import type { MessageList } from './message-list/index';
+import type { MastraDBMessage, MessageList } from './message-list/index';
 import type { AgentSignalAttributes, AgentSignalType, CreatedAgentSignal } from './signals';
 import type { SubAgent } from './subagent';
 export type {
@@ -324,6 +324,8 @@ export interface SubscribeAgentThreadEventsOptions {
   threadId: string;
   /** Omit to observe all locally pending messages on the shared thread. */
   queueOwnerId?: string;
+  /** Also report which messages are pending (`queued`), and report a change of them at the same count. */
+  includeQueued?: boolean;
 }
 
 /**
@@ -331,7 +333,25 @@ export interface SubscribeAgentThreadEventsOptions {
  */
 export type AgentThreadEvent =
   /** Locally pending messages: FIFO entries plus a non-cancelled lease handoff. */
-  { type: 'queue-count-changed'; count: number };
+  {
+    type: 'queue-count-changed';
+    count: number;
+    /**
+     * The same pending messages in send order, so a caller can track the ones it
+     * queued. Present only for subscriptions with `includeQueued`.
+     */
+    queued?: readonly AgentThreadQueuedMessage[];
+  };
+
+/**
+ * One locally pending message as reported by `queue-count-changed`.
+ * @experimental Agent message APIs are experimental and may change in a future release.
+ */
+export interface AgentThreadQueuedMessage {
+  signalId: string;
+  /** The `queueOwnerId` the message was queued with, when it had one. */
+  queueOwnerId?: string;
+}
 
 /**
  * @experimental Agent message APIs are experimental and may change in a future release.
@@ -1366,6 +1386,13 @@ export type AgentMethodType = 'generate' | 'stream' | 'generateLegacy' | 'stream
  * to maintain compatibility with the server handlers.
  */
 export interface DurableAgentLike {
+  /**
+   * Complete Stop within an already admitted native Mastra cancellation operation.
+   * Optional for compatibility with other durable wrappers; only implementations
+   * providing this method guarantee stored cancellation completion to Session.
+   * @internal
+   */
+  __abortRunStreamAndWait?(runId: string): Promise<{ messages: MastraDBMessage[] } | void>;
   /** Agent ID */
   readonly id: string;
   /** Agent name */

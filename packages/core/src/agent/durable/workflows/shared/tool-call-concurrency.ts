@@ -36,11 +36,18 @@ export function resolveDurableToolCallConcurrency({
   toolsMetadata,
   toolCalls,
 }: {
-  options?: Pick<SerializableDurableOptions, 'requireToolApproval' | 'toolCallConcurrency' | 'activeTools'>;
+  options?: Pick<
+    SerializableDurableOptions,
+    'requireToolApproval' | 'toolApprovalPolicy' | 'toolCallConcurrency' | 'activeTools'
+  >;
   toolsMetadata?: SerializableToolMetadata[];
   toolCalls?: Pick<DurableToolCallInput, 'activeTools' | 'toolName'>[];
 }): number {
-  if (options?.requireToolApproval) {
+  if (
+    options?.requireToolApproval ||
+    options?.toolApprovalPolicy === 'manual' ||
+    options?.toolApprovalPolicy === 'auto'
+  ) {
     return 1;
   }
 
