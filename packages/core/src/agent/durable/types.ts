@@ -678,9 +678,9 @@ export interface RunRegistryEntry {
   tools: Record<string, CoreTool>;
   /**
    * The complete resolved toolset for the run, before any per-step processor
-   * narrowing. Set by the durable LLM step the first time it overwrites `tools`
-   * with a per-step snapshot; `resolveRuntimeDependencies` prefers it over
-   * `tools` when seeding a step (issue #22933).
+   * or tool-policy narrowing. Set by the durable LLM step the first time it
+   * overwrites `tools` with a per-step snapshot; `resolveRuntimeDependencies`
+   * prefers it over `tools` when seeding a step (issue #22933).
    */
   baseTools?: Record<string, CoreTool>;
   /** SaveQueueManager for message persistence (undefined when memory is not configured) */
