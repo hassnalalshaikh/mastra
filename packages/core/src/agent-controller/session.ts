@@ -17,7 +17,8 @@ import type {
   SendAgentSignalAccepted,
   ToolsetsInput,
 } from '../agent/types';
-import { getErrorFromUnknown } from '../error';
+import { isDurableAgentLike } from '../agent/types';
+import { getErrorFromUnknown, MastraError } from '../error';
 import type { MastraModelGatewayInterface } from '../llm/model/gateways';
 import { ModelRouterLanguageModel } from '../llm/model/router';
 import type { MastraModelConfig } from '../llm/model/shared.types';
@@ -1853,6 +1854,11 @@ export class SessionRun {
   /** Bump and return the operation counter at the start of a new operation. */
   nextOperation(): number {
     this.#operationId += 1;
+    return this.#operationId;
+  }
+
+  /** Current operation identity for async work tied to a user command. */
+  getOperationId(): number {
     return this.#operationId;
   }
 
@@ -3748,13 +3754,53 @@ export class Session<TState = unknown> {
     // `tool_approval_required` subscribers each calling abort() is enough.
     if (this.run.isAbortRequested()) return;
 
+    const localRunId = this.getCurrentRunId();
+    const threadId = this.thread.getId();
+    const operationId = this.run.getOperationId();
+    // A restored Session has neither a run id nor a locally armed run. A run this
+    // Session is driving itself is stopped through its own stream below.
+    const restoredStop = !localRunId && !this.run.isRunning() && !!threadId && !options.localOnly;
+    if (restoredStop && !this.suspensions.hasPending()) {
+      const agent = this.machinery.getAgent();
+      // A restored Session has no live run identity. Use the same scoped native
+      // discovery as cold resume, bounded to runs that existed when Stop arrived.
+      const scope = { threadId, resourceId: this.identity.getResourceId(), toDate: new Date() };
+      void Promise.all([
+        agent.listSuspendedRuns(scope),
+        isDurableAgentLike(agent) ? agent.listActiveRuns(scope) : Promise.resolve({ runs: [] }),
+      ])
+        .then(results => {
+          if (
+            this.thread.getId() !== threadId ||
+            this.run.getOperationId() !== operationId ||
+            !this.run.isAbortRequested()
+          )
+            return;
+          const runIds = new Set(results.flatMap(result => result.runs.map(run => run.runId)));
+          for (const runId of runIds) agent.abortRunStream(runId);
+        })
+        .catch(error => {
+          if (!(error instanceof MastraError) || error.id !== 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE') {
+            this.emit({ type: 'error', error: getErrorFromUnknown(error) });
+          }
+        });
+    }
+
     // Retract the prompts for every parked suspension. Dropping them silently
     // left the UI rendering `ask_user` / `request_access` prompts whose answers
     // could never land, since the run they belong to is gone.
     const suspendedToolCalls = this.suspensions.clear();
+    // A user Stop also closes the native runs those suspensions are parked on.
+    // A lifecycle (localOnly) abort leaves them for their owner.
+    const parkedRuns = new Set(options.localOnly ? [] : suspendedToolCalls.map(({ runId }) => runId));
     for (const { toolCallId, toolName } of suspendedToolCalls) {
       this.emit({ type: 'tool_suspension_cancelled', toolCallId, toolName, reason: ABORTED_BY_USER_REASON });
     }
+    // Close the parked runs only after their prompts are settled as denied, so
+    // the settlement still finds the run that owns each suspension.
+    const abortParkedRuns = () => {
+      for (const runId of parkedRuns) this.machinery.getAgent().abortRunStream(runId);
+    };
 
     // The teardown may be deferred (below), so remember whether this abort should
     // stay local for when it actually runs.
@@ -3783,7 +3829,10 @@ export class Session<TState = unknown> {
       void this.runEngine
         .settleSuspendedToolCallsAsDenied(suspendedToolCalls)
         .catch(error => this.emit({ type: 'error', error: getErrorFromUnknown(error) }))
-        .finally(() => this.#releaseApprovalGates({ threadId: abortThreadId }));
+        .finally(() => {
+          abortParkedRuns();
+          this.#releaseApprovalGates({ threadId: abortThreadId });
+        });
       return;
     }
 
@@ -3796,10 +3845,18 @@ export class Session<TState = unknown> {
       void this.runEngine
         .settleSuspendedToolCallsAsDenied(suspendedToolCalls)
         .catch(error => this.emit({ type: 'error', error: getErrorFromUnknown(error) }))
-        .finally(() => this.completeDeferredAbort(origin));
+        .finally(() => {
+          abortParkedRuns();
+          this.completeDeferredAbort(origin);
+        });
       return;
     }
 
+    // A restored Session has no live run identity: stop the thread's active
+    // native run through the agent that owns the thread stream.
+    if (restoredStop && threadId) {
+      this.machinery.getAgent().abortThreadStream({ threadId, resourceId: this.identity.getResourceId() });
+    }
     this.stream.abort({ localOnly: this.#localOnlyAbort });
     this.run.requestAbort();
   }
