@@ -36,6 +36,8 @@ import type {
   CancelQueuedAgentMessagesOptions,
   CancelQueuedAgentMessagesResult,
   AgentThreadEventListener,
+  AgentThreadEvent,
+  AgentThreadQueuedMessage,
   SubscribeAgentThreadEventsOptions,
   QueueAgentMessageOptions,
   QueueAgentMessageResult,
@@ -307,6 +309,8 @@ type ThreadEventListenerRegistration = SubscribeAgentThreadEventsOptions & {
   agent: Agent<any, any, any, any>;
   listener: AgentThreadEventListener;
   lastCount: number;
+  /** Identity of the last reported queue, so a same-size swap is still reported. */
+  lastQueueKey: string;
 };
 
 /**
@@ -875,29 +879,46 @@ export class AgentThreadStreamRuntime {
     return state;
   }
 
-  #queuedMessageCount(
+  /** Locally pending messages for `scope`, in send order (the draining one first). */
+  #queuedMessages(
     state: AgentThreadRuntimeState,
     scope: SubscribeAgentThreadEventsOptions & { agent: Agent<any, any, any, any> },
-  ): number {
+  ): AgentThreadQueuedMessage[] {
     const key = this.#threadKey(scope.resourceId, scope.threadId);
-    const matches = (pending: PendingIdleSignal<any> | undefined) =>
+    const matches = (pending: PendingIdleSignal<any> | undefined): pending is PendingIdleSignal<any> =>
       pending !== undefined &&
       !pending.cancelled &&
       (scope.queueOwnerId === undefined ||
         (pending.agent === scope.agent && pending.queueOwnerId === scope.queueOwnerId));
-    return (
-      (state.pendingIdleSignalsByThread.get(key)?.filter(matches).length ?? 0) +
-      (matches(state.drainingIdleSignalsByThread.get(key)) ? 1 : 0)
-    );
+    const draining = state.drainingIdleSignalsByThread.get(key);
+    return [
+      ...(matches(draining) ? [draining] : []),
+      ...(state.pendingIdleSignalsByThread.get(key)?.filter(matches) ?? []),
+    ].map(pending => ({
+      signalId: pending.signal.id,
+      ...(pending.queueOwnerId !== undefined ? { queueOwnerId: pending.queueOwnerId } : {}),
+    }));
+  }
+
+  #queueKey(registration: ThreadEventListenerRegistration, queued: readonly AgentThreadQueuedMessage[]): string {
+    return registration.includeQueued ? JSON.stringify(queued.map(message => message.signalId)) : '';
+  }
+
+  #queueEvent(registration: ThreadEventListenerRegistration, queued: AgentThreadQueuedMessage[]): AgentThreadEvent {
+    return registration.includeQueued
+      ? { type: 'queue-count-changed', count: queued.length, queued }
+      : { type: 'queue-count-changed', count: queued.length };
   }
 
   #notifyThreadEvents(state: AgentThreadRuntimeState): void {
     for (const registration of [...state.threadEventListeners]) {
-      const count = this.#queuedMessageCount(state, registration);
-      if (count === registration.lastCount) continue;
-      registration.lastCount = count;
+      const queued = this.#queuedMessages(state, registration);
+      const queueKey = this.#queueKey(registration, queued);
+      if (queued.length === registration.lastCount && queueKey === registration.lastQueueKey) continue;
+      registration.lastCount = queued.length;
+      registration.lastQueueKey = queueKey;
       try {
-        registration.listener({ type: 'queue-count-changed', count });
+        registration.listener(this.#queueEvent(registration, queued));
       } catch {}
     }
     for (const key of state.threadControlSubscriptions.keys()) this.#releaseUnusedThreadControlSubscription(state, key);
@@ -4790,12 +4811,19 @@ export class AgentThreadStreamRuntime {
     pubsub?: PubSub,
   ): () => void {
     const state = this.#getState(pubsub);
-    const registration: ThreadEventListenerRegistration = { ...scope, agent, listener, lastCount: 0 };
-    const count = this.#queuedMessageCount(state, registration);
-    registration.lastCount = count;
+    const registration: ThreadEventListenerRegistration = {
+      ...scope,
+      agent,
+      listener,
+      lastCount: 0,
+      lastQueueKey: '',
+    };
+    const queued = this.#queuedMessages(state, registration);
+    registration.lastCount = queued.length;
+    registration.lastQueueKey = this.#queueKey(registration, queued);
     state.threadEventListeners.add(registration);
     try {
-      listener({ type: 'queue-count-changed', count });
+      listener(this.#queueEvent(registration, queued));
     } catch {}
     let subscribed = true;
     return () => {

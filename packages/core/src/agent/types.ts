@@ -293,11 +293,31 @@ export interface SubscribeAgentThreadEventsOptions {
   threadId: string;
   /** Omit to observe all locally pending messages on the shared thread. */
   queueOwnerId?: string;
+  /** Also report which messages are pending (`queued`), and report a change of them at the same count. */
+  includeQueued?: boolean;
 }
 
 export type AgentThreadEvent =
   /** Locally pending messages: FIFO entries plus a non-cancelled lease handoff. */
-  { type: 'queue-count-changed'; count: number };
+  {
+    type: 'queue-count-changed';
+    count: number;
+    /**
+     * The same pending messages in send order, so a caller can track the ones it
+     * queued. Present only for subscriptions with `includeQueued`.
+     */
+    queued?: readonly AgentThreadQueuedMessage[];
+  };
+
+/**
+ * One locally pending message as reported by `queue-count-changed`.
+ * @experimental Agent message APIs are experimental and may change in a future release.
+ */
+export interface AgentThreadQueuedMessage {
+  signalId: string;
+  /** The `queueOwnerId` the message was queued with, when it had one. */
+  queueOwnerId?: string;
+}
 
 export type AgentThreadEventListener = (event: AgentThreadEvent) => void;
 

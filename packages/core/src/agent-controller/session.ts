@@ -58,6 +58,7 @@ import type {
   PermissionRules,
   TokenUsage,
   ToolCategory,
+  QueuedFollowUpItem,
 } from './types';
 
 export const SUSPENDED_RUN_AGENT_KEY = createRunScopeKey<Agent>('agent-controller.suspendedRunAgent');
@@ -2907,6 +2908,7 @@ export class SessionDisplayState {
     ds.currentMessage = null;
     this.deps.clearFollowUps();
     ds.queuedFollowUps = 0;
+    ds.queuedFollowUpItems = [];
     ds.modifiedFiles = new Map();
     ds.tasks = [];
     ds.previousTasks = [];
@@ -3307,6 +3309,7 @@ export class SessionDisplayState {
       // ── Follow-up queue ────────────────────────────────────────────────
       case 'follow_up_queued':
         ds.queuedFollowUps = event.count;
+        ds.queuedFollowUpItems = event.items ?? [];
         break;
 
       // ── Thread lifecycle ───────────────────────────────────────────────
@@ -5018,9 +5021,9 @@ export class Session<TState = unknown> {
     };
     this.#followUpBinding = binding;
     try {
-      const unsubscribe = agent.subscribeThreadEvents({ resourceId, threadId }, event => {
+      const unsubscribe = agent.subscribeThreadEvents({ resourceId, threadId, includeQueued: true }, event => {
         if (event.type === 'queue-count-changed' && this.#followUpBinding === binding) {
-          this.emit({ type: 'follow_up_queued', count: event.count });
+          this.#syncQueuedFollowUps(event.count, event.queued);
         }
       });
       binding.unsubscribe = unsubscribe;
@@ -5033,6 +5036,66 @@ export class Session<TState = unknown> {
       if (this.#followUpBinding === binding) this.#followUpBinding = undefined;
       throw error;
     }
+  }
+
+  /**
+   * Follow-ups this Session queued on the bound thread, by id, in send order.
+   * The Agent runtime owns the queue; each follow-up is queued under its own
+   * `queueOwnerId` (its id) so it can be listed and cancelled one by one.
+   */
+  readonly #queuedFollowUps = new Map<
+    string,
+    { content: string; agent: Agent; resourceId: string; threadId: string }
+  >();
+  #queuedFollowUpCount = 0;
+  /** Owner ids in the runtime's last queue report, or undefined when it did not name them. */
+  #queuedFollowUpOwners: Set<string> | undefined;
+  #followUpSequence = 0;
+
+  /** List and remove this Session's queued follow-ups (id and text, in send order). */
+  readonly followUps = {
+    list: (): QueuedFollowUpItem[] => [...this.#queuedFollowUps].map(([id, item]) => ({ id, content: item.content })),
+    remove: (id: string): boolean => this.removeFollowUp({ id }),
+    count: (): number => this.#queuedFollowUpCount,
+    isEmpty: (): boolean => this.#queuedFollowUpCount === 0,
+  };
+
+  /** Mirror the runtime queue: keep only follow-ups it still holds, then report count and items together. */
+  #syncQueuedFollowUps(count: number, queued?: readonly { signalId: string; queueOwnerId?: string }[]): void {
+    if (queued) {
+      const owners = new Set(queued.map(message => message.queueOwnerId));
+      for (const id of this.#queuedFollowUps.keys()) if (!owners.has(id)) this.#queuedFollowUps.delete(id);
+    } else if (count === 0) {
+      this.#queuedFollowUps.clear();
+    }
+    this.#queuedFollowUpOwners = queued ? new Set(queued.flatMap(message => message.queueOwnerId ?? [])) : undefined;
+    this.#queuedFollowUpCount = count;
+    this.emit({ type: 'follow_up_queued', count, items: this.followUps.list() });
+  }
+
+  #dropFollowUp(id: string): void {
+    if (!this.#queuedFollowUps.delete(id)) return;
+    this.emit({ type: 'follow_up_queued', count: this.#queuedFollowUpCount, items: this.followUps.list() });
+  }
+
+  /**
+   * Remove one queued follow-up by the id a UI read from
+   * `displayState.queuedFollowUpItems`. Returns whether it was still queued;
+   * a follow-up already handed to a run is not affected.
+   */
+  removeFollowUp({ id }: { id: string }): boolean {
+    const item = this.#queuedFollowUps.get(id);
+    if (!item) return false;
+    this.#queuedFollowUps.delete(id);
+    const { cancelledSignalIds } = item.agent.cancelQueuedMessages({
+      resourceId: item.resourceId,
+      threadId: item.threadId,
+      queueOwnerId: id,
+    });
+    // The runtime reported the new queue while cancelling; report again in case
+    // nothing changed there (the item had already left the queue).
+    this.emit({ type: 'follow_up_queued', count: this.#queuedFollowUpCount, items: this.followUps.list() });
+    return cancelledSignalIds.length > 0;
   }
 
   /** Queue a follow-up through the Agent runtime, or send it immediately while idle. */
@@ -5054,17 +5117,30 @@ export class Session<TState = unknown> {
       if (operation.controller.signal.aborted || operation.generation !== this.#followUpGeneration) return;
       // Once submitted, the Agent owns this work independently of the Session.
       this.#preparingFollowUps.delete(operation);
-      await agent.queueMessage(
-        {
-          contents: this.createMessageInput({ content }),
-          providerOptions: withMessageAuthor(undefined, readMessageAuthor(requestContext)),
-        },
-        {
-          resourceId,
-          threadId,
-          ifIdle: { streamOptions: streamOptions as any },
-        },
-      ).accepted;
+      // Registered before queueing so the runtime's queue report already lists it.
+      const id = `follow-up-${++this.#followUpSequence}-${Math.random().toString(36).slice(2, 8)}`;
+      this.#queuedFollowUps.set(id, { content, agent, resourceId, threadId });
+      let queued: ReturnType<Agent['queueMessage']>;
+      try {
+        queued = agent.queueMessage(
+          {
+            contents: this.createMessageInput({ content }),
+            providerOptions: withMessageAuthor(undefined, readMessageAuthor(requestContext)),
+          },
+          {
+            resourceId,
+            threadId,
+            queueOwnerId: id,
+            ifIdle: { streamOptions: streamOptions as any },
+          },
+        );
+      } catch (error) {
+        this.#dropFollowUp(id);
+        throw error;
+      }
+      // Sent straight to an idle thread: it never entered the queue.
+      if (this.#queuedFollowUpOwners && !this.#queuedFollowUpOwners.has(id)) this.#dropFollowUp(id);
+      await queued.accepted;
     } finally {
       this.#preparingFollowUps.delete(operation);
     }
@@ -5077,7 +5153,11 @@ export class Session<TState = unknown> {
     const binding = this.#followUpBinding;
     this.#followUpBinding = undefined;
     binding?.unsubscribe?.();
-    this.emit({ type: 'follow_up_queued', count: 0 });
+    // Submitted follow-ups stay with the Agent; the Session stops listing them.
+    this.#queuedFollowUps.clear();
+    this.#queuedFollowUpOwners = undefined;
+    this.#queuedFollowUpCount = 0;
+    this.emit({ type: 'follow_up_queued', count: 0, items: [] });
   }
 
   /**
