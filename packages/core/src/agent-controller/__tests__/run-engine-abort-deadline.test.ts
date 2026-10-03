@@ -1,9 +1,14 @@
+// 1.74 port of fork patch P43 (017fed49fa). Harness from the fork file (real Agent + setMachinery, both public on 1.74).
+// bdc88ad46d (late stored tool-outcome reads) is not carried: 1.74 folds tool-result/tool-error without an
+// async storage read, so its tool-result/tool-error storage/message cases have no 1.74 target.
+import { MockLanguageModelV2 } from '@internal/ai-sdk-v5/test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Agent } from '../../agent';
 import { RequestContext } from '../../request-context';
 import { Workspace } from '../../workspace';
 import { LocalFilesystem } from '../../workspace/filesystem/local-filesystem';
 import type { SessionMachinery } from '../session';
-import { Session } from '../session';
+import { Session, SessionStream } from '../session';
 import { SessionRunEngine } from '../session-run-engine';
 import type { AgentControllerEvent } from '../types';
 
@@ -27,8 +32,19 @@ function createHarness() {
     events.push(event);
   });
 
+  const agent = new Agent({
+    id: 'abort-deadline-agent',
+    name: 'Abort deadline agent',
+    instructions: 'No model request is expected in these stream tests.',
+    model: new MockLanguageModelV2({
+      doStream: async () => {
+        throw new Error('These tests must not start a model request');
+      },
+    }),
+  });
   const machinery: SessionMachinery = {
-    getAgent: () => ({ id: 'agent-stub' }) as unknown as ReturnType<SessionMachinery['getAgent']>,
+    getAgent: () => agent,
+    getRunScope: () => undefined,
     subscribeToThread: async () => {
       throw new Error('subscribeToThread is not used by these tests');
     },
@@ -42,8 +58,9 @@ function createHarness() {
     saveSystemReminder: vi.fn(async () => null),
   };
 
+  session.setMachinery(machinery);
   const engine = new SessionRunEngine(session, machinery);
-  return { engine, events, session };
+  return { agent, engine, events, machinery, session };
 }
 
 function chunk(value: StreamChunk): StreamChunk {
@@ -53,6 +70,190 @@ function chunk(value: StreamChunk): StreamChunk {
 describe('SessionRunEngine — abort deadline', () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each(['iterator', 'decline-resolve', 'decline-reject'] as const)(
+    'opens a fresh stream after steering times out and ignores late %s work',
+    async lateWork => {
+      vi.useFakeTimers();
+      const { agent, engine, events, machinery, session } = createHarness();
+      session.thread.connect(undefined, session);
+      let releaseOld!: () => void;
+      const oldBlocked = new Promise<void>(resolve => {
+        releaseOld = resolve;
+      });
+      const decline = vi.spyOn(session, 'declineToolCall').mockImplementation(async () => {
+        await oldBlocked;
+        if (lateWork === 'decline-reject') throw new Error('late decline failure');
+      });
+      const oldSubscription = {
+        stream: (async function* () {
+          yield chunk({ type: 'text-start', runId: 'old-run', payload: { id: 'old-text' } });
+          if (lateWork.startsWith('decline-')) {
+            yield chunk({
+              type: 'tool-call-approval',
+              runId: 'old-run',
+              payload: {
+                toolCallId: 'old-tool',
+                toolName: 'write_file',
+                args: {},
+                toolApprovalPolicy: 'manual',
+              },
+            });
+          }
+          await oldBlocked;
+          yield chunk({ type: 'text-delta', runId: 'old-run', payload: { id: 'old-text', text: 'stale output' } });
+        })(),
+        activeRunId: () => 'old-run',
+        abort: () => true,
+        unsubscribe: vi.fn(),
+      };
+      let finishNext!: () => void;
+      const nextBlocked = new Promise<void>(resolve => {
+        finishNext = resolve;
+      });
+      const nextSubscription = {
+        stream: (async function* () {
+          yield chunk({ type: 'text-start', runId: 'next-run', payload: { id: 'next-text' } });
+          yield chunk({
+            type: 'text-delta',
+            runId: 'next-run',
+            payload: { id: 'next-text', text: 'steered response' },
+          });
+          await nextBlocked;
+          yield chunk({ type: 'finish', runId: 'next-run', payload: { stepResult: { reason: 'stop' } } });
+        })(),
+        activeRunId: () => 'next-run',
+        abort: () => true,
+        unsubscribe: vi.fn(),
+      };
+      const subscribe = vi.fn(async () => nextSubscription);
+      machinery.subscribeToThread = subscribe;
+      // 1.74 port: steering dispatches through Agent.sendSignal (was Agent.queueMessage in the fork).
+      const dispatch = vi.spyOn(agent, 'sendSignal').mockReturnValue({
+        accepted: Promise.resolve({ action: 'deliver', runId: 'next-run' }),
+        signal: { type: 'user', contents: 'Change course.' },
+      } as unknown as ReturnType<Agent['sendSignal']>);
+      session.stream.attach({
+        subscription: oldSubscription,
+        agent,
+        key: SessionStream.keyFor({ agent, resourceId: 'resource-1', threadId: 'thread-1' }),
+      });
+      const processed = engine.processSubscribedThreadStream(oldSubscription);
+      await vi.advanceTimersByTimeAsync(0);
+      // 1.74 port: Session.steer() is abort() + sendMessage() and now settles with the new turn,
+      // so it is awaited after the next run finishes instead of here.
+      const steered = session.steer({ content: 'Change course.' });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await processed;
+
+      expect(subscribe).toHaveBeenCalledTimes(1);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
+      expect(nextSubscription.unsubscribe).not.toHaveBeenCalled();
+      expect(session.displayState.get().queuedFollowUps).toBe(0); // 1.74 port: Session has no followUps queue; the Agent owns it and displayState mirrors the count
+      expect(events.filter(event => event.type === 'agent_start')).toHaveLength(2);
+      const completedBeforeRelease = events.filter(event => event.type === 'tool_end').length;
+      releaseOld();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
+      expect(JSON.stringify(events)).not.toContain('stale output');
+      expect(events.filter(event => event.type === 'error')).toHaveLength(0);
+      expect(events.filter(event => event.type === 'tool_end')).toHaveLength(completedBeforeRelease);
+      expect(decline).toHaveBeenCalledTimes(lateWork.startsWith('decline-') ? 1 : 0);
+      expect(session.run.isAbortRequested()).toBe(false);
+      expect(events.filter(event => event.type === 'agent_end')).toEqual([{ type: 'agent_end', reason: 'aborted' }]);
+      finishNext();
+      await vi.advanceTimersByTimeAsync(0);
+      await steered;
+      expect(events.filter(event => event.type === 'agent_end')).toEqual([
+        { type: 'agent_end', reason: 'aborted' },
+        { type: 'agent_end', reason: 'complete' },
+      ]);
+      session.stream.detach();
+      dispatch.mockRestore();
+      decline.mockRestore();
+    },
+  );
+
+  it.each(['finish', 'iterator-error', 'chunk-error'] as const)(
+    'finalizes once when %s end hooks outlast the abort deadline',
+    async ending => {
+      vi.useFakeTimers();
+      const { engine, events, session } = createHarness();
+      let releaseEnd!: () => void;
+      const heldEnd = new Promise<void>(resolve => {
+        releaseEnd = resolve;
+      });
+      const beforeEnd = vi.fn(async () => {
+        await heldEnd;
+      });
+      session.onBeforeAgentEnd(beforeEnd);
+      // 1.74 port: Session.drainFollowUpQueue was removed (the Agent owns follow-ups), so the fork's
+      // drain-call assertions have no 1.74 target. The finalize-once assertions are kept.
+      const subscription = {
+        stream: (async function* () {
+          yield chunk({ type: 'text-start', payload: { id: 't1' } });
+          if (ending === 'iterator-error') throw new Error('iterator failure');
+          yield chunk({ type: 'finish', payload: { stepResult: { reason: 'stop' } } });
+        })(),
+        activeRunId: () => 'run-1',
+        abort: () => true,
+        unsubscribe: vi.fn(),
+      };
+      const processChunk = vi.spyOn(engine, 'processStreamChunk');
+      if (ending === 'chunk-error') {
+        processChunk.mockImplementation(async (_state, nextChunk) => {
+          if (nextChunk.type === 'finish') throw new Error('chunk failure');
+        });
+      }
+      session.stream.attach({ subscription, key: 'thread-1' });
+      const processed = engine.processSubscribedThreadStream(subscription);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(beforeEnd).toHaveBeenCalledTimes(1);
+      session.abortRun();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(beforeEnd).toHaveBeenCalledTimes(1);
+      expect(events.filter(event => event.type === 'agent_end')).toHaveLength(0);
+      releaseEnd();
+      await processed;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(beforeEnd).toHaveBeenCalledTimes(1);
+      expect(events.filter(event => event.type === 'agent_end')).toHaveLength(1);
+      expect(session.run.isRunning()).toBe(false);
+      processChunk.mockRestore();
+      session.stream.detach();
+    },
+  );
+
+  it('does not finalize or drain into another thread after a pending end hook', async () => {
+    vi.useFakeTimers();
+    const { engine, events, session } = createHarness();
+    let releaseEnd!: () => void;
+    session.onBeforeAgentEnd(
+      () =>
+        new Promise<void>(resolve => {
+          releaseEnd = resolve;
+        }),
+    );
+    // 1.74 port: Session.drainFollowUpQueue was removed (the Agent owns follow-ups); drain assertions dropped.
+    const subscription = {
+      stream: (async function* () {
+        yield chunk({ type: 'text-start', payload: { id: 't1' } });
+        yield chunk({ type: 'finish', payload: { stepResult: { reason: 'stop' } } });
+      })(),
+      activeRunId: () => 'run-1',
+      abort: () => true,
+      unsubscribe: vi.fn(),
+    };
+    session.stream.attach({ subscription, key: 'thread-1' });
+    const processed = engine.processSubscribedThreadStream(subscription);
+    await vi.advanceTimersByTimeAsync(0);
+    session.thread.set({ threadId: 'thread-2' });
+    releaseEnd();
+    await processed;
+    expect(events.filter(event => event.type === 'agent_end')).toHaveLength(0);
+    session.stream.detach();
   });
 
   it('Given a stream hung mid-run, When the run is aborted, Then it still finalizes as aborted after the grace period', async () => {

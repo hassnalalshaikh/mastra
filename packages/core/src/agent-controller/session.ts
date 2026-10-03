@@ -1740,6 +1740,10 @@ export class SessionRun {
     return this.#operationId;
   }
 
+  getOperationId(): number {
+    return this.#operationId;
+  }
+
   /**
    * Lazily create (if needed) and return the AbortController for the current
    * run. Callers pass its `.signal` into the underlying stream.
@@ -3523,12 +3527,14 @@ export class Session<TState = unknown> {
   /** Await terminal hooks, then emit the terminal event to subscribers. */
   async finishAgentRun(
     reason: NonNullable<Extract<AgentControllerEvent, { type: 'agent_end' }>['reason']>,
+    isCurrent?: () => boolean,
   ): Promise<void> {
     if (reason === 'aborted' || reason === 'error') {
       const state = this.displayState.get();
       for (const [toolCallId, tool] of state.activeTools) {
         if (tool.background) continue;
         if (tool.status !== 'running' && tool.status !== 'executing' && tool.status !== 'streaming_input') continue;
+        if (isCurrent && !isCurrent()) return;
         this.emit({
           type: 'tool_end',
           toolCallId,
@@ -3544,13 +3550,14 @@ export class Session<TState = unknown> {
     }
     const event = { type: 'agent_end', reason } as const;
     for (const listener of this.#beforeAgentEndListeners) {
+      if (isCurrent && !isCurrent()) return;
       try {
         await listener(event);
       } catch (error) {
         console.error('Error in before-agent-end listener:', error);
       }
     }
-    this.emit(event);
+    if (!isCurrent || isCurrent()) this.emit(event);
   }
 
   /** Await the terminal event for a specific accepted agent run. */
