@@ -1,4 +1,10 @@
-import type { MastraBrowser, MouseEventParams, KeyboardEventParams, ScreencastStream } from './browser';
+import type {
+  BrowserAgentAction,
+  MastraBrowser,
+  MouseEventParams,
+  KeyboardEventParams,
+  ScreencastStream,
+} from './browser';
 import type { BrowserState } from './thread-manager';
 
 /** User preferences for the existing browser, in CSS pixels. No navigation is implied. */
@@ -19,7 +25,17 @@ export type BrowserViewerCommand =
   | { type: 'text'; text: string };
 
 export type BrowserViewerEvent =
-  | { type: 'frame'; data: string; format: 'jpeg' | 'png'; viewport: { width: number; height: number } }
+  | {
+      type: 'frame';
+      data: string;
+      format: 'jpeg' | 'png';
+      viewport: { width: number; height: number };
+      /**
+       * The latest agent action on this page. Every frame carries it, so a viewer
+       * that drops obsolete frames still sees it; a new `seq` means a new action.
+       */
+      agentAction?: BrowserAgentAction;
+    }
   | { type: 'state'; state: BrowserState | null; incarnation: string }
   | { type: 'error'; message: string }
   | { type: 'closed' };
@@ -31,6 +47,8 @@ export class BrowserViewer {
   private opening?: Promise<void>;
   private closing?: Promise<void>;
   private detachClosed?: () => void;
+  private detachAgentAction?: () => void;
+  private agentAction?: BrowserAgentAction;
   private statePending = false;
   private stateDirty = false;
   private lastFrame?: BrowserViewerEvent;
@@ -105,9 +123,17 @@ export class BrowserViewer {
         ...frame,
         viewport: this.browser.getViewerViewport(this.threadId) ?? frame.viewport,
         format: this.browser.getScreencastFormat(),
+        ...(this.agentAction ? { agentAction: this.agentAction } : {}),
       };
       this.publish(this.lastFrame);
     });
+    // Show the action at once on the current picture; the page's own change follows as new frames.
+    this.detachAgentAction = this.browser.onAgentAction(action => {
+      this.agentAction = action;
+      if (this.lastFrame?.type !== 'frame') return;
+      this.lastFrame = { ...this.lastFrame, agentAction: action };
+      this.publish(this.lastFrame);
+    }, this.threadId);
     stream.on('url', () => {
       void this.refreshState().catch(() => this.publish({ type: 'closed' }));
     });
@@ -136,8 +162,11 @@ export class BrowserViewer {
     const stream = this.stream;
     this.stream = undefined;
     this.lastFrame = undefined;
+    this.agentAction = undefined;
     this.detachClosed?.();
     this.detachClosed = undefined;
+    this.detachAgentAction?.();
+    this.detachAgentAction = undefined;
     this.closing = Promise.resolve(stream?.stop()).finally(() => {
       this.closing = undefined;
     });

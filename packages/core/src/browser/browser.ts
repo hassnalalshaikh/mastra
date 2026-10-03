@@ -460,6 +460,17 @@ export interface KeyboardEventParams {
   windowsVirtualKeyCode?: number;
 }
 
+/**
+ * Where an agent tool is about to act on the page, so a live viewer can show it.
+ * `box` is the target element's box in the page viewport's CSS pixels, the same
+ * space as the viewer frame's `viewport`. `seq` increases with every action.
+ */
+export interface BrowserAgentAction {
+  seq: number;
+  kind: 'click' | 'type' | 'select' | 'hover' | 'drag';
+  box: { x: number; y: number; width: number; height: number };
+}
+
 // =============================================================================
 // MastraBrowser Base Class
 // =============================================================================
@@ -1223,6 +1234,53 @@ export abstract class MastraBrowser extends MastraBase {
   private _onThreadReadyCallbacks: Map<string, Set<() => void>> = new Map();
   /** Thread-specific closed callbacks. Key is threadId. */
   private _onThreadClosedCallbacks: Map<string, Set<() => void>> = new Map();
+  /** Agent action listeners. Key is threadId, or undefined for every thread. */
+  private _agentActionListeners: Map<string | undefined, Set<(action: BrowserAgentAction) => void>> = new Map();
+  private _agentActionSeq = 0;
+
+  /**
+   * Observe where agent tools act on the page (for a live viewer). Observation
+   * only: listeners never affect the action.
+   * @returns Cleanup function to unregister the listener
+   */
+  onAgentAction(listener: (action: BrowserAgentAction) => void, threadId?: string): () => void {
+    let listeners = this._agentActionListeners.get(threadId);
+    if (!listeners) {
+      listeners = new Set();
+      this._agentActionListeners.set(threadId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0 && this._agentActionListeners.get(threadId) === listeners) {
+        this._agentActionListeners.delete(threadId);
+      }
+    };
+  }
+
+  /** Whether any viewer is observing agent actions, so providers can skip measuring. */
+  protected hasAgentActionListeners(): boolean {
+    return this._agentActionListeners.size > 0;
+  }
+
+  /** Report an agent action to viewers of that thread and to viewers of every thread. */
+  protected notifyAgentAction(action: Omit<BrowserAgentAction, 'seq'>, threadId?: string): void {
+    if (!this._agentActionListeners.size) return;
+    const event: BrowserAgentAction = { ...action, seq: ++this._agentActionSeq };
+    const targets =
+      threadId === undefined
+        ? [...this._agentActionListeners.values()]
+        : [this._agentActionListeners.get(threadId), this._agentActionListeners.get(undefined)];
+    for (const listeners of targets) {
+      for (const listener of listeners ?? []) {
+        try {
+          listener(event);
+        } catch {
+          // Intentionally swallowed - a viewer must not affect the agent's action
+        }
+      }
+    }
+  }
 
   /**
    * Register a callback to be invoked when the browser becomes ready.
