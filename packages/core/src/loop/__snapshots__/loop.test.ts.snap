@@ -840,6 +840,18 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send delayed asynchr
     "from": "AGENT",
     "payload": {
       "args": {
+        "toolCallId": "call-1",
+        "toolName": "tool1",
+      },
+      "runId": "test-run-id",
+    },
+    "runId": "test-run-id",
+    "type": "tool-execution-start",
+  },
+  {
+    "from": "AGENT",
+    "payload": {
+      "args": {
         "value": "value",
       },
       "providerExecuted": undefined,
@@ -4771,6 +4783,18 @@ exports[`Loop Tests > AISDK v5 > result.fullStream > should send tool results 1`
     "from": "AGENT",
     "payload": {
       "args": {
+        "toolCallId": "call-1",
+        "toolName": "tool1",
+      },
+      "runId": "test-run-id",
+    },
+    "runId": "test-run-id",
+    "type": "tool-execution-start",
+  },
+  {
+    "from": "AGENT",
+    "payload": {
+      "args": {
         "value": "value",
       },
       "providerExecuted": undefined,
@@ -6472,6 +6496,18 @@ exports[`Loop Tests > AISDK v5 > tool execution errors > should include tool err
     },
     "runId": "test-run-id",
     "type": "tool-call",
+  },
+  {
+    "from": "AGENT",
+    "payload": {
+      "args": {
+        "toolCallId": "call-1",
+        "toolName": "tool1",
+      },
+      "runId": "test-run-id",
+    },
+    "runId": "test-run-id",
+    "type": "tool-execution-start",
   },
   {
     "from": "AGENT",
@@ -8757,6 +8793,18 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send del
     },
     "runId": "test-run-id",
     "type": "tool-call",
+  },
+  {
+    "from": "AGENT",
+    "payload": {
+      "args": {
+        "toolCallId": "call-1",
+        "toolName": "tool1",
+      },
+      "runId": "test-run-id",
+    },
+    "runId": "test-run-id",
+    "type": "tool-execution-start",
   },
   {
     "from": "AGENT",
@@ -12886,6 +12934,18 @@ exports[`Loop Tests > AISDK v6 (V3 models) > result.fullStream > should send too
     },
     "runId": "test-run-id",
     "type": "tool-call",
+  },
+  {
+    "from": "AGENT",
+    "payload": {
+      "args": {
+        "toolCallId": "call-1",
+        "toolName": "tool1",
+      },
+      "runId": "test-run-id",
+    },
+    "runId": "test-run-id",
+    "type": "tool-execution-start",
   },
   {
     "from": "AGENT",

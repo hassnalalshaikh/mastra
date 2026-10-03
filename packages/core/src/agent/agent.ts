@@ -7122,7 +7122,7 @@ export class Agent<
 
   /** Mandatory configured tool policy. Per-run hooks cannot replace it. */
   getToolPolicy(): ToolPolicy | undefined {
-    const globalPolicy = this.#mastra?.getToolPolicy();
+    const globalPolicy = this.#mastra?.getToolPolicy?.();
     return combineToolPolicies(typeof globalPolicy === 'function' ? globalPolicy : undefined, this.#toolPolicy);
   }
 
@@ -7130,7 +7130,10 @@ export class Agent<
     requestContext?: RequestContext;
     runId?: string;
   }): Promise<ToolPolicy | undefined> {
-    return combineToolPolicies(await this.#mastra?.resolveToolPolicy({ ...args, agentId: this.id }), this.#toolPolicy);
+    return combineToolPolicies(
+      await this.#mastra?.resolveToolPolicy?.({ ...args, agentId: this.id }),
+      this.#toolPolicy,
+    );
   }
 
   private wrapToolWithHooks(

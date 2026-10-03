@@ -153,6 +153,19 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
       // Stashed here and consumed further down, where the suspension helper's dependencies
       // (`args`, `transformChunk`, `flushMessagesBeforeSuspension`) exist.
       let eagerSuspensionIntent: EagerSuspensionIntent | undefined;
+      // Admitted execution is announced by the iteration that owns the call. An eager
+      // attempt stays silent so the stream order matches the ordinary foreach; its
+      // adopting iteration announces the start once the attempt's body has run.
+      const announceExecutionStart = async () => {
+        const chunk = {
+          type: 'tool-execution-start' as const,
+          runId,
+          from: ChunkFrom.AGENT,
+          payload: { runId, args: { toolCallId: inputData.toolCallId, toolName: inputData.toolName } },
+        };
+        safeEnqueue(controller, chunk);
+        await options?.onChunk?.(chunk);
+      };
       if (!isEagerExecution) {
         // Take rather than read: adoption is exactly-once, so a later iteration that
         // reuses this toolCallId executes again instead of replaying a stale result.
@@ -161,15 +174,22 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         );
         if (eagerExecution) {
           try {
-            return (await eagerExecution) as any;
+            const adopted = await eagerExecution;
+            await announceExecutionStart();
+            return adopted as any;
           } catch (error) {
             // The eager attempt produced nothing adoptable: it was cancelled while
             // still queued, or it turned out to need suspension. Run it normally
             // instead. In the suspension case the body did start, so the hook it
             // already announced must not be announced a second time.
-            if (!eagerToolCallDidNotExecute(error)) throw error;
+            if (!eagerToolCallDidNotExecute(error)) {
+              await announceExecutionStart();
+              throw error;
+            }
             inputAlreadyAnnouncedEagerly = eagerToolCallAlreadyAnnouncedInput(error);
             eagerSuspensionIntent = eagerToolCallSuspensionIntent(error);
+            // The eager body ran before it requested suspension.
+            if (eagerSuspensionIntent) await announceExecutionStart();
           }
         }
       }
@@ -855,14 +875,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
 
         const toolOptions: MastraToolInvocationOptions = {
           ...executionStartHook(async () => {
-            const chunk = {
-              type: 'tool-execution-start' as const,
-              runId,
-              from: ChunkFrom.AGENT,
-              payload: { runId, args: { toolCallId: inputData.toolCallId, toolName: inputData.toolName } },
-            };
-            safeEnqueue(controller, chunk);
-            await options?.onChunk?.(chunk);
+            if (!isEagerExecution) await announceExecutionStart();
           }),
           abortSignal,
           toolCallId: inputData.toolCallId,
@@ -1505,7 +1518,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         return {
           result: outcome.result,
           ...inputData,
-          isError: isToolPolicyRejection(outcome.rawResult) || isValidationError(outcome.rawResult),
+          ...(isToolPolicyRejection(outcome.rawResult) || isValidationError(outcome.rawResult)
+            ? { isError: true }
+            : {}),
           ...(approvalGrant ?? {}),
         };
       } catch (error) {

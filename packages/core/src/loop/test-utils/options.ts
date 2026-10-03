@@ -569,6 +569,18 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
               "from": "AGENT",
               "payload": {
                 "args": {
+                  "toolCallId": "call-1",
+                  "toolName": "tool1",
+                },
+                "runId": "test-run-id",
+              },
+              "runId": "test-run-id",
+              "type": "tool-execution-start",
+            },
+            {
+              "from": "AGENT",
+              "payload": {
+                "args": {
                   "value": "value",
                 },
                 "providerExecuted": undefined,
@@ -5381,6 +5393,18 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
             "from": "AGENT",
             "payload": {
               "args": {
+                "toolCallId": "2",
+                "toolName": "tool1",
+              },
+              "runId": "test-run-id",
+            },
+            "runId": "test-run-id",
+            "type": "tool-execution-start",
+          },
+          {
+            "from": "AGENT",
+            "payload": {
+              "args": {
                 "value": "test",
               },
               "providerExecuted": undefined,
@@ -8632,6 +8656,18 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
               },
               "runId": "test-run-id",
               "type": "tool-call",
+            },
+            {
+              "from": "AGENT",
+              "payload": {
+                "args": {
+                  "toolCallId": "call-1",
+                  "toolName": "tool1",
+                },
+                "runId": "test-run-id",
+              },
+              "runId": "test-run-id",
+              "type": "tool-execution-start",
             },
             {
               "from": "AGENT",
