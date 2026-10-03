@@ -7,6 +7,7 @@ import type {
   MastraProviderMetadata,
   MastraToolInvocationPart,
 } from '../agent/message-list/state/types';
+import { getToolCompletion, mergeToolProviderMetadata } from '../agent/message-list/tool-completion';
 import { AgentThreadLeaseLostError, agentThreadStreamRuntime } from '../agent/thread-stream-runtime';
 import type { ToolApprovalContext } from '../agent/tool-approval-context';
 import { TripWire } from '../agent/trip-wire';
@@ -25,6 +26,7 @@ import {
   getDisplayTransform,
   getUsageNumber,
 } from './stream-content';
+import { displayedToolCompletion, toolCompletionRow } from './tool-completion-display';
 import type { ActiveSubagentState, TokenUsage } from './types';
 
 /**
@@ -412,15 +414,29 @@ export class SessionRunEngine {
       isError: boolean;
       preliminary?: boolean;
       runId?: string;
+      providerExecuted?: boolean;
+      /** Assistant message holding the committed call, when the engine published it. */
+      messageId?: string;
+      args?: unknown;
       providerMetadata?: MastraProviderMetadata;
     },
   ): void {
-    const { toolCallId, toolName, result, isError, providerMetadata } = outcome;
+    const { toolCallId, toolName, result, isError } = outcome;
     if (outcome.preliminary) {
       this.#session.emit({ type: 'tool_update', toolCallId, partialResult: result, preliminary: true });
       return;
     }
+    // The completion record is exactly the one the engine published with this outcome.
+    const { providerMetadata } = outcome;
     const toolIndex = state.toolPartById.get(toolCallId);
+    if (
+      toolIndex === undefined &&
+      outcome.messageId &&
+      outcome.messageId !== state.currentMessage.id &&
+      this.publishLateToolCompletion(state, { ...outcome, messageId: outcome.messageId, providerMetadata })
+    ) {
+      return;
+    }
     const existing = toolIndex !== undefined ? state.currentMessage.content.parts[toolIndex] : undefined;
     const partIndex = toolIndex ?? state.currentMessage.content.parts.length;
     if (existing && existing.type === 'tool-invocation') {
@@ -429,8 +445,10 @@ export class SessionRunEngine {
         result,
         isError,
       });
-      if (providerMetadata) {
-        existing.providerMetadata = providerMetadata;
+      // Merge like the transcript commit does: call-time keys (the wait kind) stay.
+      const merged = mergeToolProviderMetadata(existing.providerMetadata, providerMetadata);
+      if (merged) {
+        existing.providerMetadata = merged;
       }
     } else {
       const toolInvocationPart: MastraToolInvocationPart = {
@@ -464,12 +482,65 @@ export class SessionRunEngine {
       runId: outcome.runId ?? state.runId ?? undefined,
       toolName,
       messageId: state.currentMessage.id,
-      completedAt: new Date().toISOString(),
+      completedAt: getToolCompletion(providerMetadata)?.completedAt ?? new Date().toISOString(),
       toolCallId,
       result,
       isError,
       ...(providerMetadata ? { providerMetadata } : {}),
     });
+  }
+
+  /**
+   * Publish a late outcome (its call belongs to an earlier assistant message,
+   * e.g. a background task that finished later) as that message's completion
+   * row, the row a stored read returns. Returns false when the outcome stays in
+   * its row instead (a question answered in place), leaving the normal fold.
+   */
+  private publishLateToolCompletion(
+    state: StreamState,
+    outcome: {
+      toolCallId: string;
+      toolName: string;
+      result: unknown;
+      isError: boolean;
+      runId?: string;
+      messageId: string;
+      args?: unknown;
+      providerMetadata?: MastraProviderMetadata;
+    },
+  ): boolean {
+    const { toolCallId, toolName, result, isError, providerMetadata } = outcome;
+    const part: MastraToolInvocationPart = {
+      type: 'tool-invocation',
+      toolInvocation: { state: 'result', toolCallId, toolName, args: outcome.args ?? {}, result, isError },
+      ...(providerMetadata ? { providerMetadata } : {}),
+    };
+    const completion = displayedToolCompletion(part);
+    if (!completion) return false;
+    const source: MastraDBMessage = {
+      id: outcome.messageId,
+      role: 'assistant',
+      ...(state.threadId ? { threadId: state.threadId } : {}),
+      resourceId: this.#session.identity.getResourceId(),
+      createdAt: new Date(completion.completedAt),
+      content: { format: 2, parts: [] },
+    };
+    const row = toolCompletionRow(source, part, completion);
+    this.#session.emit({ type: 'message_start', message: row });
+    this.#session.emit({ type: 'message_end', id: row.id });
+    this.#session.emit({
+      type: 'tool_end',
+      threadId: state.threadId,
+      runId: outcome.runId ?? state.runId ?? undefined,
+      toolName,
+      messageId: outcome.messageId,
+      completedAt: completion.completedAt,
+      toolCallId,
+      result,
+      isError,
+      ...(providerMetadata ? { providerMetadata } : {}),
+    });
+    return true;
   }
 
   /** Open an `agent-<key>` delegation in `activeSubagents`, taking its task from the tool call's prompt. */
@@ -795,6 +866,9 @@ export class SessionRunEngine {
           toolName: getString(toolResult.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'output-available', toolResult.result),
           isError: getBoolean(toolResult.isError, false),
+          providerExecuted: getBoolean(toolResult.providerExecuted, false),
+          messageId: getString(toolResult.messageId),
+          args: getDisplayTransform(chunk.metadata, 'input-available', toolResult.args),
           // A dispatched background task reports its placeholder with native
           // `backgroundTask.status: 'running'` metadata; keep it active.
           preliminary:
@@ -814,6 +888,9 @@ export class SessionRunEngine {
           toolName: getString(toolError.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'error', getErrorFromUnknown(toolError.error).message),
           isError: true,
+          providerExecuted: getBoolean(toolError.providerExecuted, false),
+          messageId: getString(toolError.messageId),
+          args: getDisplayTransform(chunk.metadata, 'input-available', toolError.args),
           providerMetadata: isProviderMetadata(toolError.providerMetadata) ? toolError.providerMetadata : undefined,
         });
         break;
@@ -892,10 +969,16 @@ export class SessionRunEngine {
         };
 
         const partIndex = toolIndex ?? state.currentMessage.content.parts.length;
+        const deniedMetadata = isProviderMetadata(payload.providerMetadata) ? payload.providerMetadata : undefined;
         if (existing && existing.type === 'tool-invocation') {
           existing.toolInvocation = Object.assign(existing.toolInvocation, toolInvocation);
+          existing.providerMetadata = mergeToolProviderMetadata(existing.providerMetadata, deniedMetadata);
         } else {
-          state.currentMessage.content.parts.push({ type: 'tool-invocation', toolInvocation });
+          state.currentMessage.content.parts.push({
+            type: 'tool-invocation',
+            toolInvocation,
+            ...(deniedMetadata ? { providerMetadata: deniedMetadata } : {}),
+          });
           state.toolPartById.set(toolCallId, partIndex);
         }
 
@@ -1143,6 +1226,17 @@ export class SessionRunEngine {
           }
         }
         state.isSuspended = true;
+
+        // Keep the wait kind on the live call, as the transcript does, so a
+        // question answered later stays at its question position.
+        const suspendedIndex = state.toolPartById.get(suspToolCallId);
+        const suspendedPart =
+          suspendedIndex !== undefined ? state.currentMessage.content.parts[suspendedIndex] : undefined;
+        if (suspendedPart?.type === 'tool-invocation') {
+          suspendedPart.providerMetadata = mergeToolProviderMetadata(suspendedPart.providerMetadata, {
+            mastra: { toolSuspensionWaitingFor: getPayload(chunk).waitingFor === 'external' ? 'external' : 'user' },
+          });
+        }
 
         this.#session.emit({
           type: 'tool_suspended',

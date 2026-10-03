@@ -446,6 +446,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -462,6 +469,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                       "output": {
                         "type": "text",
                         "value": "result1",
+                      },
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
                       },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
@@ -584,7 +598,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                   "value": "value",
                 },
                 "providerExecuted": undefined,
-                "providerMetadata": undefined,
+                "providerMetadata": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "result": "result1",
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -628,6 +648,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -644,6 +671,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -670,6 +704,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -686,6 +727,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -745,6 +793,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -859,6 +914,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                                   "value": "value",
                                 },
                                 "providerExecuted": undefined,
+                                "providerOptions": {
+                                  "mastra": {
+                                    "toolCompletion": {
+                                      "completedAt": "2024-01-01T00:00:00.000Z",
+                                    },
+                                  },
+                                },
                                 "toolCallId": "call-1",
                                 "toolName": "tool1",
                                 "type": "tool-call",
@@ -875,6 +937,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                                 "output": {
                                   "type": "text",
                                   "value": "result1",
+                                },
+                                "providerOptions": {
+                                  "mastra": {
+                                    "toolCompletion": {
+                                      "completedAt": "2024-01-01T00:00:00.000Z",
+                                    },
+                                  },
                                 },
                                 "toolCallId": "call-1",
                                 "toolName": "tool1",
@@ -1040,6 +1109,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -1056,6 +1132,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -1096,6 +1179,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -1112,6 +1202,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -1185,6 +1282,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -1299,6 +1403,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                                   "value": "value",
                                 },
                                 "providerExecuted": undefined,
+                                "providerOptions": {
+                                  "mastra": {
+                                    "toolCompletion": {
+                                      "completedAt": "2024-01-01T00:00:00.000Z",
+                                    },
+                                  },
+                                },
                                 "toolCallId": "call-1",
                                 "toolName": "tool1",
                                 "type": "tool-call",
@@ -1315,6 +1426,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                                 "output": {
                                   "type": "text",
                                   "value": "result1",
+                                },
+                                "providerOptions": {
+                                  "mastra": {
+                                    "toolCompletion": {
+                                      "completedAt": "2024-01-01T00:00:00.000Z",
+                                    },
+                                  },
                                 },
                                 "toolCallId": "call-1",
                                 "toolName": "tool1",
@@ -1423,6 +1541,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -1439,6 +1564,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -1479,6 +1611,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -1495,6 +1634,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -1568,6 +1714,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -1682,6 +1835,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                                   "value": "value",
                                 },
                                 "providerExecuted": undefined,
+                                "providerOptions": {
+                                  "mastra": {
+                                    "toolCompletion": {
+                                      "completedAt": "2024-01-01T00:00:00.000Z",
+                                    },
+                                  },
+                                },
                                 "toolCallId": "call-1",
                                 "toolName": "tool1",
                                 "type": "tool-call",
@@ -1698,6 +1858,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                                 "output": {
                                   "type": "text",
                                   "value": "result1",
+                                },
+                                "providerOptions": {
+                                  "mastra": {
+                                    "toolCompletion": {
+                                      "completedAt": "2024-01-01T00:00:00.000Z",
+                                    },
+                                  },
                                 },
                                 "toolCallId": "call-1",
                                 "toolName": "tool1",
@@ -2446,6 +2613,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                       "value": "value",
                     },
                     "providerExecuted": undefined,
+                    "providerOptions": {
+                      "mastra": {
+                        "toolCompletion": {
+                          "completedAt": "2024-01-01T00:00:00.000Z",
+                        },
+                      },
+                    },
                     "toolCallId": "call-1",
                     "toolName": "tool1",
                     "type": "tool-call",
@@ -2462,6 +2636,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                     "output": {
                       "type": "text",
                       "value": "result1",
+                    },
+                    "providerOptions": {
+                      "mastra": {
+                        "toolCompletion": {
+                          "completedAt": "2024-01-01T00:00:00.000Z",
+                        },
+                      },
                     },
                     "toolCallId": "call-1",
                     "toolName": "tool1",
@@ -2828,6 +3009,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -2970,6 +3158,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                     },
                     "parts": [
                       {
+                        "providerMetadata": {
+                          "mastra": {
+                            "toolCompletion": {
+                              "completedAt": "2024-01-01T00:00:00.000Z",
+                            },
+                          },
+                        },
                         "toolInvocation": {
                           "args": {
                             "value": "value",
@@ -3007,6 +3202,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -5409,6 +5611,11 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
               },
               "providerExecuted": undefined,
               "providerMetadata": {
+                "mastra": {
+                  "toolCompletion": {
+                    "completedAt": "2024-01-01T00:00:00.000Z",
+                  },
+                },
                 "provider": {
                   "custom": "value",
                 },
@@ -8545,6 +8752,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                         "value": "value",
                       },
                       "providerExecuted": undefined,
+                      "providerOptions": {
+                        "mastra": {
+                          "toolCompletion": {
+                            "completedAt": "2024-01-01T00:00:00.000Z",
+                          },
+                        },
+                      },
                       "toolCallId": "call-1",
                       "toolName": "tool1",
                       "type": "tool-call",
@@ -8676,7 +8890,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                   "value": "value",
                 },
                 "providerExecuted": undefined,
-                "providerMetadata": undefined,
+                "providerMetadata": {
+                  "mastra": {
+                    "toolCompletion": {
+                      "completedAt": "2024-01-01T00:00:00.000Z",
+                    },
+                  },
+                },
                 "result": "result1",
                 "toolCallId": "call-1",
                 "toolName": "tool1",
@@ -8711,6 +8931,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -8727,6 +8954,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -8744,6 +8978,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -8760,6 +9001,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -8810,6 +9058,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -8978,6 +9233,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -8994,6 +9256,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
@@ -9011,6 +9280,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                             "value": "value",
                           },
                           "providerExecuted": undefined,
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
+                          },
                           "toolCallId": "call-1",
                           "toolName": "tool1",
                           "type": "tool-call",
@@ -9027,6 +9303,13 @@ export function optionsTests({ loopFn, runId }: { loopFn: typeof loop; runId: st
                           "output": {
                             "type": "text",
                             "value": "result1",
+                          },
+                          "providerOptions": {
+                            "mastra": {
+                              "toolCompletion": {
+                                "completedAt": "2024-01-01T00:00:00.000Z",
+                              },
+                            },
                           },
                           "toolCallId": "call-1",
                           "toolName": "tool1",

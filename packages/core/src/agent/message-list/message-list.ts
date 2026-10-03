@@ -55,6 +55,7 @@ import type {
   SerializedMessageListState,
 } from './state';
 import type { MastraToolInvocation, MastraToolInvocationPart } from './state/types';
+import { stampToolCompletion } from './tool-completion';
 import type { AIV5Type, AIV5ResponseMessage, AIV6Type, MessageInput, MessageListInput } from './types';
 import { dropCrossProviderExecutedParts } from './utils/provider-compat';
 import { preserveResponseItemIdsOnMerge } from './utils/response-item-metadata';
@@ -1870,6 +1871,9 @@ export class MessageList {
     };
     if (part.updatedAt !== undefined && mergedPart.updatedAt === undefined) mergedPart.updatedAt = part.updatedAt;
     stampToolPartUpdate(mergedPart, part.toolInvocation, inputPart.updatedAt);
+    // First terminal commit of the call: record when it completed so display can
+    // place the outcome at its completion position (the source row keeps the call).
+    stampToolCompletion(mergedPart);
     msg.content.parts![i] = mergedPart;
 
     // `backgroundTasks` is a per-toolCallId record — merge instead of

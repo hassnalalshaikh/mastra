@@ -661,7 +661,11 @@ describe('MessageList.updateToolInvocation', () => {
 
     const part = msg.content.parts[0] as any;
     expect(part.toolInvocation.state).toBe('result');
-    expect(part.providerMetadata).toEqual({ anthropic: { cacheControl: { type: 'ephemeral' } } });
+    // The first terminal commit also records its completion from the part clock.
+    expect(part.providerMetadata).toEqual({
+      anthropic: { cacheControl: { type: 'ephemeral' } },
+      mastra: { toolCompletion: { completedAt: new Date(part.updatedAt).toISOString() } },
+    });
   });
 
   it('should allow result to override providerExecuted from original call', () => {
@@ -731,7 +735,7 @@ describe('MessageList.updateToolInvocation', () => {
     const part = msg.content.parts[0] as any;
     expect(part.providerMetadata).toEqual({
       anthropic: { cacheControl: { type: 'ephemeral' } },
-      mastra: { modelOutput: true },
+      mastra: { modelOutput: true, toolCompletion: { completedAt: new Date(part.updatedAt).toISOString() } },
     });
   });
 
@@ -915,7 +919,10 @@ describe('MessageList.updateToolInvocation', () => {
     } as any);
 
     const part = msg.content.parts[0] as any;
-    expect(part.providerMetadata.mastra).toEqual({ modelOutput: true });
+    expect(part.providerMetadata.mastra).toEqual({
+      modelOutput: true,
+      toolCompletion: { completedAt: new Date(part.updatedAt).toISOString() },
+    });
   });
 
   it('should match a provider-executed call by toolName when the result toolCallId differs', () => {

@@ -57,6 +57,7 @@ import { loadAutoResumeToolInput } from '../../shared/resumable-tool-input';
 import { dispatchBackgroundTool } from '../../shared/steps/background-dispatch-core';
 import { applyBackgroundToolResult } from '../../shared/steps/background-task-result-core';
 import { executeToolCall } from '../../shared/steps/execute-tool-core';
+import { applyCommittedToolCompletion } from '../../shared/steps/tool-result-commit-core';
 import { resolveFrameworkSuspendedToolIdentity } from '../../shared/suspended-tool-run-id';
 import type { ResolvedSuspendedToolIdentity } from '../../shared/suspended-tool-run-id';
 import { applyToolPayloadTransformToChunk } from '../../shared/tool-payload-transform';
@@ -1255,38 +1256,36 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     }
 
                     if (chunk.type === 'background-task-completed') {
+                      // onResult committed the outcome first; publish that committed record.
+                      const payload = {
+                        toolCallId: chunk.payload.toolCallId,
+                        toolName: chunk.payload.toolName,
+                        args: inputData.args,
+                        result: chunk.payload.result,
+                        providerMetadata: backgroundResultMetadata(
+                          chunk.payload.taskId,
+                          'completed',
+                        ) as ProviderMetadata,
+                        providerExecuted: inputData.providerExecuted,
+                      };
+                      applyCommittedToolCompletion(messageList, payload);
                       safeEnqueue(
                         controller,
-                        await transformChunk({
-                          type: 'tool-result',
-                          runId: bgRunId,
-                          from: ChunkFrom.AGENT,
-                          payload: {
-                            toolCallId: chunk.payload.toolCallId,
-                            toolName: chunk.payload.toolName,
-                            args: inputData.args,
-                            result: chunk.payload.result,
-                            providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'completed'),
-                            providerExecuted: inputData.providerExecuted,
-                          },
-                        }),
+                        await transformChunk({ type: 'tool-result', runId: bgRunId, from: ChunkFrom.AGENT, payload }),
                       );
                     } else if (chunk.type === 'background-task-failed') {
+                      const payload = {
+                        toolCallId: chunk.payload.toolCallId,
+                        toolName: chunk.payload.toolName,
+                        error: chunk.payload.error,
+                        args: inputData.args,
+                        providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'failed') as ProviderMetadata,
+                        providerExecuted: inputData.providerExecuted,
+                      };
+                      applyCommittedToolCompletion(messageList, payload);
                       safeEnqueue(
                         controller,
-                        await transformChunk({
-                          type: 'tool-error',
-                          runId: bgRunId,
-                          from: ChunkFrom.AGENT,
-                          payload: {
-                            toolCallId: chunk.payload.toolCallId,
-                            toolName: chunk.payload.toolName,
-                            error: chunk.payload.error,
-                            args: inputData.args,
-                            providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'failed'),
-                            providerExecuted: inputData.providerExecuted,
-                          },
-                        }),
+                        await transformChunk({ type: 'tool-error', runId: bgRunId, from: ChunkFrom.AGENT, payload }),
                       );
                     }
                   })

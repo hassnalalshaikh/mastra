@@ -16,6 +16,7 @@ import { dispatchBackgroundTool } from '../../../../loop/shared/steps/background
 import { applyBackgroundToolResult } from '../../../../loop/shared/steps/background-task-result-core';
 import { executeToolCall } from '../../../../loop/shared/steps/execute-tool-core';
 import { processAndEmitChunk } from '../../../../loop/shared/steps/process-chunk-core';
+import { applyCommittedToolCompletion } from '../../../../loop/shared/steps/tool-result-commit-core';
 import { resolveFrameworkSuspendedToolIdentity } from '../../../../loop/shared/suspended-tool-run-id';
 import type { ResolvedSuspendedToolIdentity } from '../../../../loop/shared/suspended-tool-run-id';
 import { applyToolPayloadTransformToChunk } from '../../../../loop/shared/tool-payload-transform';
@@ -28,7 +29,7 @@ import type { ProcessorState } from '../../../../processors';
 import { BACKGROUND_WORK_CONTEXT } from '../../../../processors/background-work-signals';
 import { ProcessorRunner } from '../../../../processors/runner';
 import type { RequestContext } from '../../../../request-context';
-import type { ChunkType } from '../../../../stream/types';
+import type { ChunkType, ProviderMetadata } from '../../../../stream/types';
 import { ChunkFrom } from '../../../../stream/types';
 import {
   getTransformedToolPayload,
@@ -49,6 +50,7 @@ import { stopGoalActivity } from '../../../goal';
 import { MessageList } from '../../../message-list';
 import type { SerializedMessageListState } from '../../../message-list/state';
 import type { MastraDBMessage } from '../../../message-list/state/types';
+import { findToolCallMessageId, withCommittedToolCompletion } from '../../../message-list/tool-completion';
 import type { SaveQueueManager } from '../../../save-queue';
 import { resolveDeclineReason } from '../../../tool-approval';
 import { TripWire } from '../../../trip-wire';
@@ -1580,31 +1582,35 @@ export function createDurableToolCallStep() {
               }
 
               if (chunk.type === 'background-task-completed') {
+                // onResult committed the outcome first; publish that committed record.
+                const payload = {
+                  toolCallId: chunk.payload.toolCallId,
+                  toolName: chunk.payload.toolName,
+                  args: cleanedArgs,
+                  result: chunk.payload.result,
+                  providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'completed') as ProviderMetadata,
+                };
+                applyCommittedToolCompletion(messageList, payload);
                 void emitChunkEvent(pubsub, bgRunId, {
                   type: 'tool-result',
                   runId: bgRunId,
                   from: ChunkFrom.AGENT,
-                  payload: {
-                    toolCallId: chunk.payload.toolCallId,
-                    toolName: chunk.payload.toolName,
-                    args: cleanedArgs,
-                    result: chunk.payload.result,
-                    providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'completed'),
-                    providerExecuted,
-                  },
+                  payload: { ...payload, providerExecuted },
                 });
               } else if (chunk.type === 'background-task-failed') {
+                const payload = {
+                  toolCallId: chunk.payload.toolCallId,
+                  toolName: chunk.payload.toolName,
+                  error: chunk.payload.error,
+                  args: cleanedArgs,
+                  providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'failed') as ProviderMetadata,
+                };
+                applyCommittedToolCompletion(messageList, payload);
                 void emitChunkEvent(pubsub, bgRunId, {
                   type: 'tool-error',
                   runId: bgRunId,
                   from: ChunkFrom.AGENT,
-                  payload: {
-                    toolCallId: chunk.payload.toolCallId,
-                    toolName: chunk.payload.toolName,
-                    error: chunk.payload.error,
-                    args: cleanedArgs,
-                    providerMetadata: backgroundResultMetadata(chunk.payload.taskId, 'failed'),
-                  },
+                  payload,
                 });
               }
             } catch {
@@ -1986,6 +1992,17 @@ export function createDurableToolCallStep() {
           }
         }
 
+        // This engine publishes the outcome here, before llm-mapping commits it.
+        // Record the completion once and carry it on both the published chunk
+        // and the step output, so the committed row and the live row agree.
+        const completion = wasSuspended ? undefined : durableToolCompletion(messageList, toolCallId, runId);
+        if (completion) {
+          providerMetadata = withCommittedToolCompletion(
+            providerMetadata as ProviderMetadata | undefined,
+            completion.toolCompletion,
+          ) as typeof providerMetadata;
+        }
+
         // Emit tool-result chunk (non-fatal — result is returned regardless).
         // Skip emission when the tool called suspend() — the workflow engine's
         // suspend() sets a flag but does NOT throw, so execution continues past
@@ -2000,7 +2017,7 @@ export function createDurableToolCallStep() {
                 type: 'tool-result' as const,
                 runId,
                 from: ChunkFrom.AGENT,
-                payload: { toolCallId, toolName, args, result, providerExecuted },
+                payload: { toolCallId, toolName, args, result, providerExecuted, ...completionPayload(completion) },
               },
               {
                 policy: registryEntry?.toolPayloadTransform,
@@ -2063,6 +2080,7 @@ export function createDurableToolCallStep() {
           throw error;
         }
         const toolError = serializeError(error);
+        const errorCompletion = wasSuspended ? undefined : durableToolCompletion(messageList, toolCallId, runId);
 
         // Emit tool-error chunk (non-fatal — error result is returned regardless)
         let errorTransformMetadata: DurableToolCallOutput['transformMetadata'];
@@ -2073,7 +2091,7 @@ export function createDurableToolCallStep() {
                 type: 'tool-error' as const,
                 runId,
                 from: ChunkFrom.AGENT,
-                payload: { toolCallId, toolName, args, error: toolError },
+                payload: { toolCallId, toolName, args, error: toolError, ...completionPayload(errorCompletion) },
               },
               {
                 policy: registryEntry?.toolPayloadTransform,
@@ -2108,6 +2126,14 @@ export function createDurableToolCallStep() {
 
         return {
           ...typedInput,
+          ...(errorCompletion
+            ? {
+                providerMetadata: withCommittedToolCompletion(
+                  typedInput.providerMetadata as any,
+                  errorCompletion.toolCompletion,
+                ) as any,
+              }
+            : {}),
           error: toolError,
           ...(approvalGrant ?? {}),
           ...(processorDataParts.length ? { processorDataParts } : {}),
@@ -2118,4 +2144,29 @@ export function createDurableToolCallStep() {
       }
     },
   });
+}
+
+/** One completion record for an outcome this engine publishes before its commit. */
+function durableToolCompletion(
+  messageList: MessageList | undefined,
+  toolCallId: string,
+  runId: string,
+): { toolCompletion: { completedAt: string; runId: string }; messageId?: string } {
+  let messageId: string | undefined;
+  try {
+    const messages = messageList?.get?.all?.db?.();
+    messageId = Array.isArray(messages) ? findToolCallMessageId(messages, toolCallId) : undefined;
+  } catch {
+    messageId = undefined;
+  }
+  return { toolCompletion: { completedAt: new Date().toISOString(), runId }, ...(messageId ? { messageId } : {}) };
+}
+
+/** Completion fields a published outcome carries (display annotation only). */
+function completionPayload(completion: ReturnType<typeof durableToolCompletion> | undefined) {
+  if (!completion) return {};
+  return {
+    providerMetadata: withCommittedToolCompletion(undefined, completion.toolCompletion) as ProviderMetadata,
+    ...(completion.messageId ? { messageId: completion.messageId } : {}),
+  };
 }

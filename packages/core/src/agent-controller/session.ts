@@ -42,6 +42,7 @@ import { Workspace } from '../workspace';
 import { SessionStartupCancelledError } from './errors';
 import { readMessageAuthor, withMessageAuthor } from './message-author';
 import { SessionRunEngine } from './session-run-engine';
+import { LiveToolCompletionProjector } from './tool-completion-display';
 import type { TaskItemSnapshot } from './tools';
 import { createEmptyTokenUsage, defaultDisplayState, defaultOMProgressState } from './types';
 import type {
@@ -3407,6 +3408,8 @@ export class SessionBus {
    * workspace ready or error state.
    */
   #lastWorkspaceEvents: AgentControllerEvent[] = [];
+  /** Shows each completed tool call as its own row, the same rows a stored read returns. */
+  readonly #completionRows = new LiveToolCompletionProjector();
 
   /** Attach the display-state reducer the bus folds events into. Set once by the Session. */
   setDisplayState(displayState: SessionDisplayState): void {
@@ -3452,6 +3455,25 @@ export class SessionBus {
         this.#lastWorkspaceEvents.push(event);
       }
     }
+    if (event.type === 'agent_start') this.#completionRows.reset();
+    const projected = this.#completionRows.project(event);
+    if (projected) {
+      for (const item of projected) {
+        if (item.display) {
+          this.#emitDisplayed(item.event);
+        } else {
+          // A completion row is a settled transcript row, not the current answer.
+          this.#flushDisplayState();
+          this.#dispatch(item.event);
+        }
+      }
+      return;
+    }
+    this.#emitDisplayed(event);
+  }
+
+  /** Fold an event into the display state, then publish it with its snapshot. */
+  #emitDisplayed(event: AgentControllerEvent): void {
     this.#displayState?.apply(event);
 
     // A pending snapshot describes state that predates this event, so it must

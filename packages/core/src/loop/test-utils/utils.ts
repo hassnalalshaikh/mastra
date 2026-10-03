@@ -23,7 +23,8 @@ export function stripMastraCreatedAt<T>(value: T): T {
 
   if (value && typeof value === 'object') {
     const normalizedEntries = Object.entries(value).map(([key, nestedValue]) => {
-      if (key === 'createdAt' || key === 'startedAt') {
+      // Wall-clock stamps (including a tool's completion time) vary per run.
+      if (key === 'createdAt' || key === 'startedAt' || key === 'completedAt') {
         return null;
       }
 

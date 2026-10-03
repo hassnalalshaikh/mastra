@@ -1504,17 +1504,13 @@ export const LIST_AGENT_CONTROLLER_THREAD_MESSAGES_ROUTE = createRoute({
 
       // Read-only route: delegate storage retrieval to the controller without
       // constructing a Session, which would initialize the workspace/sandbox.
-      const isLegacyLimitQuery = limit !== undefined;
-      const result = await controller.queryThreadMessages(
+      // The legacy `limit` read is the display read (newest rows, oldest-first,
+      // completed tool outcomes at their completion time); explicit pagination
+      // stays the raw storage contract.
+      const result =
         limit !== undefined
-          ? {
-              threadId,
-              resourceId,
-              perPage: limit,
-              page: page ?? 0,
-              orderBy: { field: 'createdAt', direction: 'DESC' as const },
-            }
-          : {
+          ? await controller.queryThreadDisplayMessages({ threadId, resourceId, limit, page })
+          : await controller.queryThreadMessages({
               threadId,
               resourceId,
               ...(perPage !== undefined ? { perPage } : {}),
@@ -1522,9 +1518,8 @@ export const LIST_AGENT_CONTROLLER_THREAD_MESSAGES_ROUTE = createRoute({
               ...(orderBy !== undefined ? { orderBy } : {}),
               ...(include !== undefined ? { include } : {}),
               ...(filter !== undefined ? { filter } : {}),
-            },
-      );
-      const messages = isLegacyLimitQuery ? result.messages.reverse() : result.messages;
+            });
+      const messages = result.messages;
 
       return {
         ...result,

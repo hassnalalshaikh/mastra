@@ -1,4 +1,5 @@
 import type { MessageList } from '../../../agent/message-list';
+import { findCommittedToolCompletion, withCommittedToolCompletion } from '../../../agent/message-list/tool-completion';
 import { sanitizeToolName } from '../../../agent/message-list/utils/tool-name';
 import { EntityType, SpanType } from '../../../observability';
 import type { ProviderMetadata } from '../../../stream/types';
@@ -180,4 +181,32 @@ export function commitToolResult(deps: {
   }
 
   return updated;
+}
+
+/**
+ * Carry the transcript's committed completion onto a published tool outcome,
+ * so a live consumer places it exactly where a stored read does. Call it after
+ * the commit; an uncommitted outcome (pending, placeholder) is left untouched.
+ * This is display annotation only: it never blocks or fails the publish.
+ */
+export function applyCommittedToolCompletion(
+  messageList: MessageList | undefined,
+  payload: { toolCallId: string; providerMetadata?: ProviderMetadata; messageId?: string },
+  /** Name the source message only for an outcome that can land outside its call's live message. */
+  { withSourceMessage = true }: { withSourceMessage?: boolean } = {},
+): void {
+  let committed: ReturnType<typeof findCommittedToolCompletion>;
+  try {
+    const responses = messageList?.get?.response?.db?.();
+    committed = Array.isArray(responses) ? findCommittedToolCompletion(responses, payload.toolCallId) : undefined;
+  } catch {
+    return;
+  }
+  if (!committed) return;
+  if (withSourceMessage) payload.messageId = committed.messageId;
+  payload.providerMetadata = withCommittedToolCompletion(
+    payload.providerMetadata,
+    committed.toolCompletion,
+    committed.waitingFor,
+  ) as ProviderMetadata;
 }

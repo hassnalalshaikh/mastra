@@ -227,6 +227,8 @@ export interface ToolResultPayload<TResult = unknown, TArgs = unknown> {
   providerMetadata?: ProviderMetadata;
   args?: TArgs;
   dynamic?: boolean;
+  /** Assistant message whose call this outcome completes, once it is committed to the transcript. */
+  messageId?: string;
 }
 
 export type DynamicToolCallPayload = ToolCallPayload<any, any>;
@@ -362,6 +364,8 @@ export interface ToolErrorPayload {
   args?: Record<string, unknown>;
   error: unknown;
   providerExecuted?: boolean;
+  /** Assistant message whose call this outcome completes, once it is committed to the transcript. */
+  messageId?: string;
 }
 
 /** Terminal stream payload when a requireApproval tool call is declined. */
@@ -374,6 +378,10 @@ export interface ToolOutputDeniedPayload {
     approved: false;
     reason?: string;
   };
+  /** Committed transcript metadata of the declined call (completion record). */
+  providerMetadata?: ProviderMetadata;
+  /** Assistant message whose call this outcome completes, once it is committed to the transcript. */
+  messageId?: string;
 }
 
 interface AbortPayload {
