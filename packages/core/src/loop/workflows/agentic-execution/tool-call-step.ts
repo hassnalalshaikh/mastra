@@ -66,6 +66,7 @@ import { serializeToolError, ToolNotFoundError } from '../errors';
 import { toolCallInputSchema, toolCallOutputSchema } from '../schema';
 import {
   EAGER_TOOL_ABORT_SIGNAL,
+  EAGER_EXECUTION_STARTED,
   EAGER_TOOL_BAILOUT,
   EAGER_TOOL_EXECUTION_MARKER,
   eagerToolCallAlreadyAnnouncedInput,
@@ -176,17 +177,16 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         if (eagerExecution) {
           try {
             const adopted = await eagerExecution;
-            await announceExecutionStart();
+            if ((adopted as Record<symbol, unknown> | undefined)?.[EAGER_EXECUTION_STARTED]) {
+              await announceExecutionStart();
+            }
             return adopted as any;
           } catch (error) {
             // The eager attempt produced nothing adoptable: it was cancelled while
             // still queued, or it turned out to need suspension. Run it normally
             // instead. In the suspension case the body did start, so the hook it
             // already announced must not be announced a second time.
-            if (!eagerToolCallDidNotExecute(error)) {
-              await announceExecutionStart();
-              throw error;
-            }
+            if (!eagerToolCallDidNotExecute(error)) throw error;
             inputAlreadyAnnouncedEagerly = eagerToolCallAlreadyAnnouncedInput(error);
             eagerSuspensionIntent = eagerToolCallSuspensionIntent(error);
             // The eager body ran before it requested suspension.
@@ -904,6 +904,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         const toolOptions: MastraToolInvocationOptions = {
           ...executionStartHook(async () => {
             if (!isEagerExecution) await announceExecutionStart();
+            else if (eagerBailout) eagerBailout.executionStarted = true;
           }),
           abortSignal,
           toolCallId: inputData.toolCallId,

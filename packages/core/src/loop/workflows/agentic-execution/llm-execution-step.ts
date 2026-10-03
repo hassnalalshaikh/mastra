@@ -102,6 +102,7 @@ import { buildMessagesFromChunks } from './build-messages-from-chunks';
 import type { CollectedChunk } from './build-messages-from-chunks';
 import {
   EAGER_TOOL_ABORT_SIGNAL,
+  EAGER_EXECUTION_STARTED,
   EAGER_TOOL_BAILOUT,
   EAGER_TOOL_EXECUTION_MARKER,
   EagerToolExecutionNotRun,
@@ -2280,6 +2281,9 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
                             // iteration has nothing to raise the real suspension from.
                             suspension: bailout.suspension,
                           });
+                        }
+                        if (bailout.executionStarted && settled && typeof settled === 'object') {
+                          Object.defineProperty(settled, EAGER_EXECUTION_STARTED, { value: true });
                         }
                         return settled;
                       },
