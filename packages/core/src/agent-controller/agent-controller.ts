@@ -253,6 +253,7 @@ export class AgentController<TState = {}> {
    */
   #externalMastra: Mastra | undefined = undefined;
   #gatewayManager: GatewayManager | undefined = undefined;
+  #availableModelsRevision = 0;
   #legacyAgentMode: Record<string, Agent<any, any, any, any>> = {};
   /** Chat channels running this controller inside messaging threads (from `config.channels`). */
   #channels: AgentControllerChannels | null = null;
@@ -269,7 +270,7 @@ export class AgentController<TState = {}> {
     }
     // Gateway manager merges configured gateways with the router defaults
     // (custom takes precedence). Shared by listAvailableModels,
-    // getCurrentModelAuthStatus, and the OM model resolver.
+    // and getCurrentModelAuthStatus. Parent gateways are refreshed on access.
     this.#gatewayManager = new GatewayManager([...(config.gateways ?? []), ...defaultGateways]);
 
     const defaultMode = config.defaultModeId
@@ -968,6 +969,7 @@ export class AgentController<TState = {}> {
    */
   __registerMastra(mastra: Mastra): void {
     this.#externalMastra = mastra;
+    this.invalidateAvailableModelsCache();
 
     // If `init()` already built an internal Mastra before we were wired to a
     // parent, drop it: the parent now owns storage/agents/observability, but the
@@ -1864,7 +1866,7 @@ export class AgentController<TState = {}> {
     // and falls back to "no auth" instead of erroring.
     let hasAuth = true;
     try {
-      hasAuth = this.#gatewayManager ? await this.#gatewayManager.hasAuth(modelId) : true;
+      hasAuth = await this.#resolveGatewayManager().hasAuth(modelId);
     } catch {
       hasAuth = false;
     }
@@ -1888,6 +1890,8 @@ export class AgentController<TState = {}> {
    * Get available models from the app-provided catalog hook with use counts applied.
    */
   async listAvailableModels(): Promise<AvailableModel[]> {
+    const manager = this.#resolveGatewayManager();
+    const revision = this.#availableModelsRevision;
     const now = Date.now();
     if (this.availableModelsCache && now - this.availableModelsCacheTime < 10_000) {
       return this.availableModelsCache;
@@ -1904,18 +1908,41 @@ export class AgentController<TState = {}> {
       });
     };
 
-    const catalog = await this.#gatewayManager!.listAvailableModels();
+    const catalog = await manager.listAvailableModels();
     for (const model of catalog) {
       upsertModel(model);
     }
 
     const result = [...modelsById.values()];
-    this.availableModelsCache = result;
-    this.availableModelsCacheTime = Date.now();
+    // A publication can invalidate the list while providers are still loading.
+    // Its older response must never repopulate the newer cache.
+    if (revision === this.#availableModelsRevision) {
+      this.availableModelsCache = result;
+      this.availableModelsCacheTime = Date.now();
+    }
     return result;
   }
 
+  #resolveGatewayManager(): GatewayManager {
+    const manager = new GatewayManager([
+      ...(this.config.gateways ?? []),
+      ...Object.values(this.getMastra()?.listGateways() ?? {}),
+      ...defaultGateways,
+    ]);
+    const previous = this.#gatewayManager?.gateways;
+    if (
+      !previous ||
+      previous.length !== manager.gateways.length ||
+      manager.gateways.some((gateway, i) => gateway !== previous[i])
+    ) {
+      this.#gatewayManager = manager;
+      this.invalidateAvailableModelsCache();
+    }
+    return this.#gatewayManager!;
+  }
+
   invalidateAvailableModelsCache(): void {
+    this.#availableModelsRevision++;
     this.availableModelsCache = null;
     this.availableModelsCacheTime = 0;
   }
