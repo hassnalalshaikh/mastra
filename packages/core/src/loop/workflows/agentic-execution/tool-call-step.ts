@@ -16,6 +16,8 @@ import {
   withToolPayloadTransformProviderMetadata,
 } from '../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
+import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../tools/resumable-input';
+import type { ToolInputOptions } from '../../../tools/resumable-input';
 import { getToolTitle } from '../../../tools/tool-title';
 import type { MastraToolInvocationOptions } from '../../../tools/types';
 import { resolveToolOutputValidationSchema, validateToolOutput } from '../../../tools/validation';
@@ -44,6 +46,7 @@ import {
   TOOL_APPROVAL_VERDICTS_KEY,
   TOOL_PAYLOAD_TRANSFORM_KEY,
 } from '../../run-scope-keys';
+import { loadAutoResumeToolInput } from '../../shared/resumable-tool-input';
 import { dispatchBackgroundTool } from '../../shared/steps/background-dispatch-core';
 import { applyBackgroundToolResult } from '../../shared/steps/background-task-result-core';
 import { executeToolCall } from '../../shared/steps/execute-tool-core';
@@ -109,6 +112,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
     outputSchema: toolCallOutputSchema,
     execute: async executionContext => {
       const { inputData, suspend, resumeData: workflowResumeData, suspendData, requestContext } = executionContext;
+      const toolInputState = createToolInputState(suspendData, inputData.toolCallId);
       // Eager dispatch invokes this step with its own signal, chained to the run's, so a
       // call started for a model attempt that is later discarded can be cancelled on its
       // own. Every other caller falls back to the run signal, unchanged.
@@ -467,6 +471,23 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
 
         // Match the nullish fallback above: null/undefined use framework identity, while other falsy values are valid model payloads.
         const isResumeToolCall = resumeDataFromArgs != null;
+        // A model-driven resume carries no saved input of its own. Recover the
+        // accepted input from the original native run, never from model args.
+        if (isResumeToolCall && !toolInputState.accepted) {
+          const savedInput = await loadAutoResumeToolInput({
+            mastra,
+            messages: messageList.get.all.db(),
+            toolCallId: inputData.toolCallId,
+            toolName: inputData.toolName,
+            suspendedToolRunId: args?.suspendedToolRunId,
+            resourceId: readScoped(scopeCtx, RESOURCE_ID_KEY, 'resourceId'),
+            threadId: readScoped(scopeCtx, THREAD_ID_KEY, 'threadId'),
+            agentId,
+            durable: false,
+          });
+          // The saved input now belongs to this resuming invocation.
+          toolInputState.accepted = savedInput && { ...savedInput, toolCallId: inputData.toolCallId };
+        }
 
         // Reuse the called-strategy scheduling verdict when available so approval policies
         // are evaluated exactly once per call. Other paths retain execution-time evaluation.
@@ -542,6 +563,11 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         // `args`, `transformChunk`, `flushMessagesBeforeSuspension` and `approvalSchema`, and
         // called before approval gating so a handed-back call is never re-gated or re-run.
         const raiseToolSuspension = async (suspendPayload: any, options?: SuspendOptions): Promise<any> => {
+          // The accepted input must survive snapshot storage before anything is announced.
+          const acceptedInput = persistedToolInput(toolInputState, {
+            toolName: inputData.toolName,
+            toolCallId: inputData.toolCallId,
+          });
           if (options?.requireToolApproval) {
             const innerApproval =
               typeof options.requireToolApproval === 'object' && options.requireToolApproval
@@ -613,6 +639,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   toolName: approvalToolName,
                   args: approvalArgs,
                 },
+                __mastraToolInput: acceptedInput,
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
                 ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
@@ -659,6 +686,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             return await suspend(
               {
                 toolCallSuspended: suspendPayload,
+                __mastraToolInput: acceptedInput,
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
                 ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
@@ -813,6 +841,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             const mcfg = readScoped(scopeCtx, MEMORY_CONFIG_KEY, 'memoryConfig');
             return sqm && tid ? () => sqm.flushMessages(messageList, tid, mcfg) : undefined;
           })(),
+          [TOOL_INPUT_STATE]: toolInputState,
           suspend: async (suspendPayload: any, options?: SuspendOptions) => {
             // A tool can suspend at runtime without declaring a suspend schema, so the
             // eager eligibility whitelist cannot see it coming. Bail here, before any
@@ -1038,7 +1067,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
               executor: {
                 execute: async (
                   bgArgs: Record<string, unknown>,
-                  opts?: {
+                  opts?: ToolInputOptions & {
                     abortSignal?: AbortSignal;
                     onProgress?: (chunk: BackgroundTaskProgressChunk) => Promise<void>;
                     suspend?: (data?: unknown, options?: SuspendOptions) => Promise<void>;
@@ -1046,6 +1075,10 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     suspendedToolRunId?: string;
                   },
                 ) => {
+                  // The bg-task workflow owns its own accepted input; seed it from
+                  // this invocation so a suspended background run resumes with it.
+                  const backgroundInputState = opts?.[TOOL_INPUT_STATE] ?? toolInputState;
+                  backgroundInputState.accepted ??= toolInputState.accepted;
                   // Override the agent loop's `suspend`/`resumeData` (which
                   // would suspend the AGENT run via tool-call-approval) with
                   // the bg-task workflow's, so calling `suspend()` from the
@@ -1058,6 +1091,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     execute: background =>
                       resolvedTool.execute!(bgArgs, {
                         ...toolOptions,
+                        [TOOL_INPUT_STATE]: backgroundInputState,
                         isBackgroundTask: true,
                         background,
                         [BACKGROUND_WORK_CONTEXT]: {
@@ -1072,6 +1106,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                         // suspension state (#23739) — never the model-authored one.
                         suspendedToolRunId: opts?.suspendedToolRunId,
                         suspend: async (data?: unknown, options?: SuspendOptions) => {
+                          Object.assign(toolInputState, backgroundInputState);
                           await toolOptions.suspend?.(data, options);
                           return opts?.suspend?.(data, options);
                         },
