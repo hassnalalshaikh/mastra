@@ -75,6 +75,7 @@ type StreamChunk =
   | StreamPayloadChunk<'tool-call-delta'>
   | StreamPayloadChunk<'tool-call-input-streaming-end'>
   | StreamPayloadChunk<'tool-call'>
+  | StreamPayloadChunk<'tool-execution-start'>
   | StreamPayloadChunk<'tool-result'>
   | StreamPayloadChunk<'tool-error'>
   | StreamPayloadChunk<'tool-output-denied'>
@@ -413,10 +414,16 @@ export class SessionRunEngine {
       toolName: string;
       result: unknown;
       isError: boolean;
+      preliminary?: boolean;
+      runId?: string;
       providerMetadata?: MastraProviderMetadata;
     },
   ): void {
     const { toolCallId, toolName, result, isError, providerMetadata } = outcome;
+    if (outcome.preliminary) {
+      this.#session.emit({ type: 'tool_update', toolCallId, partialResult: result, preliminary: true });
+      return;
+    }
     const toolIndex = state.toolPartById.get(toolCallId);
     const existing = toolIndex !== undefined ? state.currentMessage.content.parts[toolIndex] : undefined;
     const partIndex = toolIndex ?? state.currentMessage.content.parts.length;
@@ -458,6 +465,10 @@ export class SessionRunEngine {
     this.#session.emit({
       type: 'tool_end',
       threadId: state.threadId,
+      runId: outcome.runId ?? state.runId ?? undefined,
+      toolName,
+      messageId: state.currentMessage.id,
+      completedAt: new Date().toISOString(),
       toolCallId,
       result,
       isError,
@@ -769,13 +780,39 @@ export class SessionRunEngine {
         break;
       }
 
+      case 'tool-execution-start': {
+        const payload = getPayload(chunk);
+        const invocation = getRecord(payload.args);
+        const toolCallId = getString(invocation?.toolCallId);
+        const toolName = getString(invocation?.toolName);
+        const runId = state.runId ?? getString(payload.runId);
+        if (toolCallId && toolName && runId) {
+          const displayed = this.#session.displayState.get().activeTools.get(toolCallId);
+          this.#session.emit({
+            type: 'tool_execution_start',
+            threadId: state.threadId,
+            runId,
+            toolCallId,
+            toolName,
+            args: displayed?.args ?? {},
+          });
+        }
+        break;
+      }
+
       case 'tool-result': {
         const toolResult = getPayload(chunk);
         this.applyToolOutcome(state, {
           toolCallId: getString(toolResult.toolCallId) ?? '',
+          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
           toolName: getString(toolResult.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'output-available', toolResult.result),
           isError: getBoolean(toolResult.isError, false),
+          // A dispatched background task reports its placeholder with native
+          // `backgroundTask.status: 'running'` metadata; keep it active.
+          preliminary:
+            getString(getRecord(getRecord(getRecord(toolResult.providerMetadata)?.mastra)?.backgroundTask)?.status) ===
+            'running',
           providerMetadata: isProviderMetadata(toolResult.providerMetadata) ? toolResult.providerMetadata : undefined,
         });
         break;
@@ -786,6 +823,7 @@ export class SessionRunEngine {
         // Error instances JSON-serialize to `{}`; keep the message so failure text survives SSE + persistence.
         this.applyToolOutcome(state, {
           toolCallId: getString(toolError.toolCallId) ?? '',
+          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
           toolName: getString(toolError.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'error', getErrorFromUnknown(toolError.error).message),
           isError: true,
@@ -879,6 +917,10 @@ export class SessionRunEngine {
           type: 'tool_end',
           threadId: state.threadId,
           toolCallId,
+          runId: state.runId ?? undefined,
+          toolName,
+          messageId: state.currentMessage.id,
+          completedAt: new Date().toISOString(),
           result: reason,
           isError: false,
           denied: true,

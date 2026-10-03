@@ -725,7 +725,7 @@ interface ToolExecutionStartPayload {
   args: Record<string, unknown> & {
     toolName?: string;
     toolCallId?: string;
-    args?: Record<string, unknown>; // The actual tool arguments are nested here
+    args?: unknown; // The actual validated tool arguments are nested here
     selectionReason?: string;
     __mastraMetadata?: MastraMetadata;
     // Other inputData fields spread here
