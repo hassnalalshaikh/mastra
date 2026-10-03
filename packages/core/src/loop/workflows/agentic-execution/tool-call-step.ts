@@ -45,6 +45,11 @@ import {
   TOOL_PAYLOAD_TRANSFORM_KEY,
 } from '../../run-scope-keys';
 import { approvalResumeSchema } from '../../shared/approval-schema';
+import {
+  findToolSuspensionError,
+  persistToolSuspension,
+  ToolSuspensionPersistenceError,
+} from '../../shared/persist-tool-suspension';
 import { loadAutoResumeToolInput } from '../../shared/resumable-tool-input';
 import { dispatchBackgroundTool } from '../../shared/steps/background-dispatch-core';
 import { applyBackgroundToolResult } from '../../shared/steps/background-task-result-core';
@@ -364,7 +369,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
       };
 
       // Helper function to flush messages before suspension
-      const flushMessagesBeforeSuspension = async () => {
+      const flushMessagesBeforeSuspension = async (onError: () => void) => {
         const saveQueueManager = readScoped(scopeCtx, SAVE_QUEUE_MANAGER_KEY, 'saveQueueManager');
         const memoryConfig = readScoped(scopeCtx, MEMORY_CONFIG_KEY, 'memoryConfig');
         const threadId = readScoped(scopeCtx, THREAD_ID_KEY, 'threadId');
@@ -392,9 +397,10 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           }
 
           // Flush all pending messages immediately
-          await saveQueueManager.flushMessages(messageList, threadId, memoryConfig);
+          await saveQueueManager.flushMessages(messageList, threadId, memoryConfig, onError);
         } catch (error) {
           logger?.error('Error flushing messages before suspension:', error);
+          throw error;
         }
       };
 
@@ -580,28 +586,35 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 updatedAt: Date.now(),
               },
             });
-            if (outputWriter) {
-              await outputWriter(approvalChunk);
-            } else {
-              safeEnqueue(controller, approvalChunk);
-            }
-
-            // Add approval metadata to message before persisting
-            addToolMetadata({
+            // Persist the pending request before exposing it to a client.
+            await persistToolSuspension({
+              messageList,
               toolCallId: inputData.toolCallId,
-              toolName: approvalToolName,
-              args: approvalArgs,
-              ...(approvalToolName !== inputData.toolName || approvalArgs !== inputData.args
-                ? { parentToolName: inputData.toolName, parentArgs: inputData.args }
-                : {}),
               type: 'approval',
-              suspendedToolRunId: options.runId,
-              resumeSchema: approvalResumeSchema,
-              metadata: approvalChunk.metadata,
+              addMetadata: () => {
+                addToolMetadata({
+                  toolCallId: inputData.toolCallId,
+                  toolName: approvalToolName,
+                  args: approvalArgs,
+                  ...(approvalToolName !== inputData.toolName || approvalArgs !== inputData.args
+                    ? { parentToolName: inputData.toolName, parentArgs: inputData.args }
+                    : {}),
+                  type: 'approval',
+                  suspendedToolRunId: options.runId,
+                  resumeSchema: approvalResumeSchema,
+                  metadata: approvalChunk.metadata,
+                });
+              },
+              flush: flushMessagesBeforeSuspension,
+              isAborted: () => abortSignal?.aborted ?? false,
+              publish: async () => {
+                if (outputWriter) {
+                  await outputWriter(approvalChunk);
+                } else {
+                  safeEnqueue(controller, approvalChunk);
+                }
+              },
             });
-
-            // Flush messages before suspension to ensure they are persisted
-            await flushMessagesBeforeSuspension();
 
             return suspend(
               {
@@ -638,22 +651,29 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 resumeSchema: options?.resumeSchema,
               },
             });
-            safeEnqueue(controller, suspensionChunk);
-
-            // Add suspension metadata to message before persisting
-            addToolMetadata({
+            // Persist the pending request before exposing it to a client.
+            await persistToolSuspension({
+              messageList,
               toolCallId: inputData.toolCallId,
-              toolName: inputData.toolName,
-              args,
-              suspendPayload,
-              suspendedToolRunId: options?.runId,
               type: 'suspension',
-              resumeSchema: options?.resumeSchema,
-              metadata: suspensionChunk.metadata,
+              addMetadata: () => {
+                addToolMetadata({
+                  toolCallId: inputData.toolCallId,
+                  toolName: inputData.toolName,
+                  args,
+                  suspendPayload,
+                  suspendedToolRunId: options?.runId,
+                  type: 'suspension',
+                  resumeSchema: options?.resumeSchema,
+                  metadata: suspensionChunk.metadata,
+                });
+              },
+              flush: flushMessagesBeforeSuspension,
+              isAborted: () => abortSignal?.aborted ?? false,
+              publish: async () => {
+                safeEnqueue(controller, suspensionChunk);
+              },
             });
-
-            // Flush messages before suspension to ensure they are persisted
-            await flushMessagesBeforeSuspension();
 
             return await suspend(
               {
@@ -705,25 +725,31 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 updatedAt: Date.now(),
               },
             });
-            if (outputWriter) {
-              await outputWriter(approvalChunk);
-            } else {
-              safeEnqueue(controller, approvalChunk);
-            }
-
-            // Add approval metadata to message before persisting
-            addToolMetadata({
+            // Persist the pending request before exposing it to a client.
+            await persistToolSuspension({
+              messageList,
               toolCallId: inputData.toolCallId,
-              toolName: inputData.toolName,
-              args: inputData.args,
               type: 'approval',
-              resumeSchema: approvalResumeSchema,
-              metadata: approvalChunk.metadata,
+              addMetadata: () => {
+                addToolMetadata({
+                  toolCallId: inputData.toolCallId,
+                  toolName: inputData.toolName,
+                  args: inputData.args,
+                  type: 'approval',
+                  resumeSchema: approvalResumeSchema,
+                  metadata: approvalChunk.metadata,
+                });
+              },
+              flush: flushMessagesBeforeSuspension,
+              isAborted: () => abortSignal?.aborted ?? false,
+              publish: async () => {
+                if (outputWriter) {
+                  await outputWriter(approvalChunk);
+                } else {
+                  safeEnqueue(controller, approvalChunk);
+                }
+              },
             });
-
-            // Flush messages before suspension to ensure they are persisted
-            await flushMessagesBeforeSuspension();
-
             return suspend(
               {
                 requireToolApproval: {
@@ -1384,6 +1410,12 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             if (error !== undefined && eagerToolCallDidNotExecute(error)) {
               throw error;
             }
+            // A pending request that could not be saved fails the step even when
+            // the run was aborted meanwhile; it is not a tool result to record.
+            // The step's catch rethrows its storage cause.
+            if (error !== undefined && findToolSuspensionError(error) instanceof ToolSuspensionPersistenceError) {
+              throw error;
+            }
             if (eagerBailout?.reason) {
               throw new EagerToolExecutionNotRun(eagerBailout.reason, {
                 inputAvailableCalled: eagerBailout.inputAvailableCalled,
@@ -1405,6 +1437,8 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         return { result: outcome.result, ...inputData, ...(approvalGrant ?? {}) };
       } catch (error) {
         // Re-throw FGA authorization errors instead of swallowing them
+        const suspensionError = findToolSuspensionError(error);
+        if (suspensionError instanceof ToolSuspensionPersistenceError) throw suspensionError.cause;
         if (error instanceof Error && error.name === 'FGADeniedError') {
           throw error;
         }

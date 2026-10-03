@@ -4,6 +4,12 @@ import type { ToolBackgroundConfig } from '../../../../background-tasks/types';
 import type { PubSub } from '../../../../events/pubsub';
 import { approvalResumeSchema } from '../../../../loop/shared/approval-schema';
 import { normalizeModelOutput } from '../../../../loop/shared/normalize-model-output';
+import {
+  findToolSuspensionError,
+  persistToolSuspension,
+  ToolSuspensionCancelledError,
+  ToolSuspensionPersistenceError,
+} from '../../../../loop/shared/persist-tool-suspension';
 import { readToolResultFromMessageList } from '../../../../loop/shared/read-tool-result';
 import { loadAutoResumeToolInput } from '../../../../loop/shared/resumable-tool-input';
 import { dispatchBackgroundTool } from '../../../../loop/shared/steps/background-dispatch-core';
@@ -163,6 +169,7 @@ async function flushMessagesBeforeSuspension({
   memoryConfig,
   threadExists,
   onThreadCreated,
+  onError,
 }: {
   saveQueueManager?: SaveQueueManager;
   messageList?: MessageList;
@@ -172,30 +179,27 @@ async function flushMessagesBeforeSuspension({
   memoryConfig?: MemoryConfig;
   threadExists?: boolean;
   onThreadCreated?: () => void;
+  onError?: () => void;
 }) {
   if (!saveQueueManager || !messageList || !threadId || memoryConfig?.readOnly) {
     return;
   }
 
-  try {
-    // Ensure thread exists before flushing messages
-    if (memory && !threadExists && resourceId) {
-      const thread = await memory.getThreadById?.({ threadId });
-      if (!thread) {
-        await memory.createThread?.({
-          threadId,
-          resourceId,
-          memoryConfig,
-        });
-      }
-      onThreadCreated?.();
+  // Ensure thread exists before flushing messages.
+  if (memory && !threadExists && resourceId) {
+    const thread = await memory.getThreadById?.({ threadId });
+    if (!thread) {
+      await memory.createThread?.({
+        threadId,
+        resourceId,
+        memoryConfig,
+      });
     }
-
-    // Flush all pending messages immediately
-    await saveQueueManager.flushMessages(messageList, threadId, memoryConfig);
-  } catch {
-    // Log but don't throw — suspension should proceed even if flush fails
+    onThreadCreated?.();
   }
+
+  // A failed save must prevent publishing a pending request.
+  await saveQueueManager.flushMessages(messageList, threadId, memoryConfig, onError);
 }
 
 class DurableOutputProcessorError extends Error {
@@ -619,7 +623,7 @@ export function createDurableToolCallStep() {
         messageList = extendedEntry.messageList;
       }
 
-      const doFlush = async () => {
+      const doFlush = async (onError?: () => void) => {
         await flushMessagesBeforeSuspension({
           saveQueueManager,
           messageList,
@@ -631,6 +635,7 @@ export function createDurableToolCallStep() {
           onThreadCreated: () => {
             threadExists = true;
           },
+          onError,
         });
       };
 
@@ -850,50 +855,63 @@ export function createDurableToolCallStep() {
 
         if (isAborted()) return { ...typedInput, aborted: true };
 
-        // Emit approval chunk via PubSub (mirrors base agent's controller.enqueue).
-        // Apply the tool payload transform first so display targets never see raw
-        // args on the approval prompt (parity with the main loop's approval chunk).
-        if (pubsub) {
-          const approvalChunk = await applyToolPayloadTransformToChunk(
-            {
-              type: 'tool-call-approval' as const,
-              runId,
-              from: ChunkFrom.AGENT,
-              payload: { toolCallId, toolName, args, resumeSchema: approvalResumeSchema, updatedAt: Date.now() },
-            },
-            {
-              policy: registryEntry?.toolPayloadTransform,
-              tools: registryEntry?.tools,
-              logger: logger as any,
-            },
-          );
-          await emitChunkEvent(pubsub, runId, approvalChunk);
-        }
-
-        // Emit suspended event for the stream adapter
-        if (pubsub) {
-          await emitSuspendedEvent(pubsub, runId, {
+        // Persist approval metadata before exposing the wait.
+        try {
+          await persistToolSuspension({
+            messageList,
             toolCallId,
-            toolName,
-            args,
             type: 'approval',
-            resumeSchema: approvalResumeSchema,
+            addMetadata: () => {
+              addToolMetadata({ type: 'approval', resumeSchema: approvalResumeSchema });
+            },
+            flush: doFlush,
+            isAborted,
+            publish: async () => {
+              // Emit approval chunk via PubSub (mirrors base agent's controller.enqueue).
+              // Apply the tool payload transform first so display targets never see raw
+              // args on the approval prompt (parity with the main loop's approval chunk).
+              if (pubsub) {
+                const approvalChunk = await applyToolPayloadTransformToChunk(
+                  {
+                    type: 'tool-call-approval' as const,
+                    runId,
+                    from: ChunkFrom.AGENT,
+                    payload: { toolCallId, toolName, args, resumeSchema: approvalResumeSchema, updatedAt: Date.now() },
+                  },
+                  {
+                    policy: registryEntry?.toolPayloadTransform,
+                    tools: registryEntry?.tools,
+                    logger: logger as any,
+                  },
+                );
+                await emitChunkEvent(pubsub, runId, approvalChunk);
+              }
+
+              // Emit suspended event for the stream adapter
+              if (pubsub) {
+                await emitSuspendedEvent(pubsub, runId, {
+                  toolCallId,
+                  toolName,
+                  args,
+                  type: 'approval',
+                  resumeSchema: approvalResumeSchema,
+                });
+              }
+
+              // End the trace's open spans as suspended before pausing.
+              endSpansAsSuspended({ toolCallId, toolName, reason: 'approval' });
+            },
           });
+        } catch (error) {
+          const suspensionError = findToolSuspensionError(error);
+          if (suspensionError instanceof ToolSuspensionCancelledError) return { ...typedInput, aborted: true };
+          if (suspensionError instanceof ToolSuspensionPersistenceError) throw suspensionError.cause;
+          throw error;
         }
-
-        // Add approval metadata to message before persisting
-        addToolMetadata({ type: 'approval', resumeSchema: approvalResumeSchema });
-
-        // Flush messages before suspension
-        await doFlush();
-
         if (isAborted()) {
           await removeToolMetadata({ toolCallId, toolName }, 'approval');
           return { ...typedInput, aborted: true };
         }
-
-        // End the trace's open spans as suspended before pausing.
-        endSpansAsSuspended({ toolCallId, toolName, reason: 'approval' });
 
         // Suspend and wait for approval
         return suspend(
@@ -1164,7 +1182,6 @@ export function createDurableToolCallStep() {
         [TOOL_INPUT_STATE]: toolInputState,
         suspend: async (suspendPayload: any, suspendOptions?: SuspendOptions) => {
           const acceptedInput = persistedToolInput(toolInputState, { toolName, toolCallId });
-          wasSuspended = true;
           // When a delegated sub-agent requests approval, the delegation tool
           // wrapper passes its inner suspended run id via `suspendOptions.runId`
           // (see the agent-tool wrapper's `suspend(..., { runId, isAgentSuspend })`).
@@ -1188,48 +1205,57 @@ export function createDurableToolCallStep() {
             // Tool is requesting approval during execution
             await stopGoalActivity({ agentId: initData.agentId, runId });
 
-            if (pubsub) {
-              const approvalChunk = await applyToolPayloadTransformToChunk(
-                {
-                  type: 'tool-call-approval' as const,
-                  runId,
-                  from: ChunkFrom.AGENT,
-                  payload: {
+            // Persist the pending request before exposing it.
+            await persistToolSuspension({
+              messageList,
+              toolCallId,
+              type: 'approval',
+              addMetadata: () => {
+                addToolMetadata({
+                  type: 'approval',
+                  resumeSchema: approvalResumeSchema,
+                  delegatedRunId,
+                  ...(innerApproval ? { approvalToolName, approvalArgs } : {}),
+                });
+              },
+              flush: doFlush,
+              isAborted,
+              publish: async () => {
+                wasSuspended = true;
+                if (pubsub) {
+                  const approvalChunk = await applyToolPayloadTransformToChunk(
+                    {
+                      type: 'tool-call-approval' as const,
+                      runId,
+                      from: ChunkFrom.AGENT,
+                      payload: {
+                        toolCallId,
+                        toolName: approvalToolName,
+                        args: approvalArgs,
+                        resumeSchema: approvalResumeSchema,
+                        updatedAt: Date.now(),
+                      },
+                    },
+                    {
+                      policy: registryEntry?.toolPayloadTransform,
+                      tools: registryEntry?.tools,
+                      logger: logger as any,
+                    },
+                  );
+                  await emitChunkEvent(pubsub, runId, approvalChunk);
+                }
+
+                if (pubsub) {
+                  await emitSuspendedEvent(pubsub, runId, {
                     toolCallId,
                     toolName: approvalToolName,
                     args: approvalArgs,
+                    type: 'approval',
                     resumeSchema: approvalResumeSchema,
-                    updatedAt: Date.now(),
-                  },
-                },
-                {
-                  policy: registryEntry?.toolPayloadTransform,
-                  tools: registryEntry?.tools,
-                  logger: logger as any,
-                },
-              );
-              await emitChunkEvent(pubsub, runId, approvalChunk);
-            }
-
-            if (pubsub) {
-              await emitSuspendedEvent(pubsub, runId, {
-                toolCallId,
-                toolName: approvalToolName,
-                args: approvalArgs,
-                type: 'approval',
-                resumeSchema: approvalResumeSchema,
-              });
-            }
-
-            // Add approval metadata to message before persisting
-            addToolMetadata({
-              type: 'approval',
-              resumeSchema: approvalResumeSchema,
-              delegatedRunId,
-              ...(innerApproval ? { approvalToolName, approvalArgs } : {}),
+                  });
+                }
+              },
             });
-
-            await doFlush();
 
             endSpansAsSuspended({ toolCallId, toolName: approvalToolName, reason: 'approval' });
 
@@ -1256,40 +1282,49 @@ export function createDurableToolCallStep() {
               resumeSchema: suspendOptions?.resumeSchema,
             };
 
-            if (pubsub) {
-              const suspensionChunk = await applyToolPayloadTransformToChunk(
-                {
-                  type: 'tool-call-suspended' as const,
-                  runId,
-                  from: ChunkFrom.AGENT,
-                  payload: {
-                    toolCallId,
-                    toolName,
-                    suspendPayload,
-                    args,
-                    resumeSchema: suspendOptions?.resumeSchema,
-                  },
-                },
-                {
-                  policy: registryEntry?.toolPayloadTransform,
-                  tools: registryEntry?.tools,
-                  logger: logger as any,
-                },
-              );
-              await emitChunkEvent(pubsub, runId, suspensionChunk);
-
-              await emitSuspendedEvent(pubsub, runId, suspendedEventData);
-            }
-
-            // Add suspension metadata to message before persisting
-            addToolMetadata({
+            // Persist the pending request before exposing it.
+            await persistToolSuspension({
+              messageList,
+              toolCallId,
               type: 'suspension',
-              suspendPayload,
-              resumeSchema: suspendOptions?.resumeSchema,
-              delegatedRunId,
-            });
+              addMetadata: () => {
+                addToolMetadata({
+                  type: 'suspension',
+                  suspendPayload,
+                  resumeSchema: suspendOptions?.resumeSchema,
+                  delegatedRunId,
+                });
+              },
+              flush: doFlush,
+              isAborted,
+              publish: async () => {
+                wasSuspended = true;
+                if (pubsub) {
+                  const suspensionChunk = await applyToolPayloadTransformToChunk(
+                    {
+                      type: 'tool-call-suspended' as const,
+                      runId,
+                      from: ChunkFrom.AGENT,
+                      payload: {
+                        toolCallId,
+                        toolName,
+                        suspendPayload,
+                        args,
+                        resumeSchema: suspendOptions?.resumeSchema,
+                      },
+                    },
+                    {
+                      policy: registryEntry?.toolPayloadTransform,
+                      tools: registryEntry?.tools,
+                      logger: logger as any,
+                    },
+                  );
+                  await emitChunkEvent(pubsub, runId, suspensionChunk);
 
-            await doFlush();
+                  await emitSuspendedEvent(pubsub, runId, suspendedEventData);
+                }
+              },
+            });
 
             endSpansAsSuspended({ toolCallId, toolName, reason: 'suspension' });
 
@@ -1904,6 +1939,9 @@ export function createDurableToolCallStep() {
             mappingError: serializeError(error),
           };
         }
+        const suspensionError = findToolSuspensionError(error);
+        if (suspensionError instanceof ToolSuspensionCancelledError) return { ...typedInput, aborted: true };
+        if (suspensionError instanceof ToolSuspensionPersistenceError) throw suspensionError.cause;
         // Output processor failures and authorization denials must fail the run
         // instead of being serialized as recoverable tool errors.
         if (
