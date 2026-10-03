@@ -860,6 +860,17 @@ export class AgentControllerSession extends BaseResource {
     });
   }
 
+  /**
+   * Remove one queued follow-up by the id listed in
+   * `displayState.queuedFollowUpItems`. A follow-up already drained into a
+   * run is not affected.
+   */
+  async removeFollowUp(followUpId: string): Promise<void> {
+    await this.request(this.url(`${this.base()}/follow-up/${encodeURIComponent(followUpId)}`), {
+      method: 'DELETE',
+    });
+  }
+
   /** Get the observational memory record for this session's thread. */
   async getOMRecord(): Promise<RouteResponse<'GET /agent-controller/:controllerId/sessions/:resourceId/om'>['record']> {
     const body = await this.request<RouteResponse<'GET /agent-controller/:controllerId/sessions/:resourceId/om'>>(
