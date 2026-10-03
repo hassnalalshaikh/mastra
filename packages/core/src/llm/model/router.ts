@@ -127,6 +127,11 @@ export class ModelRouterLanguageModel implements MastraLanguageModelV2 {
   readonly provider: string;
   readonly gatewayId: string;
 
+  /** Original routing identifier, including the gateway prefix when supplied. */
+  get routerId(): string {
+    return this.config.routerId;
+  }
+
   private config: OpenAICompatibleConfig & { routerId: string };
   private gateway: MastraModelGatewayInterface;
   private _supportedUrlsPromise: Promise<Record<string, RegExp[]>> | null = null;
