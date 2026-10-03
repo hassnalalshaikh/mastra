@@ -1189,8 +1189,9 @@ export class Agent<
   async __listLLMRequestProcessors(
     requestContext?: RequestContext,
     errorProcessorOverrides?: ErrorProcessorOrWorkflow[],
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
   ): Promise<LLMRequestProcessorOrWorkflow[]> {
-    return this.listResolvedLLMRequestProcessors(requestContext, undefined, errorProcessorOverrides);
+    return this.listResolvedLLMRequestProcessors(requestContext, configuredProcessorOverrides, errorProcessorOverrides);
   }
 
   /**
@@ -2257,8 +2258,11 @@ export class Agent<
   /**
    * Returns the input processors for this agent, resolving function-based processors if necessary.
    */
-  public async listInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]> {
-    return this.listResolvedInputProcessors(requestContext);
+  public async listInputProcessors(
+    requestContext?: RequestContext,
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
+  ): Promise<InputProcessorOrWorkflow[]> {
+    return this.listResolvedInputProcessors(requestContext, configuredProcessorOverrides);
   }
 
   /**
@@ -6714,6 +6718,7 @@ export class Agent<
     backgroundTaskEnabled?: boolean;
     backgroundTaskPolicy?: AgentExecutionOptionsBase<any>['backgroundTaskPolicy'];
     model?: MastraLanguageModel | MastraLegacyLanguageModel;
+    inputProcessors?: InputProcessorOrWorkflow[];
   }): Promise<Record<string, CoreTool>> {
     const requestContext = options.requestContext ?? new RequestContext();
     const defaultOptions = await this.getDefaultOptions({ requestContext });
@@ -6752,6 +6757,7 @@ export class Agent<
       backgroundTaskEnabled: options.backgroundTaskEnabled,
       backgroundTaskPolicy: mergedOptions.backgroundTaskPolicy,
       model: options.model,
+      inputProcessors: mergedOptions.inputProcessors,
     });
   }
 
