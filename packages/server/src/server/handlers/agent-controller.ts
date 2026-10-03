@@ -301,6 +301,18 @@ const ackResponseSchema = z.object({
   ok: z.boolean(),
 });
 
+/**
+ * `ok` is true only when the follow-up was still queued and was removed. A
+ * follow-up already handed to a run (or never queued by this session) answers
+ * `{ ok: false, reason: 'not_queued' }`, so a client never acts on a removal
+ * that did not happen (for example, steering the same text again while the run
+ * that carries it is already answering).
+ */
+const followUpRemoveAckResponseSchema = z.object({
+  ok: z.boolean(),
+  reason: z.enum(['not_queued']).optional(),
+});
+
 const toolCommandAckResponseSchema = z.object({
   ok: z.boolean(),
   reason: z.enum(['not_pending', 'stale_tool_call', 'aborting', 'no_pending_suspension']).optional(),
@@ -1653,10 +1665,10 @@ export const REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   responseType: 'json' as const,
   pathParamSchema: followUpPathParams,
   queryParamSchema: sessionScopeQuerySchema,
-  responseSchema: ackResponseSchema,
+  responseSchema: followUpRemoveAckResponseSchema,
   summary: 'Remove a queued follow-up message',
   description:
-    'Removes one follow-up from the session queue by the id listed in displayState.queuedFollowUpItems. A follow-up already drained into a run is not affected.',
+    'Removes one follow-up from the session queue by the id listed in displayState.queuedFollowUpItems. Answers { ok: true } only when it was still queued; a follow-up already drained into a run is not affected and answers { ok: false, reason: "not_queued" }.',
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
@@ -1669,7 +1681,7 @@ export const REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
-      session.removeFollowUp({ id: followUpId });
+      if (!session.removeFollowUp({ id: followUpId })) return { ok: false, reason: 'not_queued' as const };
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error removing controller follow-up');
