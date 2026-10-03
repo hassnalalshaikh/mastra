@@ -314,14 +314,24 @@ it.each([
         mode: fresh.mode.get(),
         runId: fresh.getCurrentRunId(),
         pending: fresh.suspensions.hasPending(),
+        restored: fresh.suspensions.get({ toolCallId: 'plan-call-1' }) ?? null,
         agentId: host.controller.getCurrentAgent(fresh).id,
         resourceId: fresh.identity.getResourceId(),
         threadId: fresh.thread.getId(),
       };
+      // P34/P39 on 1.74: attaching the thread restores the saved non-approval
+      // suspension (submit_plan) of a run the reopened mode agent owns, marked
+      // restored, with no live run id. A build-mode agent does not own the plan
+      // run, and a saved approval is restored on the approval gate instead.
+      const restoresPlan = !switchFirst && !approval;
+      const durableLoopRun = receipt.beforeRows.find((row: any) => row.workflowName === 'durable-agentic-loop');
       expect(receipt.reopened).toEqual({
         mode: singleAgent ? 'web' : switchFirst ? 'build' : 'plan',
         runId: null,
-        pending: false,
+        pending: restoresPlan,
+        restored: restoresPlan
+          ? { runId: durableLoopRun.runId, toolName: 'submit_plan', threadId, resourceId: 'resource', restored: true }
+          : null,
         agentId: switchFirst ? 'build-agent' : 'plan-agent',
         resourceId: 'resource',
         threadId,
