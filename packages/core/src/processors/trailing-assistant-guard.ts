@@ -5,7 +5,7 @@ import {
 } from './provider-history-compat';
 import type { Processor, ProcessInputStepArgs, ProcessInputStepResult } from './index';
 
-const SETTLED_TOOL_STATES = new Set(['result', 'output-error']);
+const SETTLED_TOOL_STATES = new Set(['result', 'output-error', 'output-denied']);
 
 /**
  * Whether a step needs `TrailingAssistantGuard` attached.
