@@ -39,6 +39,7 @@ import { createStep } from '../../../../workflows/workflow';
 import { stopGoalActivity } from '../../../goal';
 import { MessageList } from '../../../message-list';
 import type { SerializedMessageListState } from '../../../message-list/state';
+import type { MastraDBMessage } from '../../../message-list/state/types';
 import type { SaveQueueManager } from '../../../save-queue';
 import { resolveDeclineReason } from '../../../tool-approval';
 import { TripWire } from '../../../trip-wire';
@@ -707,10 +708,21 @@ export function createDurableToolCallStep() {
           (msg.content?.parts ?? []).some(
             (part: any) => part?.type === 'tool-invocation' && part.toolInvocation?.toolCallId === toolCallId,
           );
+        const retainWaitKind = (message: MastraDBMessage) => {
+          if (opts.type !== 'suspension') return;
+          for (const part of message.content.parts) {
+            if (part.type !== 'tool-invocation' || part.toolInvocation.toolCallId !== toolCallId) continue;
+            part.providerMetadata = {
+              ...part.providerMetadata,
+              mastra: { ...part.providerMetadata?.mastra, toolSuspensionWaitingFor: opts.waitingFor ?? 'user' },
+            };
+          }
+        };
 
         const responseMessages = messageList.get.response.db();
         const lastAssistantMessage = [...responseMessages].reverse().find(carriesToolCall);
         if (lastAssistantMessage?.content) {
+          retainWaitKind(lastAssistantMessage);
           let metadata: Record<string, any>;
           if (
             typeof lastAssistantMessage.content.metadata === 'object' &&
@@ -746,6 +758,7 @@ export function createDurableToolCallStep() {
             ? (target.content.metadata as Record<string, any>)
             : {};
         const existingEntries = (existingMeta[metadataKey] ?? {}) as Record<string, any>;
+        retainWaitKind(target);
         messageList.updateMessageMetadataByToolCallId(toolCallId, {
           [metadataKey]: { ...existingEntries, [toolCallId]: entry },
         });
