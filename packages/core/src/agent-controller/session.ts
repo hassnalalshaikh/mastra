@@ -3696,6 +3696,7 @@ export class Session<TState = unknown> {
       for (const [toolCallId, tool] of state.activeTools) {
         if (tool.background) continue;
         if (tool.status !== 'running' && tool.status !== 'executing' && tool.status !== 'streaming_input') continue;
+        if (isCurrent && !isCurrent()) return;
         this.emit({
           type: 'tool_end',
           toolCallId,
