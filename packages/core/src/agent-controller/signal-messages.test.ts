@@ -164,6 +164,82 @@ describe('AgentController signal messages', () => {
     },
   );
 
+  it('delivers a typed draft and file over a transcript recorded before delivery', async () => {
+    const storage = new InMemoryStore();
+    const prompts: unknown[] = [];
+    const releases: Array<() => void> = [];
+    const { session } = await createController(
+      storage,
+      createGatedAgent(prompts, releases, new MockMemory({ storage })),
+    );
+    await session.thread.create({ id: 'draft-thread' });
+    const events: AgentControllerEvent[] = [];
+    const unsubscribe = session.subscribe(event => events.push(event));
+    const recordedAt = new Date(1000);
+    try {
+      await session.recordMessage({ id: 'spoken-2', role: 'user', content: 'Read it aloud.', createdAt: recordedAt });
+      const receipt = session.sendMessageWithReceipt({
+        id: 'spoken-2',
+        content: 'Use these notes.\n\nRead it aloud.',
+        files: [{ data: 'attachment text', mediaType: 'text/plain', filename: 'notes.txt' }],
+      });
+      await expect(receipt.accepted).resolves.toMatchObject({ action: 'wake' });
+      await waitFor(() => prompts.length === 1);
+      releases.splice(0).forEach(release => release());
+      await waitFor(() => events.some(event => event.type === 'agent_end'));
+      const prompt = JSON.stringify(prompts[0]);
+      expect(prompt).toContain('Use these notes.');
+      expect(prompt).toContain('attachment text');
+      expect(prompt.match(/Read it aloud\./g)).toHaveLength(1);
+      const memory = await storage.getStore('memory');
+      const { messages } = await memory!.listMessagesById({ messageIds: ['spoken-2'] });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.role).toBe('signal');
+      expect(JSON.stringify(messages[0]?.content.parts)).toContain('Use these notes.');
+      expect(JSON.stringify(messages[0]?.content.parts)).toContain('attachment text');
+      const turns = (await session.thread.listActiveMessages()).filter(
+        message => message.role === 'user' || message.role === 'signal',
+      );
+      expect(turns.map(message => message.id)).toEqual(['spoken-2']);
+    } finally {
+      releases.splice(0).forEach(release => release());
+      session.abort();
+      unsubscribe();
+    }
+  });
+
+  it.each(['rejected', 'blocked'] as const)(
+    'restores a transcript recorded before delivery when the delivery is %s',
+    async outcome => {
+      const storage = new InMemoryStore();
+      const { session } = await createController(storage, createGatedAgent([], [], new MockMemory({ storage })));
+      await session.thread.create({ id: 'restore-thread' });
+      const recordedAt = new Date(1000);
+      await session.recordMessage({ id: 'spoken-3', role: 'user', content: 'Read it aloud.', createdAt: recordedAt });
+      const memory = await storage.getStore('memory');
+      const [recorded] = (await memory!.listMessagesById({ messageIds: ['spoken-3'] })).messages;
+      const failure = new Error('Rejected before delivery');
+      const send = vi.spyOn(session, 'sendSignal').mockImplementationOnce(() => ({
+        id: 'spoken-3',
+        type: 'user',
+        accepted:
+          outcome === 'rejected'
+            ? Promise.reject(failure)
+            : Promise.resolve({ accepted: true as const, action: 'blocked' as const, runId: 'busy-run' }),
+      }));
+      const delivery = session.sendMessageWithReceipt({
+        id: 'spoken-3',
+        content: 'Use these notes.\n\nRead it aloud.',
+      });
+      if (outcome === 'rejected') await expect(delivery.accepted).rejects.toBe(failure);
+      else await expect(delivery.accepted).resolves.toMatchObject({ action: 'blocked' });
+      const { messages } = await memory!.listMessagesById({ messageIds: ['spoken-3'] });
+      expect(messages).toEqual([recorded]);
+      expect(send).toHaveBeenCalledTimes(1);
+      send.mockRestore();
+    },
+  );
+
   it('records nondelegated turns without running and retains separate identities for repeated words', async () => {
     const storage = new InMemoryStore();
     const model = createTextStreamModel('Hello');
