@@ -872,6 +872,8 @@ export class DurableAgenticLoopBuilder extends AgenticLoopBuilder {
               lastStep.text = finishResult.outputText;
               finalText = finishResult.outputText;
             }
+            // Final processors can also delete the response text entirely.
+            finalText = finishResult.processedText ?? finalText;
 
             const finalOutput = {
               messageListState: finishResult.messageListState,
@@ -883,6 +885,7 @@ export class DurableAgenticLoopBuilder extends AgenticLoopBuilder {
               },
               output: {
                 text: finalText,
+                ...(finishResult.processedText !== undefined ? { processedText: finishResult.processedText } : {}),
                 usage: state.accumulatedUsage,
                 steps: state.accumulatedSteps,
               },

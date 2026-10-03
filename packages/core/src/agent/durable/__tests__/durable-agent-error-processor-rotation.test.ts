@@ -364,7 +364,13 @@ describe('durable error-processor resolution', () => {
     throw new Error('resolver unavailable');
   };
 
-  it('keeps the configured output processors when the error-processor resolver throws', async () => {
+  // Skipped on the Khayalek 1.74 rebase, not weakened: fork patch P24 (1261baea62)
+  // fails a run before any model call when any processor list cannot resolve, so
+  // required checks (Khayalek bills in the error lane) are never bypassed. Upstream
+  // continues with the output processors instead. Covered by the fork's
+  // session-processor-resolution-failure.integration.test.ts; owner decision logged
+  // in .planning/agent-env-issues/core-upgrade/build/OPEN-QUESTIONS.md (P24).
+  it.skip('keeps the configured output processors when the error-processor resolver throws', async () => {
     const redactor: Processor = {
       id: 'output-redactor',
       processOutputStream: vi.fn(async ({ part }) =>
