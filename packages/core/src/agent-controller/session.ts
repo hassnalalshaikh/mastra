@@ -1430,6 +1430,13 @@ export interface PendingSuspension {
   threadId: string;
   /** The memory resource the suspended invocation was persisted under. */
   resourceId: string;
+  /**
+   * True when the suspension was restored from a saved run on attach rather than
+   * parked by a run this Session is driving. No live run waits on a restored
+   * suspension, so Stop cancels its saved run through the same scoped discovery
+   * a cold Session uses, never through live settlement.
+   */
+  restored?: boolean;
 }
 
 /**
@@ -1461,19 +1468,26 @@ export class SessionSuspensions {
     toolName,
     threadId,
     resourceId,
+    restored,
   }: {
     toolCallId: string;
     runId: string;
     toolName: string;
     threadId: string;
     resourceId: string;
+    restored?: boolean;
   }): void {
     const existing = this.#pending.get(toolCallId);
-    if (existing && existing.runId === runId) {
-      this.#pending.set(toolCallId, { ...existing, toolName });
-      return;
-    }
-    this.#pending.set(toolCallId, { runId, toolName, threadId, resourceId });
+    const binding = existing && existing.runId === runId ? existing : { threadId, resourceId };
+    // A live run re-parking a restored call takes it over, so only an explicit
+    // restore marks the entry as restored.
+    this.#pending.set(toolCallId, {
+      runId,
+      toolName,
+      threadId: binding.threadId,
+      resourceId: binding.resourceId,
+      ...(restored ? { restored: true } : {}),
+    });
   }
 
   /** The parked suspension for `toolCallId`, or undefined when none. */
@@ -1525,6 +1539,12 @@ export class SessionSuspensions {
   /** Whether any tool calls are parked awaiting a resume. */
   hasPending(): boolean {
     return this.#pending.size > 0;
+  }
+
+  /** Whether `toolCallId` (or, with no id, any parked call) was restored from a saved run. */
+  isRestored({ toolCallId }: { toolCallId?: string } = {}): boolean {
+    if (toolCallId !== undefined) return this.#pending.get(toolCallId)?.restored === true;
+    return [...this.#pending.values()].some(suspension => suspension.restored === true);
   }
 
   /**
@@ -4129,9 +4149,7 @@ export class Session<TState = unknown> {
     const discover = async () => {
       try {
         const result = await agent.listSuspendedRuns({ threadId, resourceId });
-        return result.runs.flatMap(run =>
-          run.toolCalls.filter(call => call.requiresApproval).map(call => ({ agent, runId: run.runId, call })),
-        );
+        return result.runs.flatMap(run => run.toolCalls.map(call => ({ agent, runId: run.runId, call })));
       } catch (error) {
         if (error instanceof MastraError && error.id === 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE') return [];
         throw error;
@@ -4148,8 +4166,37 @@ export class Session<TState = unknown> {
       this.approval.isArmed({ threadId })
     )
       return;
-    if (pending.length > 1) throw new Error('Multiple saved approvals match this Session thread');
-    const approval = pending[0];
+    // Saved non-approval suspensions (ask_user, external jobs) are restored as
+    // parked suspensions so their answer reaches the exact saved call.
+    for (const { runId, call } of pending) {
+      if (
+        call.requiresApproval ||
+        !call.toolCallId ||
+        !call.toolName ||
+        this.suspensions.has({ toolCallId: call.toolCallId })
+      )
+        continue;
+      this.machinery.getRunScope?.(runId)?.set(SUSPENDED_RUN_AGENT_KEY, agent);
+      this.suspensions.register({
+        runId,
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        threadId,
+        resourceId,
+        restored: true,
+      });
+      this.emit({
+        type: 'tool_suspended',
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        args: call.args,
+        suspendPayload: call.suspendPayload,
+        waitingFor: call.waitingFor ?? 'user',
+      });
+    }
+    const approvals = pending.filter(({ call }) => call.requiresApproval);
+    if (approvals.length > 1) throw new Error('Multiple saved approvals match this Session thread');
+    const approval = approvals[0];
     if (!approval) return;
     const { runId, call } = approval;
     const { toolName, toolCallId } = call;
@@ -4259,11 +4306,21 @@ export class Session<TState = unknown> {
     // could never land, since the run they belong to is gone. Keep their exact
     // run IDs: a user Stop also closes those native runs through their owner.
     // A lifecycle (localOnly) abort leaves them for their owner.
-    const suspendedToolCalls = this.suspensions.clear();
-    const parkedRuns = new Set(userStop ? suspendedToolCalls.map(({ runId }) => runId) : []);
-    for (const { toolCallId, toolName } of suspendedToolCalls) {
+    const clearedSuspensions = this.suspensions.clear();
+    for (const { toolCallId, toolName } of clearedSuspensions) {
       this.emit({ type: 'tool_suspension_cancelled', toolCallId, toolName, reason: ABORTED_BY_USER_REASON });
     }
+    // A suspension restored from a saved run on attach has no live run waiting
+    // on it. Like a restored approval, it is forgotten without a settlement: a
+    // Session driving no live run of its own stops it through the scoped saved
+    // discovery below (`restoredStop`), and next to a live run it is closed with
+    // the parked runs.
+    const suspendedToolCalls = clearedSuspensions.filter(({ restored }) => !restored);
+    // A restored Session has neither a run id nor a locally armed run. A run this
+    // Session is driving itself is stopped through its own stream below.
+    const restoredStop =
+      userStop && !localRunId && !this.run.isRunning() && !!threadId && suspendedToolCalls.length === 0;
+    const parkedRuns = new Set(userStop && !restoredStop ? clearedSuspensions.map(({ runId }) => runId) : []);
 
     // The live run scope records the agent that parked each run. Without it (a
     // durable run, or a recreated Session), the owner is discovered across this
@@ -4272,10 +4329,6 @@ export class Session<TState = unknown> {
       [...parkedRuns].map(runId => [runId, this.machinery.getRunScope(runId)?.get(SUSPENDED_RUN_AGENT_KEY)]),
     );
     const unownedParkedRuns = new Set([...parkedOwners].flatMap(([runId, owner]) => (owner ? [] : [runId])));
-    // A restored Session has neither a run id nor a locally armed run. A run this
-    // Session is driving itself is stopped through its own stream below.
-    const restoredStop =
-      userStop && !localRunId && !this.run.isRunning() && !!threadId && suspendedToolCalls.length === 0;
     const agents =
       unownedParkedRuns.size > 0 || restoredStop
         ? [...new Set(this.machinery.getAgents?.() ?? [this.machinery.getAgent()])]
@@ -4381,7 +4434,8 @@ export class Session<TState = unknown> {
             .settleSuspendedToolCallsAsDenied(suspendedToolCalls)
             .catch(error => this.emit({ type: 'error', error: getErrorFromUnknown(error) }))
         : undefined;
-    if (settlement && parkedRuns.size > 0) {
+    // Restored runs next to a live run have no settlement of their own.
+    if (parkedRuns.size > 0) {
       admitCancellation(async () => {
         await settlement;
         const cancellations = await Promise.allSettled(

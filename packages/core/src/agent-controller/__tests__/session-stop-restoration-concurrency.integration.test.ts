@@ -181,7 +181,15 @@ it('direct saved Stop retains lease loss without publishing a terminal error', a
     const reopened = await fresh.controller.createSession({ ...sessionInput, workspace: fresh.workspace });
     expect(reopened.thread.getId()).toBe(threadId);
     expect(reopened.getCurrentRunId()).toBe(null);
-    expect(reopened.suspensions.hasPending()).toBe(false);
+    // P34/P39 on 1.74: the saved submit_plan suspension is restored on attach,
+    // marked restored (no live run waits on it).
+    expect(reopened.suspensions.get({ toolCallId: 'lease-plan-call' })).toEqual({
+      runId,
+      toolName: 'submit_plan',
+      threadId,
+      resourceId: 'resource',
+      restored: true,
+    });
     const topic = `agent.stream.${runId}`;
     await fresh.agent.pubsub.subscribe(topic, async event => {
       if (event.type === 'error') terminalErrors.push(event);
@@ -371,7 +379,14 @@ it.each(['session', 'agent'] as const)('concurrent saved Stop isolates the winni
         const session = await host.controller.createSession({ ...sessionInput, workspace: host.workspace });
         expect(session.thread.getId()).toBe(threadId);
         expect(session.getCurrentRunId()).toBe(null);
-        expect(session.suspensions.hasPending()).toBe(false);
+        // P34/P39 on 1.74: each host restores the saved suspension, marked restored.
+        expect(session.suspensions.get({ toolCallId: 'shared-plan-call' })).toEqual({
+          runId,
+          toolName: 'submit_plan',
+          threadId,
+          resourceId: 'resource',
+          restored: true,
+        });
         session.subscribe(event => {
           if (event.type === 'error' || event.type === 'agent_end')
             receipt.events.push({ host: host.label, type: event.type, error: errorInfo((event as any).error) });
