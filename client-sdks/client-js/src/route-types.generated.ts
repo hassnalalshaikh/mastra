@@ -22514,7 +22514,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Bod
     };
 
 export type PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response = {
-  ok: true;
+  ok: boolean;
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Request = Simplify<
@@ -22930,9 +22930,8 @@ export type DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_P
 export type DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_QueryParams =
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
-export type DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response = {
-  ok: boolean;
-};
+export type DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response =
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Request = Simplify<
   (DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_PathParams extends never
@@ -22969,7 +22968,7 @@ export type PutAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Body
 };
 
 export type PutAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PutAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Request = Simplify<
   (PutAgentControllerControllerIdSessionsResourceIdThreadsThreadId_PathParams extends never
@@ -23169,7 +23168,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdMessages_Body = {
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdMessages_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdMessages_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdMessages_PathParams extends never
@@ -23209,7 +23208,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdSteer_Body =
   PostAgentControllerControllerIdSessionsResourceIdMessages_Body;
 
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdSteer_PathParams extends never
@@ -23249,7 +23248,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Body =
   PostAgentControllerControllerIdSessionsResourceIdMessages_Body;
 
 export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdFollowUp_PathParams extends never
@@ -23289,7 +23288,7 @@ export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpI
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
 export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_Request = Simplify<
   (DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_PathParams extends never
@@ -23322,7 +23321,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdAbort_QueryParams =
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdAbort_PathParams extends never
@@ -23455,7 +23454,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdMode_Body = {
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdMode_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdMode_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdMode_PathParams extends never
@@ -23497,7 +23496,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdModel_Body = {
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdModel_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdModel_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdModel_PathParams extends never
@@ -23538,7 +23537,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdThread_Body = {
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdThread_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdThread_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdThread_PathParams extends never
@@ -23702,7 +23701,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdResource_Body = {
 };
 
 export type PostAgentControllerControllerIdSessionsResourceIdResource_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdResource_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdResource_PathParams extends never
@@ -23905,7 +23904,7 @@ export type DeleteAgentControllerControllerIdSessionsResourceIdGoal_QueryParams 
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
 export type DeleteAgentControllerControllerIdSessionsResourceIdGoal_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type DeleteAgentControllerControllerIdSessionsResourceIdGoal_Request = Simplify<
   (DeleteAgentControllerControllerIdSessionsResourceIdGoal_PathParams extends never
@@ -23986,7 +23985,7 @@ export type PutAgentControllerControllerIdSessionsResourceIdPermissionsCategory_
 };
 
 export type PutAgentControllerControllerIdSessionsResourceIdPermissionsCategory_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PutAgentControllerControllerIdSessionsResourceIdPermissionsCategory_Request = Simplify<
   (PutAgentControllerControllerIdSessionsResourceIdPermissionsCategory_PathParams extends never
@@ -24028,7 +24027,7 @@ export type PutAgentControllerControllerIdSessionsResourceIdPermissionsTool_Body
 };
 
 export type PutAgentControllerControllerIdSessionsResourceIdPermissionsTool_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PutAgentControllerControllerIdSessionsResourceIdPermissionsTool_Request = Simplify<
   (PutAgentControllerControllerIdSessionsResourceIdPermissionsTool_PathParams extends never
@@ -24071,7 +24070,7 @@ export type PutAgentControllerControllerIdSessionsResourceIdState_Body = {
 };
 
 export type PutAgentControllerControllerIdSessionsResourceIdState_Response =
-  DeleteAgentControllerControllerIdSessionsResourceIdThreadsThreadId_Response;
+  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
 
 export type PutAgentControllerControllerIdSessionsResourceIdState_Request = Simplify<
   (PutAgentControllerControllerIdSessionsResourceIdState_PathParams extends never
