@@ -501,6 +501,9 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     llmRequestInputProcessors = await typedAgent.__listLLMRequestProcessors(requestContext, errorProcessors);
   } catch (error) {
     logger?.warn?.(`[DurableAgent] Error resolving processors: ${error}`);
+    // Required checks must be available before the run can call the model.
+    // Continuing with a partially resolved pipeline silently bypasses them.
+    throw error;
   }
 
   // Open AGENT_RUN here so processor_run spans (and their MEMORY_OPERATION

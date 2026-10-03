@@ -113,15 +113,14 @@ export class SaveQueueManager {
     messageList: MessageList,
     memoryConfig?: MemoryConfigInternal,
   ) {
-    const newMessages = messageList.drainUnsavedMessages();
-    if (newMessages.length > 0 && this.memory) {
+    const memory = this.memory;
+    if (!memory) return;
+    // A failed write restores the unsaved markers so a later explicit save can retry.
+    await messageList.persistUnsavedMessages(async messages => {
       const savedAt = Date.now();
-      await this.memory.saveMessages({
-        messages: newMessages,
-        memoryConfig,
-      });
-      noteThreadMessagesSaved({ threadId, resourceId: newMessages.find(m => m.resourceId)?.resourceId, savedAt });
-    }
+      await memory.saveMessages({ messages, memoryConfig });
+      noteThreadMessagesSaved({ threadId, resourceId: messages.find(m => m.resourceId)?.resourceId, savedAt });
+    });
   }
 
   /**

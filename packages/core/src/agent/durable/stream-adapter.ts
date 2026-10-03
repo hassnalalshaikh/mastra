@@ -384,6 +384,18 @@ export function createDurableAgentStream<OUTPUT = undefined>(
             break;
           }
           safeEnqueue(controller, chunk as ChunkType<OUTPUT>);
+          if (chunk.type === 'tripwire') {
+            safeClose(controller);
+            markTerminated();
+            // A guard refusal is terminal too. Notify the native lifecycle
+            // before user callbacks, which may throw, so registry and topic
+            // cleanup cannot be skipped by a failed observer.
+            try {
+              await onStreamFinished?.();
+            } catch (callbackError) {
+              logError(`[DurableAgentStream] onStreamFinished callback error:`, callbackError);
+            }
+          }
           await onChunk?.(chunk as ChunkType<OUTPUT>);
           break;
         }
@@ -441,8 +453,11 @@ export function createDurableAgentStream<OUTPUT = undefined>(
               const allToolCalls = steps.flatMap((s: any) => s?.toolCalls ?? []);
               await onFinish({
                 // Every step's streamed text, retried attempts included — matches the main loop,
-                // whose onFinish text is everything the run streamed.
-                text: steps.length > 0 ? steps.map((s: any) => s?.text ?? '').join('') : (data.output?.text ?? ''),
+                // whose onFinish text is everything the run streamed. Text changed or removed
+                // by final processors replaces it, as in the main loop.
+                text:
+                  data.output?.processedText ??
+                  (steps.length > 0 ? steps.map((s: any) => s?.text ?? '').join('') : (data.output?.text ?? '')),
                 steps,
                 toolResults: allToolResults,
                 toolCalls: allToolCalls,
