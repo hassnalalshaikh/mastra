@@ -35,6 +35,7 @@ import { convertToV1Messages } from './prompt/convert-to-mastra-v1';
 import { downloadAssetsFromMessages, getAssetUrl } from './prompt/download-assets';
 import type { AssetDownloadCache } from './prompt/download-assets';
 import { isSendableFileData } from './prompt/image-utils';
+import { moveCurrentStateSignalsToPromptEnd } from './prompt/state-signal-placement';
 import {
   getMessageAttachmentUrls,
   getUnavailableAttachmentUrls,
@@ -641,7 +642,7 @@ export class MessageList {
   }
 
   private getMessagesForModelPrompt(): MastraDBMessage[] {
-    return this.messages.flatMap(message => {
+    return moveCurrentStateSignalsToPromptEnd(this.messages).flatMap(message => {
       if ((message.role as string) !== 'signal') {
         return [message];
       }
