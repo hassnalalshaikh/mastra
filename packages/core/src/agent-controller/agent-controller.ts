@@ -1,6 +1,8 @@
 import { Agent } from '../agent';
 import { MessageList } from '../agent/message-list';
 import type { MastraDBMessage, MastraMessageContentV2 } from '../agent/message-list/state/types';
+import { TOOL_COMPLETION_INDEX_LIMIT, TOOL_COMPLETION_INDEX_TYPE } from '../agent/message-list/tool-completion-index';
+import type { ToolCompletionIndexEntry } from '../agent/message-list/tool-completion-index';
 import { isUserAuthoredMessage, mastraDBMessageToSignal } from '../agent/signals';
 import type { ActiveThreadRun } from '../agent/thread-stream-runtime';
 import type { AgentInstructions, ToolsInput, ToolsetsInput } from '../agent/types';
@@ -24,6 +26,7 @@ import { Workspace } from '../workspace/workspace';
 
 import { Session } from './session';
 import type { ThreadDataStore } from './session';
+import { projectCompletedToolMessages } from './tool-completion-display';
 import {
   askUserTool,
   createSubagentTool,
@@ -1151,23 +1154,7 @@ export class AgentController<TState = {}> {
       listThreads: ({ resourceId, includeForkedSubagents, metadata }) =>
         this.queryThreads({ resourceId, includeForkedSubagents, metadata }),
       getById: ({ threadId }) => this.queryThreadById({ threadId }),
-      listMessages: async ({ threadId, limit }) => {
-        if (limit !== undefined) {
-          const result = await this.queryThreadMessages({
-            threadId,
-            perPage: limit,
-            page: 0,
-            orderBy: { field: 'createdAt', direction: 'DESC' },
-          });
-          return { ...result, messages: result.messages.reverse() };
-        }
-
-        return this.queryThreadMessages({
-          threadId,
-          perPage: false,
-          orderBy: { field: 'createdAt', direction: 'ASC' },
-        });
-      },
+      listMessages: ({ threadId, limit }) => this.queryThreadDisplayMessages({ threadId, limit }),
       firstUserMessages: ({ threadIds }) => this.queryFirstUserMessages({ threadIds }),
       getMetadata: ({ threadId, key }) => this.readThreadMetadataValue({ threadId, key }),
       setMetadata: ({ threadId, key, value }) => this.writeThreadMetadataValue({ threadId, key, value }),
@@ -1588,6 +1575,85 @@ export class AgentController<TState = {}> {
     });
 
     return { ...result, messages: result.messages.map(msg => this.convertToControllerMessage(msg)) };
+  }
+
+  /**
+   * The display read of a thread: its newest `limit` rows (oldest-first), or
+   * all rows, with each completed tool outcome shown as its own row at its
+   * completion time. Stored history is unchanged; the source message keeps the
+   * call/result pair. A bounded window also loads the source messages named
+   * in the thread's recent-completion index, so a completion whose call
+   * predates the window still appears in it.
+   */
+  async queryThreadDisplayMessages({
+    threadId,
+    resourceId,
+    limit,
+    page,
+  }: {
+    threadId: string;
+    resourceId?: string;
+    limit?: number;
+    page?: number;
+  }): Promise<StorageListMessagesOutput> {
+    if (limit === undefined) {
+      const result = await this.queryThreadMessages({
+        threadId,
+        resourceId,
+        perPage: false,
+        orderBy: { field: 'createdAt', direction: 'ASC' },
+      });
+      return { ...result, messages: projectCompletedToolMessages(result.messages) };
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      // No rows to show (or a value storage validates): the plain newest-window read.
+      const result = await this.queryThreadMessages({
+        threadId,
+        resourceId,
+        perPage: limit,
+        page: page ?? 0,
+        orderBy: { field: 'createdAt', direction: 'DESC' },
+      });
+      return { ...result, messages: result.messages.reverse() };
+    }
+
+    const firstPage = (page ?? 0) === 0;
+    if (firstPage && limit > TOOL_COMPLETION_INDEX_LIMIT) {
+      // Wider than the completion index covers: project the full history, keep the newest rows.
+      const all = await this.queryThreadDisplayMessages({ threadId, resourceId });
+      return { ...all, messages: all.messages.slice(-limit) };
+    }
+
+    const include = firstPage ? await this.queryRecentCompletionSources(threadId) : [];
+    const result = await this.queryThreadMessages({
+      threadId,
+      resourceId,
+      perPage: limit,
+      page: page ?? 0,
+      orderBy: { field: 'createdAt', direction: 'DESC' },
+      ...(include.length ? { include } : {}),
+    });
+    // Included rows are scoped to this thread and deduplicated against the page.
+    const rows = [
+      ...new Map(
+        result.messages.filter(message => message.threadId === threadId).map(message => [message.id, message]),
+      ).values(),
+    ]
+      .map((row, index) => ({ row, index, time: new Date(row.createdAt).getTime() }))
+      .sort((a, b) => a.time - b.time || b.index - a.index)
+      .map(({ row }) => row);
+    return { ...result, messages: projectCompletedToolMessages(rows).slice(-limit) };
+  }
+
+  private async queryRecentCompletionSources(
+    threadId: string,
+  ): Promise<NonNullable<StorageListMessagesInput['include']>> {
+    const store = await this.#resolveStorage()?.getStore('threadState');
+    const entries =
+      (await store?.getState<ToolCompletionIndexEntry[]>({ threadId, type: TOOL_COMPLETION_INDEX_TYPE })) ?? [];
+    return entries
+      .slice(0, TOOL_COMPLETION_INDEX_LIMIT)
+      .map(entry => ({ id: entry.messageId, threadId, withPreviousMessages: 0, withNextMessages: 0 }));
   }
 
   private async queryFirstUserMessages({ threadIds }: { threadIds: string[] }): Promise<Map<string, MastraDBMessage>> {

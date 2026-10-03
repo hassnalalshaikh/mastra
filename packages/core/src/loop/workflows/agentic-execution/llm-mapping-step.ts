@@ -13,11 +13,18 @@ import type { RunScopeContext } from '../../run-scope-access';
 import { DELEGATION_BAILED_KEY, STEP_TOOLS_KEY, TOOL_PAYLOAD_TRANSFORM_KEY } from '../../run-scope-keys';
 import { readToolResultFromMessageList } from '../../shared/read-tool-result';
 import { processAndEmitChunk } from '../../shared/steps/process-chunk-core';
-import { commitToolResult, computeModelOutputProviderMetadata } from '../../shared/steps/tool-result-commit-core';
+import {
+  applyCommittedToolCompletion,
+  commitToolResult,
+  computeModelOutputProviderMetadata,
+} from '../../shared/steps/tool-result-commit-core';
 import { applyToolPayloadTransformToChunk } from '../../shared/tool-payload-transform';
 import type { OuterLLMRun } from '../../types';
 import { deserializeToolError, getSubAgentErrorResult } from '../errors';
 import { llmIterationOutputSchema, toolCallOutputSchema } from '../schema';
+
+/** Payload fields a committed tool outcome carries to live consumers. */
+type ToolOutcomePayload = Parameters<typeof applyCommittedToolCompletion>[1];
 
 export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = undefined>(
   { models, _internal, ...rest }: OuterLLMRun<Tools, OUTPUT>,
@@ -261,6 +268,11 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                 chunk.metadata,
               ) as ProviderMetadata | undefined,
             });
+            // Publish the completion record the transcript committed. The call is in this
+            // step's live message, so the source message needs no naming.
+            applyCommittedToolCompletion(rest.messageList, (chunk as { payload: ToolOutcomePayload }).payload, {
+              withSourceMessage: false,
+            });
             const processed = await processAndEnqueueChunk(chunk);
             if (processed) await rest.options?.onChunk?.(processed);
           }
@@ -364,6 +376,11 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
               });
             }
 
+            // Publish the completion record the transcript committed. The call is in this
+            // step's live message, so the source message needs no naming.
+            applyCommittedToolCompletion(rest.messageList, (chunk as { payload: ToolOutcomePayload }).payload, {
+              withSourceMessage: false,
+            });
             const processed = await processAndEnqueueChunk(chunk);
             if (processed) await rest.options?.onChunk?.(processed);
           }
@@ -444,6 +461,11 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
               },
               toolCall,
             );
+            // Publish the completion record the transcript committed. The call is in this
+            // step's live message, so the source message needs no naming.
+            applyCommittedToolCompletion(rest.messageList, (chunk as { payload: ToolOutcomePayload }).payload, {
+              withSourceMessage: false,
+            });
             const processed = await processAndEnqueueChunk(chunk);
             if (processed) await rest.options?.onChunk?.(processed);
             continue;
@@ -521,6 +543,11 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
             });
           }
 
+          // Publish the completion record the transcript committed. The call is in this
+          // step's live message, so the source message needs no naming.
+          applyCommittedToolCompletion(rest.messageList, (chunk as { payload: ToolOutcomePayload }).payload, {
+            withSourceMessage: false,
+          });
           const processed = await processAndEnqueueChunk(chunk);
           if (processed) await rest.options?.onChunk?.(processed);
         }

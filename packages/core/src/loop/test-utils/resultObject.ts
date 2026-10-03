@@ -727,7 +727,13 @@ export function resultObjectTests({
                 "value": "value",
               },
               "providerExecuted": undefined,
-              "providerMetadata": undefined,
+              "providerMetadata": {
+                "mastra": {
+                  "toolCompletion": {
+                    "completedAt": "2024-01-01T00:00:00.000Z",
+                  },
+                },
+              },
               "result": "value-result",
               "toolCallId": "call-1",
               "toolName": "tool1",
