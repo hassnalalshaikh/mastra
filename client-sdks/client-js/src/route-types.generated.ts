@@ -22513,6 +22513,10 @@ export type PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Bod
       };
     };
 
+export type PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response = {
+  ok: true;
+};
+
 export type PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_PathParams extends never
     ? {}
@@ -22534,7 +22538,7 @@ export interface PostAgentControllerControllerIdSessionsResourceIdBrowserCommand
   queryParams: PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_QueryParams;
   body: PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Body;
   request: PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Request;
-  response: unknown;
+  response: PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
   responseType: 'json';
 }
 

@@ -42,6 +42,22 @@ export function getRouteSpecificSchemaDefaults(route: ServerRoute): {
   if (route.path === '/observability/traces/query/values') {
     return { body: { predicateScope: 'trace', path: 'entityName' } };
   }
+  // Edited copies need a UUID target thread (Khayalek fork, P35).
+  if (
+    route.path === '/agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages/:messageId/edit'
+  ) {
+    return {
+      body: {
+        content: 'Edited message',
+        newThreadId: '00000000-0000-4000-8000-000000000000',
+        newSessionScope: 'edited',
+      },
+    };
+  }
+  // Viewer commands are a discriminated union whose first option needs a real locale (Khayalek fork, P46).
+  if (route.path === '/agent-controller/:controllerId/sessions/:resourceId/browser/commands') {
+    return { body: { type: 'navigate', url: 'https://example.com' } };
+  }
 
   return {};
 }
@@ -398,6 +414,7 @@ export function getDefaultValidPathParams(route: ServerRoute): Record<string, an
   if (route.path.includes(':backgroundTaskId')) params.backgroundTaskId = 'test-background-task-id';
   if (route.path.includes(':toolId')) params.toolId = 'test-tool';
   if (route.path.includes(':threadId')) params.threadId = 'test-thread';
+  if (route.path.includes(':messageId')) params.messageId = 'test-message';
   if (route.path.includes(':conversationId')) params.conversationId = 'test-thread';
   if (route.path.includes(':controllerId')) params.controllerId = 'test-controller';
   if (route.path.includes(':responseId')) params.responseId = 'test-response';
