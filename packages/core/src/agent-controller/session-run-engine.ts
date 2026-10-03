@@ -1701,10 +1701,7 @@ export class SessionRunEngine {
               chunk.type === 'tool-call-suspended' ||
               (streamResult ?? this.finishStreamState(currentRun)).suspended ||
               undefined;
-            const abortChunk =
-              chunk.type === 'abort' ||
-              (chunk.type === 'finish' && getString(getRecord(getPayload(chunk).stepResult)?.reason) === 'abort');
-            const aborted = abortChunk || this.#session.run.isAbortRequested();
+            const aborted = chunk.type === 'abort';
             // A non-success terminal finish reason (e.g. a `claude-fable-5`
             // content-filter refusal) becomes an explicit error so the
             // run never silently stops without a visible terminal state.
@@ -1729,11 +1726,10 @@ export class SessionRunEngine {
               aborted,
             });
             currentRun = undefined;
-            if (abortChunk) {
+            if (aborted) {
               // The thread subscription remains live across runs. Ignore any
               // trailing chunks from the aborted run while continuing to drain
-              // later signals on this same subscription. A durable run reports
-              // its abort as a finish whose step reason is 'abort'.
+              // later signals on this same subscription.
               abortedRunId = runId ?? undefined;
             }
           }
