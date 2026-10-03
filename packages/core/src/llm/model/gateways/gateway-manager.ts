@@ -1,5 +1,4 @@
 import { MastraError } from '../../../error/index.js';
-import { pMap } from '../../../utils/p-map.js';
 import { parseModelRouterId } from '../gateway-resolver.js';
 import type { GatewayAuthRequest, GatewayAuthResult, MastraModelGatewayInterface, ProviderConfig } from './base.js';
 import { findGatewayForModel, getGatewayId, hasAuthCredentials, shouldEnableGateway } from './gateway-helpers.js';
@@ -242,6 +241,8 @@ export class GatewayManager {
       }
     }
 
+    // ESM-only p-map is imported natively so both package formats resolve the function (1.74, #24272).
+    const { default: pMap } = await import('p-map');
     return pMap(
       models,
       async model => {
