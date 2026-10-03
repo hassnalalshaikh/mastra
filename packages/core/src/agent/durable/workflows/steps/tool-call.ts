@@ -1139,6 +1139,11 @@ export function createDurableToolCallStep() {
         toolCallId,
         messages: [],
         getMessages: messageList ? () => messageList.get.all.db() : undefined,
+        // Registry tools bypass CoreToolBuilder and need the native execution context.
+        mastra,
+        agentId: initData.agentId,
+        threadId: state?.threadId,
+        resourceId: state?.resourceId,
         workspace,
         requestContext,
         mcp: registryEntry?.mcp,
