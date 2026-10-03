@@ -278,6 +278,7 @@ export function createDurableAgentStream<OUTPUT = undefined>(
   let lastErrorStack: string | undefined;
   let lastErrorName: string | undefined;
   let lastErrorCause: unknown;
+  let deferredErrorChunk: ChunkType<OUTPUT> | undefined;
 
   // Idle/liveness watchdog. A durable run whose driving process crashed stops
   // emitting chunks but never publishes a terminal FINISH/ERROR/ABORT event, so
@@ -393,6 +394,11 @@ export function createDurableAgentStream<OUTPUT = undefined>(
             lastErrorStack = typeof errPayload?.error?.stack === 'string' ? errPayload.error.stack : undefined;
             lastErrorName = typeof errPayload?.error?.name === 'string' ? errPayload.error.name : undefined;
             lastErrorCause = errPayload?.error ?? errPayload;
+            // A handled model error still runs final output processors and saves
+            // history. Consumers treat this chunk as terminal, so deliver it only
+            // when the workflow publishes FINISH after those side effects.
+            deferredErrorChunk = chunk as ChunkType<OUTPUT>;
+            break;
           }
           safeEnqueue(controller, chunk as ChunkType<OUTPUT>);
           await onChunk?.(chunk as ChunkType<OUTPUT>);
@@ -417,6 +423,9 @@ export function createDurableAgentStream<OUTPUT = undefined>(
         case AgentStreamEventTypes.FINISH: {
           const data = streamEvent.data as AgentFinishEventData;
           const finishReason = data.stepResult?.reason;
+          const errorChunk = deferredErrorChunk;
+          deferredErrorChunk = undefined;
+          if (errorChunk) safeEnqueue(controller, errorChunk);
 
           if (finishReason === 'abort') {
             safeEnqueue(controller, {
@@ -437,6 +446,14 @@ export function createDurableAgentStream<OUTPUT = undefined>(
           } as ChunkType<OUTPUT>);
           safeClose(controller);
           markTerminated();
+
+          if (errorChunk) {
+            try {
+              await onChunk?.(errorChunk);
+            } catch (callbackError) {
+              logError(`[DurableAgentStream] onChunk callback error:`, callbackError);
+            }
+          }
 
           // Terminal callbacks are driven by pubsub delivery because nobody may
           // consume the stream (for example, resume() with a delay-only wait).
