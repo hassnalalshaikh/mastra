@@ -23287,8 +23287,10 @@ export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpI
 export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_QueryParams =
   PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
 
-export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_Response =
-  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
+export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_Response = {
+  ok: boolean;
+  reason?: 'not_queued' | undefined;
+};
 
 export type DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_Request = Simplify<
   (DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_PathParams extends never

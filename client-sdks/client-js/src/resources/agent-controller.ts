@@ -14,6 +14,17 @@ export interface AgentControllerCommandAck {
   reason?: AgentControllerCommandRejection;
 }
 
+/**
+ * Acknowledgement for removing a queued follow-up: `ok` is true only when it
+ * was still queued and is now removed; `not_queued` means it was already handed
+ * to a run (or was never queued), so nothing changed.
+ */
+export interface AgentControllerFollowUpRemoveAck {
+  ok: boolean;
+  /** Set when `ok` is false. */
+  reason?: 'not_queued';
+}
+
 /** File data accepted by native Session message commands. */
 export type AgentControllerMessageFile = { data: string; mediaType: string; filename?: string };
 
@@ -871,10 +882,16 @@ export class AgentControllerSession extends BaseResource {
    * `displayState.queuedFollowUpItems`. A follow-up already drained into a
    * run is not affected.
    */
-  async removeFollowUp(followUpId: string): Promise<void> {
-    await this.request(this.url(`${this.base()}/follow-up/${encodeURIComponent(followUpId)}`), {
-      method: 'DELETE',
-    });
+  async removeFollowUp(followUpId: string): Promise<AgentControllerFollowUpRemoveAck> {
+    return this.request<AgentControllerFollowUpRemoveAck>(
+      this.url(`${this.base()}/follow-up/${encodeURIComponent(followUpId)}`),
+      {
+        method: 'DELETE',
+        // Not idempotent: a replay after a lost response would answer not_queued
+        // and misreport an applied removal as ignored.
+        retries: 0,
+      },
+    );
   }
 
   /** Get the observational memory record for this session's thread. */

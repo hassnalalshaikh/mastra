@@ -517,6 +517,35 @@ describe('agent-controller routes', () => {
       expect(spy).toHaveBeenCalledWith({ id: 'follow-up-7-abc123' });
     });
 
+    it('answers not_queued when the follow-up was already handed to a run', async () => {
+      const session = await getRouteSession('user-remove-drained-follow-up');
+      const spy = vi.spyOn(session, 'removeFollowUp').mockReturnValue(false);
+
+      const res = await REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-remove-drained-follow-up',
+        followUpId: 'follow-up-8-drained',
+      } as any);
+
+      expect(res).toEqual({ ok: false, reason: 'not_queued' });
+      expect(spy).toHaveBeenCalledWith({ id: 'follow-up-8-drained' });
+      expect(REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.responseSchema!.safeParse(res).success).toBe(true);
+    });
+
+    it('answers not_queued for an id the real session never queued', async () => {
+      await getRouteSession('user-remove-unknown-follow-up');
+
+      const res = await REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-remove-unknown-follow-up',
+        followUpId: 'follow-up-never-queued',
+      } as any);
+
+      expect(res).toEqual({ ok: false, reason: 'not_queued' });
+    });
+
     it('forwards requestContext to session.respondToToolApproval', async () => {
       const session = await getRouteSession('user-rc');
       vi.spyOn(session.approval, 'isArmed').mockReturnValue(true);
