@@ -232,6 +232,24 @@ describe('AgentController Resource', () => {
     expect(init.method).toBe('DELETE');
   });
 
+  it('returns the removal ack so a caller never acts on a follow-up a run already took', async () => {
+    mockJson({ ok: true });
+    await expect(client.getAgentController('code').session('user-1').removeFollowUp('queued-1')).resolves.toEqual({
+      ok: true,
+    });
+    mockJson({ ok: false, reason: 'not_queued' });
+    await expect(client.getAgentController('code').session('user-1').removeFollowUp('drained-1')).resolves.toEqual({
+      ok: false,
+      reason: 'not_queued',
+    });
+  });
+
+  it('does not replay a follow-up removal after a failed response', async () => {
+    (global.fetch as any).mockResolvedValue(new Response('boom', { status: 500, statusText: 'Internal Server Error' }));
+    await expect(client.getAgentController('code').session('user-1').removeFollowUp('queued-1')).rejects.toThrow();
+    expect((global.fetch as any).mock.calls).toHaveLength(1);
+  });
+
   it('reads session state', async () => {
     mockJson({ controllerId: 'code', resourceId: 'user-1', threadId: 't-1', modeId: 'build', modelId: 'm' });
     const state = await client.getAgentController('code').session('user-1').state();
