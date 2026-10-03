@@ -605,9 +605,12 @@ export interface OMProgressState {
  * State of an active tool execution, tracked by the AgentController for UI consumption.
  */
 export interface ActiveToolState {
+  runId?: string;
+  /** A preliminary background dispatch remains active after the foreground run ends. */
+  background?: boolean;
   name: string;
   args: unknown;
-  status: 'streaming_input' | 'running' | 'completed' | 'error';
+  status: 'streaming_input' | 'running' | 'executing' | 'completed' | 'error';
   partialResult?: string;
   result?: unknown;
   isError?: boolean;
@@ -849,6 +852,8 @@ export type AgentControllerEvent =
   | { type: 'message_end'; id: string }
   | ({ threadId?: string } & (
       | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown; title?: string }
+      /** Final validation, approval and policy checks have passed; execution is entering the tool. */
+      | { type: 'tool_execution_start'; runId: string; toolCallId: string; toolName: string; args: unknown }
       | { type: 'tool_approval_required'; toolCallId: string; toolName: string; args: unknown }
       | {
           type: 'tool_suspended';
@@ -860,10 +865,15 @@ export type AgentControllerEvent =
           waitingFor?: 'user' | 'external';
         }
       | { type: 'tool_suspension_cancelled'; toolCallId: string; toolName: string; reason: string }
-      | { type: 'tool_update'; toolCallId: string; partialResult: unknown }
+      | { type: 'tool_update'; toolCallId: string; partialResult: unknown; preliminary?: boolean }
       | {
           type: 'tool_end';
           toolCallId: string;
+          runId?: string;
+          toolName?: string;
+          messageId?: string;
+          completedAt?: string;
+          cancelled?: boolean;
           result: unknown;
           isError: boolean;
           /**

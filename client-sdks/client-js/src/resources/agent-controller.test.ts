@@ -8,6 +8,18 @@ import type { AgentControllerEvent, KnownAgentControllerEvent } from './agent-co
 global.fetch = vi.fn();
 
 describe('AgentController Resource', () => {
+  it('recognizes native tool progress events without widening unknown events', () => {
+    expect(isKnownAgentControllerEvent({ type: 'unknown_future_event' })).toBe(false);
+    expect(
+      isKnownAgentControllerEvent({
+        type: 'tool_execution_start',
+        runId: 'run',
+        toolCallId: 'tool',
+        toolName: 'work',
+        args: {},
+      }),
+    ).toBe(true);
+  });
   let client: MastraClient;
   const clientOptions = { baseUrl: 'http://localhost:4111' };
 
