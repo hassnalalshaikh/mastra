@@ -71,7 +71,15 @@ export type EagerToolBailout = {
    * otherwise announce the same `toolCallId` a second time.
    */
   inputAvailableCalled?: boolean;
+  /**
+   * Set when the eager attempt passed the native admission hook (tool-execution-start).
+   * The adopting iteration announces that start, never the eager attempt itself.
+   */
+  executionStarted?: boolean;
 };
+
+/** In-process mark on an adoptable eager result whose tool body was admitted. */
+export const EAGER_EXECUTION_STARTED = Symbol('eager-tool-execution-started');
 
 /** Brands errors whose eager attempt produced no adoptable result. */
 const EAGER_NOT_EXECUTED = Symbol('eager-tool-not-executed');
