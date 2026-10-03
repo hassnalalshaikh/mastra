@@ -7,6 +7,7 @@ function fixture() {
   const stream = Object.assign(new EventEmitter(), {
     stop: vi.fn(async () => {}),
     reconnect: vi.fn(async () => {}),
+    markInteractive: vi.fn(),
   });
   const browser = {
     startScreencastIfBrowserActive: vi.fn(async () => stream),
@@ -43,6 +44,19 @@ describe('native shared browser viewer', () => {
     browser.startScreencastIfBrowserActive.mockResolvedValueOnce(null as never);
     await expect(viewer.subscribe(vi.fn())).rejects.toThrow('not running');
     expect(browser.executeViewerCommand).not.toHaveBeenCalled();
+  });
+
+  it('marks user input as interactive, but not size or language preferences', async () => {
+    const { stream, viewer } = fixture();
+    const release = await viewer.subscribe(vi.fn());
+    await viewer.command(
+      { type: 'preferences', preferences: { width: 800, height: 600, deviceScaleFactor: 2, locale: 'en' } },
+      'launch-one',
+    );
+    expect(stream.markInteractive).not.toHaveBeenCalled();
+    await viewer.command({ type: 'mouse', event: { type: 'mouseWheel', x: 1, y: 1, deltaY: 100 } }, 'launch-one');
+    expect(stream.markInteractive).toHaveBeenCalledTimes(1);
+    await release();
   });
 
   it('rejects commands queued for an old launch and preserves order', async () => {
