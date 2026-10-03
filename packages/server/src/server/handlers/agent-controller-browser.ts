@@ -113,7 +113,10 @@ export const COMMAND_AGENT_CONTROLLER_BROWSER_ROUTE = createRoute({
   pathParamSchema,
   queryParamSchema,
   bodySchema: browserViewerCommandSchema,
+  // 1.74 requires a response schema on every JSON route.
+  responseSchema: z.object({ ok: z.boolean() }),
   summary: 'Control the existing session browser',
+  description: 'Sends one viewer input command to the browser already running for this exact Session thread.',
   tags: ['AgentController', 'Browser'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
@@ -133,6 +136,7 @@ export const STREAM_AGENT_CONTROLLER_BROWSER_ROUTE = createRoute({
   pathParamSchema,
   queryParamSchema,
   summary: 'Watch the existing session browser',
+  description: 'Streams viewer frames and state for the browser already running for this exact Session thread.',
   tags: ['AgentController', 'Browser'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:read',
