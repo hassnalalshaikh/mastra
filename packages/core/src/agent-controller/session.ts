@@ -4667,9 +4667,17 @@ export class Session<TState = unknown> {
   }
 
   /** Abort the current run and send steering input without clearing queued follow-ups. */
-  async steer({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
+  async steer({
+    content,
+    files,
+    requestContext,
+  }: {
+    content: string;
+    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    requestContext?: RequestContext;
+  }): Promise<void> {
     this.abort();
-    await this.sendMessage({ content, requestContext });
+    await this.sendMessage({ content, files, requestContext });
   }
 
   ensureFollowUpBinding(agent: Agent, resourceId: string, threadId: string) {
@@ -4707,8 +4715,16 @@ export class Session<TState = unknown> {
   }
 
   /** Queue a follow-up through the Agent runtime, or send it immediately while idle. */
-  async followUp({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
-    if (!this.run.isRunning()) return this.sendMessage({ content, requestContext });
+  async followUp({
+    content,
+    files,
+    requestContext,
+  }: {
+    content: string;
+    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    requestContext?: RequestContext;
+  }): Promise<void> {
+    if (!this.run.isRunning()) return this.sendMessage({ content, files, requestContext });
     const threadId = this.thread.getId();
     if (!threadId) return;
     const resourceId = this.identity.getResourceId();
@@ -4727,7 +4743,7 @@ export class Session<TState = unknown> {
       this.#preparingFollowUps.delete(operation);
       await agent.queueMessage(
         {
-          contents: this.createMessageInput({ content }),
+          contents: this.createMessageInput({ content, files }),
           providerOptions: withMessageAuthor(undefined, readMessageAuthor(requestContext)),
         },
         {

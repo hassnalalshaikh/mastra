@@ -187,7 +187,7 @@ const sendMessageBodySchema = z.object({
     })
     .optional(),
 });
-const steerBodySchema = z.object({ message: z.string(), requestContext: bodyRequestContextSchema });
+const steerBodySchema = sendMessageBodySchema;
 const toolApprovalBodySchema = z.object({
   toolCallId: z.string(),
   approved: z.boolean(),
@@ -262,7 +262,7 @@ const listThreadsQuerySchema = z.object({
     }, z.record(z.string(), z.string()).optional())
     .optional(),
 });
-const followUpBodySchema = z.object({ message: z.string(), requestContext: bodyRequestContextSchema });
+const followUpBodySchema = sendMessageBodySchema;
 
 const sendNotificationBodySchema = z.object({
   source: z.string(),
@@ -854,12 +854,12 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, requestContext }) => {
+  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, files, requestContext }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(controller, resourceId, { scope: sessionScope }, requestContext);
       ackBackgroundSessionWork({
-        work: session.steer({ content: message, requestContext }),
+        work: session.steer({ content: message, files, requestContext }),
         session,
         mastra,
         operation: 'steer',
@@ -1451,12 +1451,12 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, requestContext }) => {
+  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, files, requestContext }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(controller, resourceId, { scope: sessionScope }, requestContext);
       ackBackgroundSessionWork({
-        work: session.followUp({ content: message, requestContext }),
+        work: session.followUp({ content: message, files, requestContext }),
         session,
         mastra,
         operation: 'followUp',

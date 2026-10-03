@@ -13,6 +13,9 @@ export interface AgentControllerCommandAck {
   reason?: AgentControllerCommandRejection;
 }
 
+/** File data accepted by native Session message commands. */
+export type AgentControllerMessageFile = { data: string; mediaType: string; filename?: string };
+
 export type { MastraDBMessage, MastraMessageContentV2, MastraMessagePart } from '@mastra/core/agent-controller';
 import type { RequestContext } from '@mastra/core/request-context';
 import type { StorageListMessagesOutput } from '@mastra/core/storage';
@@ -605,7 +608,7 @@ export class AgentControllerSession extends BaseResource {
    * Pass `options.requestContext` to merge custom context into the run's request context.
    */
   async sendMessage(
-    message: string | { content: string; files?: Array<{ data: string; mediaType: string; filename?: string }> },
+    message: string | { content: string; files?: AgentControllerMessageFile[] },
     options?: AgentControllerRequestOptions,
   ): Promise<void> {
     const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
@@ -664,12 +667,20 @@ export class AgentControllerSession extends BaseResource {
     });
   }
 
-  /** Inject a message into the in-flight run without starting a new turn. */
-  async steer(message: string, options?: AgentControllerRequestOptions): Promise<void> {
+  /** Stop the current run and send this message next. */
+  async steer(
+    message: string | { content: string; files?: AgentControllerMessageFile[] },
+    options?: AgentControllerRequestOptions,
+  ): Promise<void> {
+    const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
     const requestContext = parseClientRequestContext(options?.requestContext);
     await this.request(this.url(`${this.base()}/steer`), {
       method: 'POST',
-      body: { message, ...(requestContext ? { requestContext } : {}) },
+      body: {
+        message: content,
+        ...(files?.length ? { files } : {}),
+        ...(requestContext ? { requestContext } : {}),
+      },
     });
   }
 
@@ -804,11 +815,15 @@ export class AgentControllerSession extends BaseResource {
    * Queue a follow-up message. If the session is idle it sends immediately;
    * if a run is active it queues for after completion.
    */
-  async followUp(message: string, options?: AgentControllerRequestOptions): Promise<void> {
+  async followUp(
+    message: string | { content: string; files?: AgentControllerMessageFile[] },
+    options?: AgentControllerRequestOptions,
+  ): Promise<void> {
+    const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
     const requestContext = parseClientRequestContext(options?.requestContext);
     await this.request(this.url(`${this.base()}/follow-up`), {
       method: 'POST',
-      body: { message, ...(requestContext ? { requestContext } : {}) },
+      body: { message: content, ...(files?.length ? { files } : {}), ...(requestContext ? { requestContext } : {}) },
     });
   }
 
