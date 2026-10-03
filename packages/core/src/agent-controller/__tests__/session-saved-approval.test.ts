@@ -98,14 +98,63 @@ describe('saved Session approvals', () => {
     expect(f.sendToolApproval).not.toHaveBeenCalled();
   });
 
-  it('does not choose arbitrarily between multiple saved approvals', async () => {
+  it('does not choose arbitrarily between two saved approvals of one run, and still attaches', async () => {
     const f = fixture();
     f.saved.toolCalls.push({ ...f.saved.toolCalls[0], toolCallId: 'other-call' });
     await expect(
       f.session.restorePendingApproval({ threadId: 'thread', subscription: f.subscription }),
-    ).rejects.toThrow('Multiple saved approvals');
+    ).resolves.toBeUndefined();
     expect(f.sendToolApproval).not.toHaveBeenCalled();
     expect(f.session.approval.isArmed()).toBe(false);
+    expect(f.session.displayState.get().pendingApprovals.size).toBe(0);
+  });
+
+  it('restores one gate per saved run when a thread holds several parked runs', async () => {
+    const f = fixture();
+    const second = {
+      runId: 'second-run',
+      toolCalls: [{ toolCallId: 'second-call', toolName: 'fixture', requiresApproval: true, args: { value: 'second' } }],
+    };
+    f.agent.listSuspendedRuns.mockResolvedValue({ runs: [f.saved, second], total: 2 });
+    const required: string[] = [];
+    f.session.subscribe(event => {
+      if (event.type === 'tool_approval_required') required.push(event.toolCallId);
+    });
+    await f.session.restorePendingApproval({ threadId: 'thread', subscription: f.subscription });
+    expect(required).toEqual(['saved-call', 'second-call']);
+    expect([...f.session.displayState.get().pendingApprovals.keys()]).toEqual(['saved-call', 'second-call']);
+    expect(f.session.approval.getToolCallIds()).toEqual(['saved-call', 'second-call']);
+
+    expect(f.session.respondToToolApproval({ decision: 'decline', toolCallId: 'second-call' })).toEqual({ accepted: true });
+    await vi.waitFor(() => expect(f.sendToolApproval).toHaveBeenCalledTimes(1));
+    expect(f.sendToolApproval).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runId: 'second-run', toolCallId: 'second-call', approved: false }),
+    );
+    expect([...f.session.displayState.get().pendingApprovals.keys()]).toEqual(['saved-call']);
+
+    expect(f.session.respondToToolApproval({ decision: 'approve', toolCallId: 'saved-call' })).toEqual({ accepted: true });
+    expect(f.session.respondToToolApproval({ decision: 'approve', toolCallId: 'saved-call' })).toMatchObject({ accepted: false });
+    await vi.waitFor(() => expect(f.sendToolApproval).toHaveBeenCalledTimes(2));
+    expect(f.sendToolApproval).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runId: 'saved-run', toolCallId: 'saved-call', approved: true }),
+    );
+    expect(f.session.displayState.get().pendingApprovals.size).toBe(0);
+  });
+
+  it('restores the unambiguous run next to a run that saved two approvals', async () => {
+    const f = fixture();
+    const ambiguous = {
+      runId: 'ambiguous-run',
+      toolCalls: [
+        { toolCallId: 'a-1', toolName: 'fixture', requiresApproval: true, args: {} },
+        { toolCallId: 'a-2', toolName: 'fixture', requiresApproval: true, args: {} },
+      ],
+    };
+    f.agent.listSuspendedRuns.mockResolvedValue({ runs: [ambiguous, f.saved], total: 2 });
+    await f.session.restorePendingApproval({ threadId: 'thread', subscription: f.subscription });
+    expect([...f.session.displayState.get().pendingApprovals.keys()]).toEqual(['saved-call']);
+    expect(f.session.respondToToolApproval({ decision: 'approve', toolCallId: 'a-1' })).toMatchObject({ accepted: false });
+    expect(f.sendToolApproval).not.toHaveBeenCalled();
   });
 
   it('does not let navigation during discovery restore a prompt on the next thread', async () => {
