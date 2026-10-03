@@ -26,6 +26,7 @@ import type { Mastra } from '../../mastra';
 import { SpanType, wrapMastra, EntityType, getOrCreateSpan, createObservabilityContext } from '../../observability';
 import type { AnySpan } from '../../observability';
 import { executeWithContext } from '../../observability/utils';
+import { PROCESSOR_TOOL_OWNER, getProcessorToolOwner } from '../../processors/tool-provenance';
 import { RequestContext } from '../../request-context';
 import { isStandardSchemaWithJSON, toStandardSchema, standardSchemaToJSONSchema } from '../../schema';
 import type { StandardSchemaWithJSON } from '../../schema';
@@ -1195,8 +1196,10 @@ export class CoreToolBuilder extends MastraBase {
         : undefined,
     };
 
+    const processorToolOwner = getProcessorToolOwner(this.originalTool);
     const builtTool = {
       ...definition,
+      ...(processorToolOwner === undefined ? {} : { [PROCESSOR_TOOL_OWNER]: processorToolOwner }),
       id: 'id' in this.originalTool ? this.originalTool.id : undefined,
       title: 'title' in this.originalTool ? this.originalTool.title : undefined,
       parameters: processedInputSchema ?? z.object({}),
