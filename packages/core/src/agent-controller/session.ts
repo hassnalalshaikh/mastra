@@ -391,6 +391,8 @@ export interface SessionMachinery {
   getAgent(): Agent;
   /** Get the ephemeral state associated with an active or suspended run. */
   getRunScope(runId: string): RunScope | undefined;
+  /** The distinct backing agents whose saved runs this controller may discover. */
+  getAgents?(): Agent[];
   /** Open a fresh subscription to a thread's agent event stream. */
   subscribeToThread(input: {
     agent?: Agent;
@@ -3756,20 +3758,50 @@ export class Session<TState = unknown> {
 
     const localRunId = this.getCurrentRunId();
     const threadId = this.thread.getId();
-    const operationId = this.run.getOperationId();
+    const resourceId = this.identity.getResourceId();
+    const userStop = !options.localOnly;
+
+    // Retract the prompts for every parked suspension. Dropping them silently
+    // left the UI rendering `ask_user` / `request_access` prompts whose answers
+    // could never land, since the run they belong to is gone. Keep their exact
+    // run IDs: a user Stop also closes those native runs through their owner.
+    // A lifecycle (localOnly) abort leaves them for their owner.
+    const suspendedToolCalls = this.suspensions.clear();
+    const parkedRuns = new Set(userStop ? suspendedToolCalls.map(({ runId }) => runId) : []);
+    for (const { toolCallId, toolName } of suspendedToolCalls) {
+      this.emit({ type: 'tool_suspension_cancelled', toolCallId, toolName, reason: ABORTED_BY_USER_REASON });
+    }
+
+    // The live run scope records the agent that parked each run. Without it (a
+    // mode switch away from a saved run, or a recreated Session), the owner is
+    // discovered across this controller's backing agents.
+    const parkedOwners = new Map<string, Agent | undefined>(
+      [...parkedRuns].map(runId => [runId, this.machinery.getRunScope(runId)?.get(SUSPENDED_RUN_AGENT_KEY)]),
+    );
+    const agents = userStop ? [...new Set(this.machinery.getAgents?.() ?? [this.machinery.getAgent()])] : [];
+    const unownedParkedRuns = new Set([...parkedOwners].flatMap(([runId, owner]) => (owner ? [] : [runId])));
+    const discoverParkedOwner = unownedParkedRuns.size > 0 && agents.length > 1;
     // A restored Session has neither a run id nor a locally armed run. A run this
     // Session is driving itself is stopped through its own stream below.
-    const restoredStop = !localRunId && !this.run.isRunning() && !!threadId && !options.localOnly;
-    if (restoredStop && !this.suspensions.hasPending()) {
+    const restoredStop =
+      userStop && !localRunId && !this.run.isRunning() && !!threadId && suspendedToolCalls.length === 0;
+
+    const cancelDiscoveredRuns = () => {
+      if (!threadId) return;
       const agent = this.machinery.getAgent();
-      // A restored Session has no live run identity. Use the same scoped native
-      // discovery as cold resume, bounded to runs that existed when Stop arrived.
-      const scope = { threadId, resourceId: this.identity.getResourceId(), toDate: new Date() };
-      const cancelDiscoveredRuns = async () => {
-        const discovery = await Promise.allSettled([
-          agent.listSuspendedRuns(scope),
-          isDurableAgentLike(agent) ? agent.listActiveRuns(scope) : Promise.resolve({ runs: [] }),
-        ]);
+      // Use the same scoped native discovery as cold resume across this
+      // controller's backing agents, bounded to runs that existed when Stop
+      // arrived. Warm Stop selects only its parked run IDs.
+      const scope = { threadId, resourceId, toDate: new Date() };
+      const cancel = async () => {
+        const discovery = await Promise.allSettled(
+          agents.flatMap(owner => [
+            owner.listSuspendedRuns(scope).then(result => ({ owner, runs: result.runs })),
+            ...(isDurableAgentLike(owner)
+              ? [owner.listActiveRuns(scope).then(result => ({ owner, runs: result.runs }))]
+              : []),
+          ]),
+        );
         const discoveryErrors = discovery.flatMap(result =>
           result.status === 'rejected' &&
           !(result.reason instanceof MastraError && result.reason.id === 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE')
@@ -3778,19 +3810,27 @@ export class Session<TState = unknown> {
         );
         if (discoveryErrors.length) throw new AggregateError(discoveryErrors, 'Failed to discover runs for Stop');
         const results = discovery.flatMap(result => (result.status === 'fulfilled' ? [result.value] : []));
-        if (
-          this.thread.getId() !== threadId ||
-          this.run.getOperationId() !== operationId ||
-          !this.run.isAbortRequested()
-        )
-          return;
-        const runIds = new Set(results.flatMap(result => result.runs.map(run => run.runId)));
+        // Stop owns the captured saved scope even if turn cleanup or navigation
+        // changes this Session while discovery waits. The native query excludes
+        // runs created after Stop; parked IDs further narrow warm cancellation.
+        const owners = new Map<string, Agent>();
+        for (const { owner, runs } of results) {
+          for (const { runId } of runs) {
+            if (discoverParkedOwner && !unownedParkedRuns.has(runId)) continue;
+            const previous = owners.get(runId);
+            if (previous && previous.id !== owner.id) throw new Error('Multiple agents own a run selected for Stop');
+            owners.set(runId, previous ?? owner);
+          }
+        }
+        if (discoverParkedOwner && owners.size !== unownedParkedRuns.size) {
+          throw new Error('Could not find the owning agent for a parked run selected for Stop');
+        }
         const cancellations = await Promise.allSettled(
-          [...runIds].map(async runId => {
-            if (isDurableAgentLike(agent) && agent.__abortRunStreamAndWait) {
-              await agent.__abortRunStreamAndWait(runId);
+          [...owners].map(async ([runId, owner]) => {
+            if (isDurableAgentLike(owner) && owner.__abortRunStreamAndWait) {
+              await owner.__abortRunStreamAndWait(runId);
             } else {
-              agent.abortRunStream(runId);
+              owner.abortRunStream(runId);
             }
           }),
         );
@@ -3798,28 +3838,23 @@ export class Session<TState = unknown> {
         if (errors.length) throw new AggregateError(errors, 'Failed to cancel discovered runs');
       };
       const mastra = agent.getMastraInstance();
-      const cancellation = mastra ? mastra.__runDurableAgentCancellation(cancelDiscoveredRuns) : cancelDiscoveredRuns();
+      const cancellation = mastra ? mastra.__runDurableAgentCancellation(cancel) : cancel();
       void cancellation.catch(error => {
         if (!(error instanceof MastraError) || error.id !== 'AGENT_LIST_SUSPENDED_RUNS_NO_STORAGE') {
           this.emit({ type: 'error', error: getErrorFromUnknown(error) });
         }
       });
-    }
+    };
+    if (restoredStop) cancelDiscoveredRuns();
 
-    // Retract the prompts for every parked suspension. Dropping them silently
-    // left the UI rendering `ask_user` / `request_access` prompts whose answers
-    // could never land, since the run they belong to is gone.
-    const suspendedToolCalls = this.suspensions.clear();
-    // A user Stop also closes the native runs those suspensions are parked on.
-    // A lifecycle (localOnly) abort leaves them for their owner.
-    const parkedRuns = new Set(options.localOnly ? [] : suspendedToolCalls.map(({ runId }) => runId));
-    for (const { toolCallId, toolName } of suspendedToolCalls) {
-      this.emit({ type: 'tool_suspension_cancelled', toolCallId, toolName, reason: ABORTED_BY_USER_REASON });
-    }
     // Close the parked runs only after their prompts are settled as denied, so
     // the settlement still finds the run that owns each suspension.
     const abortParkedRuns = () => {
-      for (const runId of parkedRuns) this.machinery.getAgent().abortRunStream(runId);
+      for (const [runId, owner] of parkedOwners) {
+        if (owner) owner.abortRunStream(runId);
+        else if (!discoverParkedOwner) this.machinery.getAgent().abortRunStream(runId);
+      }
+      if (discoverParkedOwner) cancelDiscoveredRuns();
     };
 
     // The teardown may be deferred (below), so remember whether this abort should
