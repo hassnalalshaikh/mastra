@@ -3425,6 +3425,18 @@ export class Session<TState = unknown> {
     return { storage, existing };
   }
 
+  /** Put back a recorded turn whose delivery was not accepted, unless its id was persisted meanwhile. */
+  private async restoreRecordedMessage(storage: MemoryStorage, recorded: MastraDBMessage, rejection?: unknown) {
+    try {
+      const { messages } = await storage.listMessagesById({ messageIds: [recorded.id] });
+      if (messages.length === 0) await storage.saveMessages({ messages: [recorded] });
+    } catch (error) {
+      throw new Error('Delivery was not accepted and the recorded message could not be restored', {
+        cause: rejection === undefined ? error : new AggregateError([rejection, error]),
+      });
+    }
+  }
+
   /**
    * Record a completed external conversation turn without starting a run.
    * Reuse its id with sendMessageWithReceipt to deliver that same user input.
@@ -5015,15 +5027,31 @@ export class Session<TState = unknown> {
           throw new Error('Message id has already been delivered or belongs to another role');
         }
         this.assertMessageScope(threadId, resourceId);
-        return this.sendSignal(
-          { id, type: 'user', contents, createdAt: existing?.createdAt },
-          {
-            requireDelivery: true,
-            tracingContext,
-            tracingOptions,
-            requestContext,
-          },
-        ).accepted;
+        // Stored history is authoritative over run input that shares its id, so a
+        // transcript recorded before delivery would replace the delivered words and
+        // files in the prompt and in storage. The delivered signal becomes this
+        // turn's one stored row; the recorded row is restored unchanged when the
+        // delivery is not accepted.
+        if (existing) await storage.deleteMessages([id]);
+        let delivered: Awaited<ReturnType<Session['sendSignal']>['accepted']>;
+        try {
+          delivered = await this.sendSignal(
+            { id, type: 'user', contents, createdAt: existing?.createdAt },
+            {
+              requireDelivery: true,
+              tracingContext,
+              tracingOptions,
+              requestContext,
+            },
+          ).accepted;
+        } catch (error) {
+          if (existing) await this.restoreRecordedMessage(storage, existing, error);
+          throw error;
+        }
+        if (existing && delivered.action !== 'wake' && delivered.action !== 'deliver') {
+          await this.restoreRecordedMessage(storage, existing);
+        }
+        return delivered;
       });
       const receipt: ReturnType<Session['sendSignal']> = { id, type: 'user', accepted };
       const entry = { threadId, resourceId, fingerprint, receipt, settled: false };
