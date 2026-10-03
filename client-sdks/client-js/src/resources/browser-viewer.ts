@@ -53,11 +53,21 @@ export class SessionBrowserViewer extends BaseResource {
         return last.promise;
       }
     }
+    if (
+      last?.command.type === 'text' &&
+      command.type === 'text' &&
+      last.command.text.length + command.text.length <= 65536
+    ) {
+      // Typing while the previous request is in flight: inserting "ab" once is inserting "a" then "b".
+      // One request per round trip instead of one per key, so a burst no longer queues behind itself.
+      last.command = { type: 'text', text: last.command.text + command.text };
+      return last.promise;
+    }
     const replaceable = (value: BrowserViewerCommand) =>
       value.type === 'preferences' || (value.type === 'mouse' && value.event.type === 'mouseMoved');
     if (last && replaceable(last.command) && replaceable(command) && last.command.type === command.type) {
       // Intermediate pointer positions and resize observations are obsolete.
-      // Never coalesce clicks, keys, text or navigation.
+      // Never coalesce clicks, keys or navigation.
       last.command = command;
       return last.promise;
     }

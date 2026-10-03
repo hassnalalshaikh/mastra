@@ -21,6 +21,28 @@ export interface ScreencastOptions {
   everyNthFrame?: number;
   /** Thread ID for thread-scoped screencasts (streams from thread's page) */
   threadId?: string;
+  /**
+   * The device-density picture a provider captures when the page comes to rest
+   * (`CdpSessionProvider.captureFrame`). Chrome's live screencast frames keep
+   * `format`/`quality`; without this, the capture uses them too.
+   */
+  sharp?: SharpCaptureOptions;
+}
+
+/** Options for the device-density picture captured when the page comes to rest. */
+export interface SharpCaptureOptions {
+  /** Image format (default: the screencast `format`). WebP is smaller than JPEG at the same sharpness. */
+  format?: 'jpeg' | 'png' | 'webp';
+  /** Starting quality 0-100 for jpeg/webp (default: the screencast `quality`) */
+  quality?: number;
+  /** Lowest quality the size limit may use (default: 60) */
+  minQuality?: number;
+  /** Largest picture in bytes. Over it, the capture is repeated at a lower quality, then at a smaller scale. */
+  maxBytes?: number;
+  /** Max width in device pixels (default: the screencast `maxWidth`) */
+  maxWidth?: number;
+  /** Max height in device pixels (default: the screencast `maxHeight`) */
+  maxHeight?: number;
 }
 
 /**
@@ -29,6 +51,8 @@ export interface ScreencastOptions {
 export interface ScreencastFrameData {
   /** Base64-encoded image data */
   data: string;
+  /** Image format of `data` when it differs from the screencast `format` (a sharp capture) */
+  format?: 'jpeg' | 'png' | 'webp';
   /** Frame timestamp in milliseconds */
   timestamp: number;
   /** Viewport information */
@@ -63,7 +87,7 @@ export interface ScreencastEvents {
 /**
  * Default screencast options.
  */
-export const SCREENCAST_DEFAULTS: Required<Omit<ScreencastOptions, 'threadId'>> = {
+export const SCREENCAST_DEFAULTS: Required<Omit<ScreencastOptions, 'threadId' | 'sharp'>> = {
   format: 'jpeg',
   quality: 80,
   maxWidth: 1280,

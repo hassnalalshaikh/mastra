@@ -18,6 +18,7 @@ export type {
   ScreencastStream,
   ScreencastFrameData,
   ScreencastEvents,
+  SharpCaptureOptions,
   MouseEventParams,
   KeyboardEventParams,
   BrowserAgentAction,
