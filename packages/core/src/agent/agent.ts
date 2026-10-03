@@ -412,6 +412,8 @@ export interface AgentRunToolCall {
   toolApprovalContext?: import('./tool-approval-context').ToolApprovalContext;
   /** The tool-defined suspend payload when the tool itself called `suspend()`. */
   suspendPayload?: unknown;
+  /** Who supplies resume data for a tool suspension. Defaults to 'user'. */
+  waitingFor?: 'user' | 'external';
 }
 
 /**
@@ -7537,6 +7539,7 @@ export class Agent<
                 toolApprovalContext: payload.toolApprovalContext,
               }
             : {}),
+          waitingFor: payload.waitingFor === 'external' ? 'external' : 'user',
         });
       }
     };

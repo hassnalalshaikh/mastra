@@ -81,6 +81,7 @@ type AddToolMetadataOptions = {
   parentToolName?: string;
   parentArgs?: unknown;
   resumeSchema: string;
+  waitingFor?: 'user' | 'external';
   suspendedToolRunId?: string;
   metadata?: Record<string, unknown>;
 } & (
@@ -202,6 +203,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         parentArgs,
         suspendPayload,
         resumeSchema,
+        waitingFor,
         type,
         suspendedToolRunId,
         metadata: toolStateTransformMetadata,
@@ -243,7 +245,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           // from `runId` directly; legacy entries with `parentRunId` keep working.
           runId,
           ...(suspendedToolRunId && suspendedToolRunId !== runId ? { delegatedRunId: suspendedToolRunId } : {}),
-          ...(type === 'suspension' ? { suspendPayload: transformedSuspendPayload } : {}),
+          ...(type === 'suspension'
+            ? { suspendPayload: transformedSuspendPayload, waitingFor: waitingFor ?? 'user' }
+            : {}),
           resumeSchema,
           ...(toolStateTransformMetadata ? { metadata: toolStateTransformMetadata } : {}),
         };
@@ -689,6 +693,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 suspendPayload,
                 args: inputData.args,
                 resumeSchema: options?.resumeSchema,
+                waitingFor: options?.waitingFor ?? 'user',
               },
             });
             // Persist the pending request before exposing it to a client.
@@ -705,6 +710,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   suspendedToolRunId: options?.runId,
                   type: 'suspension',
                   resumeSchema: options?.resumeSchema,
+                  waitingFor: options?.waitingFor ?? 'user',
                   metadata: suspensionChunk.metadata,
                 });
               },
@@ -721,6 +727,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 __mastraToolInput: acceptedInput,
                 toolApprovalPolicy,
                 toolApprovalContext,
+                waitingFor: options?.waitingFor ?? 'user',
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
                 ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
@@ -906,6 +913,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 options: {
                   resumeLabel: options?.resumeLabel,
                   resumeSchema: options?.resumeSchema,
+                  waitingFor: options?.waitingFor,
                   runId: options?.runId,
                   requireToolApproval: options?.requireToolApproval,
                 },
