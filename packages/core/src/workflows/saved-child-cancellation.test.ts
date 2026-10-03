@@ -4,6 +4,9 @@ import { EventEmitterPubSub } from '../events/event-emitter';
 import { Mastra } from '../mastra';
 import { MockStore } from '../storage/mock';
 import { createWorkflow } from './create';
+// 1.74 (#25430) keeps `schedule` workflows on the default engine unless MASTRA_WORKERS
+// is set; the evented factory is the documented explicit engine choice.
+import { createWorkflow as createEventedWorkflow } from './evented';
 import { WorkflowEventProcessor } from './evented/workflow-event-processor';
 import { createStep } from './workflow';
 
@@ -15,7 +18,7 @@ afterEach(async () => {
 function tree(storage: MockStore, mode: 'default' | 'evented' | 'mixed', after = vi.fn()) {
   const schema = z.object({ value: z.string() });
   const make = (id: string, evented = mode === 'evented') =>
-    createWorkflow({
+    (evented ? createEventedWorkflow : createWorkflow)({
       id,
       inputSchema: schema,
       outputSchema: z.any(),
@@ -178,7 +181,7 @@ describe('saved nested cancellation after restart', () => {
     const storage = new MockStore();
     const make = (evented: boolean) => {
       const schema = z.object({ value: z.string() });
-      const child = createWorkflow({
+      const child = (evented ? createEventedWorkflow : createWorkflow)({
         id: 'item',
         inputSchema: schema,
         outputSchema: schema,
@@ -193,7 +196,7 @@ describe('saved nested cancellation after restart', () => {
           }),
         )
         .commit();
-      const parent = createWorkflow({
+      const parent = (evented ? createEventedWorkflow : createWorkflow)({
         id: 'items',
         inputSchema: z.array(schema),
         outputSchema: z.array(schema),
