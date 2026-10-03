@@ -3834,7 +3834,8 @@ export class Session<TState = unknown> {
   async restorePendingApproval({
     threadId,
     subscription,
-    agent = this.machinery.getAgent(),
+    // A resumed run can remain owned by the prior mode's subscribed agent.
+    agent = this.stream.getAgent({ subscription }) ?? this.machinery.getAgent(),
   }: {
     threadId: string;
     subscription: AgentThreadSubscription<any, true>;
