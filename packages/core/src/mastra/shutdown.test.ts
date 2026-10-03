@@ -59,6 +59,19 @@ function makeGatedWorkflow(gate: Promise<void>, onStepStarted: () => void, id = 
 }
 
 describe('Mastra shutdown lifecycle', () => {
+  it('ignores a removed cache entry refreshed by its disposal callback', async () => {
+    const mastra = new Mastra({ logger: false, workers: false });
+    const runId = 'removed-during-cleanup';
+    globalRunRegistry.set(runId, { mastra, cleanup: () => globalRunRegistry.get(runId) } as any);
+    globalRunRegistry.delete(runId);
+    expect(Array.from(globalRunRegistry.values())).toContain(undefined);
+    try {
+      await expect(mastra.shutdown()).resolves.toBeUndefined();
+    } finally {
+      globalRunRegistry.clear();
+    }
+  });
+
   it('releases the process-global scorer hook', async () => {
     const baseline = __hookHandlerCount(AvailableHooks.ON_SCORER_RUN);
     const mastra = new Mastra({ logger: false, workers: false });
