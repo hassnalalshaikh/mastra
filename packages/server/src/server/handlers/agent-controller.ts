@@ -717,13 +717,17 @@ export const EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
     resourceId,
     threadId,
     messageId,
+    sessionThreadId,
     content,
     newThreadId,
     newSessionScope,
     requestContext,
   }) => {
     try {
-      if (getEffectiveThreadId(requestContext, threadId) !== threadId) {
+      if (
+        (sessionThreadId && sessionThreadId !== threadId) ||
+        getEffectiveThreadId(requestContext, threadId) !== threadId
+      ) {
         throw new HTTPException(403, { message: 'The source thread does not match this session' });
       }
       const controller = getAgentControllerOrThrow(mastra, controllerId);

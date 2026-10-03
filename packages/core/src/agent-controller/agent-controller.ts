@@ -1406,6 +1406,7 @@ export class AgentController<TState = {}> {
         ownerId: this.id,
         scope: newSessionScope,
         threadId: newThreadId,
+        existingThreadOnly: true,
         requestContext: context,
       });
       await session.sendSignal(
