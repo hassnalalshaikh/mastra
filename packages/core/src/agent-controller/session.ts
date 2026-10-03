@@ -650,7 +650,8 @@ export class SessionThread {
     const key = SessionStream.keyFor({ agent, resourceId, threadId });
     // The key names the agent by id; a recorded stream agent must also be this
     // exact instance (a scheduled run's agent can share an id with a mode agent).
-    if (session.stream.matches({ key }) && (session.stream.getCurrentAgent() ?? agent) === agent) {
+    const currentAgent = session.stream.getCurrentAgent();
+    if (session.stream.matches({ key }) && (currentAgent === agent || (!strict && currentAgent === null))) {
       session.ensureFollowUpBinding(agent, resourceId, threadId);
       return;
     }
