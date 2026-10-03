@@ -448,6 +448,10 @@ export function createRouteAdapterTestSuite(config: AdapterTestSuiteConfig) {
     ];
     const isExcluded = (r: ServerRoute) =>
       r.deprecated ||
+      // Atomic working-memory merge (Khayalek fork, P52) fails closed unless the
+      // memory store supports atomic updates; the generic context's store does not.
+      // Covered by packages/server/src/server/handlers/memory.test.ts.
+      (r.method === 'PATCH' && r.path === '/memory/threads/:threadId/working-memory') ||
       r.responseType === 'mcp-http' ||
       r.responseType === 'mcp-sse' ||
       authRoutesRequiringProviders.includes(r.path) ||
