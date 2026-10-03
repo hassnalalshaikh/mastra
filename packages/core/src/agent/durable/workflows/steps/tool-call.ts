@@ -5,6 +5,7 @@ import type { PubSub } from '../../../../events/pubsub';
 import { approvalResumeSchema } from '../../../../loop/shared/approval-schema';
 import { normalizeModelOutput } from '../../../../loop/shared/normalize-model-output';
 import { readToolResultFromMessageList } from '../../../../loop/shared/read-tool-result';
+import { loadAutoResumeToolInput } from '../../../../loop/shared/resumable-tool-input';
 import { dispatchBackgroundTool } from '../../../../loop/shared/steps/background-dispatch-core';
 import { applyBackgroundToolResult } from '../../../../loop/shared/steps/background-task-result-core';
 import { executeToolCall } from '../../../../loop/shared/steps/execute-tool-core';
@@ -29,6 +30,7 @@ import {
   withToolPayloadTransformProviderMetadata,
 } from '../../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../../tools/provider-tool-utils';
+import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../../tools/resumable-input';
 import { ToolStream } from '../../../../tools/stream';
 import { getToolTitle } from '../../../../tools/tool-title';
 import { resolveToolOutputValidationSchema, validateToolOutput } from '../../../../tools/validation';
@@ -336,6 +338,7 @@ export function createDurableToolCallStep() {
 
       const typedInput = inputData as DurableToolCallInput;
       const { toolCallId, toolName, args: rawArgs, providerExecuted, output, activeTools } = typedInput;
+      const toolInputState = createToolInputState(suspendData, toolCallId);
 
       // Extract resumeData from tool call arguments (autoResumeSuspendedTools path)
       // When the LLM auto-resumes a suspended tool, it injects `resumeData` into the
@@ -1043,6 +1046,23 @@ export function createDurableToolCallStep() {
       }
 
       if (isResumingFromSuspension) {
+        // A model-driven resume carries no saved input of its own. Recover the
+        // accepted input from the original native run, never from model args.
+        if (hasModelResumeData && !toolInputState.accepted) {
+          const savedInput = await loadAutoResumeToolInput({
+            mastra,
+            messages: messageList?.get.all.db() ?? [],
+            toolCallId,
+            toolName,
+            suspendedToolRunId,
+            resourceId: state?.resourceId,
+            threadId: state?.threadId,
+            agentId: initData.agentId,
+            durable: true,
+          });
+          // The saved input now belongs to this resuming invocation.
+          toolInputState.accepted = savedInput && { ...savedInput, toolCallId };
+        }
         const cleanupTarget = isResumableTool ? resolvedSuspensionIdentity : { toolCallId, toolName };
         if (cleanupTarget) {
           await removeToolMetadata(cleanupTarget, resolvedSuspensionIdentity?.type ?? 'suspension');
@@ -1141,7 +1161,9 @@ export function createDurableToolCallStep() {
         writer: new ToolStream({ prefix: 'tool', callId: toolCallId, name: toolName, runId }, outputWriter),
 
         // In-execution suspend callback — allows tools to suspend mid-execution
+        [TOOL_INPUT_STATE]: toolInputState,
         suspend: async (suspendPayload: any, suspendOptions?: SuspendOptions) => {
+          const acceptedInput = persistedToolInput(toolInputState, { toolName, toolCallId });
           wasSuspended = true;
           // When a delegated sub-agent requests approval, the delegation tool
           // wrapper passes its inner suspended run id via `suspendOptions.runId`
@@ -1215,6 +1237,7 @@ export function createDurableToolCallStep() {
               {
                 type: 'approval',
                 requireToolApproval: { toolCallId, toolName: approvalToolName, args: approvalArgs },
+                __mastraToolInput: acceptedInput,
                 // Persist the inner suspended run id in the workflow snapshot,
                 // partitioned per tool call (resumeLabel = toolCallId), so the
                 // resume leg can recover it even if message metadata is stale.
@@ -1274,6 +1297,7 @@ export function createDurableToolCallStep() {
               {
                 type: 'suspension',
                 toolCallSuspended: suspendPayload,
+                __mastraToolInput: acceptedInput,
                 toolCallId,
                 toolName,
                 resumeLabel: suspendOptions?.resumeLabel,
@@ -1346,6 +1370,10 @@ export function createDurableToolCallStep() {
           executor: {
             execute: async (taskArgs: any, taskContext: any) => {
               const taskId = info.getTaskId()!;
+              // The bg-task workflow owns its own accepted input; seed it from
+              // this invocation so a suspended background run resumes with it.
+              const backgroundInputState = taskContext?.[TOOL_INPUT_STATE] ?? toolInputState;
+              backgroundInputState.accepted ??= toolInputState.accepted;
               const execution = await executeAdoptedBackgroundOperation({
                 taskId,
                 disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
@@ -1353,6 +1381,7 @@ export function createDurableToolCallStep() {
                 execute: background =>
                   tool.execute!(taskArgs, {
                     ...toolOptions,
+                    [TOOL_INPUT_STATE]: backgroundInputState,
                     isBackgroundTask: true,
                     abortSignal: taskContext?.abortSignal ?? toolAbortSignal,
                     background,
@@ -1368,6 +1397,7 @@ export function createDurableToolCallStep() {
                     // suspension state (#23739) — never the model-authored one.
                     suspendedToolRunId: taskContext?.suspendedToolRunId,
                     suspend: async (data?: unknown, options?: SuspendOptions) => {
+                      Object.assign(toolInputState, backgroundInputState);
                       await toolOptions.suspend?.(data, options);
                       return taskContext?.suspend?.(data, options);
                     },
