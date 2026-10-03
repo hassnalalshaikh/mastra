@@ -16,6 +16,8 @@ import type { WorkflowsStorage } from '../../storage';
 import type { FullOutput, MastraModelOutput } from '../../stream/base/output';
 import type { ChunkType, MastraOnFinishCallback, MastraStreamTransformOptions } from '../../stream/types';
 import { ChunkFrom } from '../../stream/types';
+import { createToolInputState, restoreToolInput, TOOL_INPUT_STATE } from '../../tools/resumable-input';
+import { ToolPolicyError } from '../../tools/tool-policy';
 import { getPreparedToolPolicy } from '../../tools/tool-policy-execution';
 import { deepMerge } from '../../utils';
 import type { ShouldPersistSnapshotFn, WorkflowRunState, WorkflowRunStatus } from '../../workflows/types';
@@ -2674,11 +2676,17 @@ export class DurableAgent<
     options?: DurableAgentResumeOptions<TOutput>,
   ): Promise<DurableAgentStreamResult<TOutput>> {
     let entry = this.#runRegistry.get(runId);
-    if (!entry) {
+    if (!entry || this.#mastra?.getToolPolicy() || this.getToolPolicy()) {
+      // A configured policy is resolved afresh on every resume, including warm
+      // resumes. Native preparation restores current skill instructions before
+      // the saved call is allowed to continue.
       // A persisted durable run can outlive this process (or the registry TTL).
       // Rebuild the non-serializable runtime state before resuming the stored
       // workflow snapshot. Keep warm resumes on the existing path to avoid
       // racing an active registry entry with a second preparation pass.
+      // A live approval event precedes the final saved suspension. Wait for
+      // that native execution to park before rebuilding its current snapshot.
+      await (globalRunRegistry.get(runId)?.workflowExecution ?? entry?.workflowExecution);
       const workflowsStore = await this.#mastra?.getStorage()?.getStore('workflows');
       const persisted = await workflowsStore?.getWorkflowRunById({
         runId,
@@ -2754,8 +2762,14 @@ export class DurableAgent<
         }
       }
 
+      // The loop input is the initial prompt. Completed iterations persist the
+      // current transcript on the native execution step, including loaded skills.
+      const savedExecution = snapshot.context?.[DurableStepIds.AGENTIC_EXECUTION] as
+        | { payload?: { messageListState?: SerializedMessageListState } }
+        | undefined;
+      const resumeMessageListState = savedExecution?.payload?.messageListState ?? workflowInput.messageListState;
       const messageListMemoryInfo = (
-        workflowInput.messageListState as { memoryInfo?: { threadId?: string; resourceId?: string } } | undefined
+        resumeMessageListState as { memoryInfo?: { threadId?: string; resourceId?: string } } | undefined
       )?.memoryInfo;
       const threadId = workflowInput.state?.threadId ?? messageListMemoryInfo?.threadId;
       const resourceId = workflowInput.state?.resourceId ?? messageListMemoryInfo?.resourceId;
@@ -2770,24 +2784,57 @@ export class DurableAgent<
           }
         : options?.memory;
 
-      await this.#prepareForExecution(
-        [],
-        {
-          ...(options as AgentExecutionOptions<TOutput>),
-          runId,
-          requestContext: options?.requestContext ?? snapshotRequestContext,
-          memory,
-          // Restore the original run's flag from the persisted snapshot so a
-          // cross-process resume still returns scoringData; caller override wins.
-          returnScorerData: options?.returnScorerData ?? workflowInput.options?.returnScorerData,
-          // Restore the original run's modelSettings so the rebuilt registry
-          // entry re-arms the run-level timeout budget (#21724); caller
-          // override wins.
-          modelSettings: options?.modelSettings ?? (workflowInput.options?.modelSettings as any),
-        },
-        workflowInput.messageListState,
-      );
-      entry = this.#runRegistry.get(runId);
+      try {
+        await this.#prepareForExecution(
+          [],
+          {
+            ...(options as AgentExecutionOptions<TOutput>),
+            runId,
+            requestContext: options?.requestContext ?? snapshotRequestContext,
+            memory,
+            // Restore the original run's flag from the persisted snapshot so a
+            // cross-process resume still returns scoringData; caller override wins.
+            returnScorerData: options?.returnScorerData ?? workflowInput.options?.returnScorerData,
+            // Restore the original run's modelSettings so the rebuilt registry
+            // entry re-arms the run-level timeout budget (#21724); caller
+            // override wins.
+            modelSettings: options?.modelSettings ?? (workflowInput.options?.modelSettings as any),
+          },
+          resumeMessageListState,
+          (resumeData as { approved?: unknown } | undefined)?.approved === false,
+        );
+        entry = this.#runRegistry.get(runId);
+        // Reject a revoked dependency before waking the persisted call. Returning
+        // a tool error after resume would consume the suspension and its job data.
+        const paused = snapshot.context?.[DurableStepIds.AGENTIC_EXECUTION]?.suspendPayload;
+        const pausedTools = paused?.__workflow_meta?.foreachOutput ?? [{ suspendPayload: paused }];
+        for (const pausedTool of pausedTools) {
+          const payload = pausedTool?.suspendPayload;
+          if (
+            !entry?.toolPolicy ||
+            typeof payload?.toolName !== 'string' ||
+            (payload.type === 'approval' && (resumeData as { approved?: unknown } | undefined)?.approved === false)
+          )
+            continue;
+          const accepted = createToolInputState(payload);
+          const decision = await entry.toolPolicy({
+            toolName: payload.toolName,
+            requestContext: entry.requestContext,
+            phase: accepted.accepted ? 'execute' : 'load',
+            ...(accepted.accepted ? { input: restoreToolInput({ [TOOL_INPUT_STATE]: accepted }, payload.args) } : {}),
+            hasExecute: true,
+          });
+          if (decision.allowed === false) {
+            this.#runRegistry.cleanup(runId);
+            throw new ToolPolicyError(decision.error as { code: string; retryable: boolean }, {
+              message: 'Load the required skills before resuming this saved tool call.',
+            });
+          }
+        }
+      } catch (error) {
+        this.#runRegistry.cleanup(runId);
+        throw error;
+      }
     }
     if (!entry) {
       throw new Error(`Failed to rehydrate registry entry for run ${runId}. Cannot resume.`);
@@ -3311,6 +3358,7 @@ export class DurableAgent<
         workflowInput,
         abortController,
         recoveryLease,
+        cancellation,
       });
       if (cancellation) {
         await this.requireAgentExecutionFGA({
@@ -4466,12 +4514,14 @@ export class DurableAgent<
     messages: MessageListInput,
     options?: AgentExecutionOptions<TOutput>,
     resumeMessageListState?: SerializedMessageListState,
+    decliningToolCall = false,
   ) {
     const preparation = await prepareForDurableExecution<TOutput>({
       agent: this.#wrappedAgent as Agent<string, any, TOutput>,
       messages,
       options,
       resumeMessageListState,
+      decliningToolCall,
       // Forward the caller-provided runId (mirrors stream()). Without this,
       // prepareForDurableExecution mints a fresh id, so prepare() registers a
       // different run than requested and a follow-up resume(runId) — e.g. when
