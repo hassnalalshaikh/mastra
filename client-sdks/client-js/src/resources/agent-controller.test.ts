@@ -8,6 +8,16 @@ import type { AgentControllerEvent, KnownAgentControllerEvent } from './agent-co
 global.fetch = vi.fn();
 
 describe('AgentController Resource', () => {
+  it('recognizes native run-bound answer text without widening unknown events', () => {
+    const event: AgentControllerEvent = {
+      type: 'text_delta',
+      runId: 'run-1',
+      messageId: 'answer-1',
+      textDelta: 'Hello',
+    };
+    expect(isKnownAgentControllerEvent(event)).toBe(true);
+    expect(isKnownAgentControllerEvent({ type: 'unknown_future_event' })).toBe(false);
+  });
   let client: MastraClient;
   const clientOptions = { baseUrl: 'http://localhost:4111' };
 
