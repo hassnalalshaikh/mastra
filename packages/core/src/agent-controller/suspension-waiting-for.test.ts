@@ -158,7 +158,9 @@ describe('native suspension waitingFor', () => {
       });
       await reloaded.thread.ensureSubscription('wait-thread');
       await expect.poll(() => reloaded.displayState.get().pendingSuspensions.get('wait-1')?.waitingFor).toBe(expected);
-      expect(reloaded.displayState.get().pendingApproval).toBeNull();
+      // 1.74 port: pendingApproval became the per-thread pendingApprovals Map (#24776).
+      expect(reloaded.displayState.get().pendingApprovals.size).toBe(0);
+      expect(reloaded.suspensions.isRestored({ toolCallId: 'wait-1' })).toBe(true);
       await reloaded.respondToToolSuspension({ toolCallId: 'wait-1', resumeData: false });
       await expect.poll(() => f.received.length).toBe(2);
       await expect.poll(() => reloaded.displayState.get().pendingSuspensions.size).toBe(0);
