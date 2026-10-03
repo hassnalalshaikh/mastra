@@ -168,8 +168,13 @@ interface DurablePreparationAgent {
     backgroundTaskEnabled?: boolean;
     backgroundTaskPolicy?: AgentExecutionOptions<any>['backgroundTaskPolicy'];
     model?: MastraLanguageModel;
+    inputProcessors?: InputProcessorOrWorkflow[];
   }): Promise<Record<string, CoreTool>>;
-  listInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]>;
+  listConfiguredInputProcessors(requestContext?: RequestContext): Promise<InputProcessorOrWorkflow[]>;
+  listInputProcessors(
+    requestContext?: RequestContext,
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
+  ): Promise<InputProcessorOrWorkflow[]>;
   listOutputProcessors(requestContext?: RequestContext): Promise<OutputProcessorOrWorkflow[]>;
   __resolveRunErrorProcessors(
     requestContext: RequestContext,
@@ -184,6 +189,7 @@ interface DurablePreparationAgent {
   __listLLMRequestProcessors(
     requestContext?: RequestContext,
     errorProcessorOverrides?: ErrorProcessorOrWorkflow[],
+    configuredProcessorOverrides?: InputProcessorOrWorkflow[],
   ): Promise<LLMRequestProcessorOrWorkflow[]>;
 }
 
@@ -473,6 +479,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
 
   // Resolve input processors now that the memory context is in place.
   const processorStates = new Map<string, ProcessorState>();
+  let configuredInputProcessors: InputProcessorOrWorkflow[] = [];
   let inputProcessors: InputProcessorOrWorkflow[] = [];
   let llmRequestInputProcessors: LLMRequestProcessorOrWorkflow[] = [];
   let outputProcessors: OutputProcessorOrWorkflow[] = [];
@@ -480,7 +487,12 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
   let hasConfiguredErrorProcessors = false;
 
   try {
-    inputProcessors = await typedAgent.listInputProcessors(requestContext);
+    // Resolve configuration once for this preparation, including an explicit
+    // empty override. Later preparations resolve again, even with the same
+    // RequestContext, so dynamic permissions are never cached across runs.
+    configuredInputProcessors =
+      execOptions?.inputProcessors ?? (await typedAgent.listConfiguredInputProcessors(requestContext));
+    inputProcessors = await typedAgent.listInputProcessors(requestContext, configuredInputProcessors);
     // Call-time outputProcessors replace constructor-level ones (parity with
     // Agent.listResolvedOutputProcessors which uses overrides-first semantics).
     outputProcessors = execOptions?.outputProcessors
@@ -498,7 +510,11 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     ));
     // Uncombined processors for processLLMRequest — combined (workflow-wrapped)
     // processors are skipped by ProcessorRunner.runProcessLLMRequest.
-    llmRequestInputProcessors = await typedAgent.__listLLMRequestProcessors(requestContext, errorProcessors);
+    llmRequestInputProcessors = await typedAgent.__listLLMRequestProcessors(
+      requestContext,
+      errorProcessors,
+      configuredInputProcessors,
+    );
   } catch (error) {
     logger?.warn?.(`[DurableAgent] Error resolving processors: ${error}`);
     // Required checks must be available before the run can call the model.
@@ -634,6 +650,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       backgroundTaskEnabled: Boolean(backgroundTaskManager),
       backgroundTaskPolicy: execOptions?.backgroundTaskPolicy,
       model,
+      inputProcessors: configuredInputProcessors,
     });
   } catch (error) {
     logger?.warn?.(`[DurableAgent] Error converting tools: ${error}`);
