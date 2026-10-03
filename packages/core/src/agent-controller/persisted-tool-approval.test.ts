@@ -94,7 +94,9 @@ function backend() {
     });
     agentThreadStreamRuntime.resetForTests();
     const restarted = await boot();
-    expect(restarted.approval.isArmed()).toBe(false);
+    // 1.74 rebase (fork P15): a fresh Session restores the saved prompt on a
+    // restored gate. No live gate is armed: every armed gate is restored work.
+    expect(restarted.approval.isArmed()).toBe(restarted.approval.isRestored());
     return restarted;
   };
 
