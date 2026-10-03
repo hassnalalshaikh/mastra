@@ -30,6 +30,7 @@ import type { SerializedMessageListState } from '../message-list/state';
 import { SaveQueueManager } from '../save-queue';
 import { AgentThreadLeaseConflictError, agentThreadStreamRuntime } from '../thread-stream-runtime';
 import type { AgentThreadRunRegistration } from '../thread-stream-runtime';
+import { bindToolApprovalContext } from '../tool-approval-context';
 import { TripWire } from '../trip-wire';
 import type { AgentAbortThreadOptions, AgentModelManagerConfig, ToolsInput } from '../types';
 
@@ -206,6 +207,7 @@ export interface DurableAgentStreamOptions<OUTPUT = undefined> {
   requireToolApproval?: AgentExecutionOptions<OUTPUT>['requireToolApproval'];
   /** Persist an explicit approval requirement for every tool in this run. */
   toolApprovalPolicy?: AgentExecutionOptions<OUTPUT>['toolApprovalPolicy'];
+  toolApprovalContext?: AgentExecutionOptions<OUTPUT>['toolApprovalContext'];
   /** Automatically resume suspended tools */
   autoResumeSuspendedTools?: boolean;
   /** Maximum number of tool calls to execute concurrently, or an object with `limit`/`strategy` */
@@ -570,6 +572,8 @@ export interface DurableAgentRecoverActiveRunsOptions extends DurableAgentListAc
 }
 
 export interface DurableAgentRecoverActiveRunsResult {
+  /** Saved scheduled gates whose native Session consumer was restored. */
+  restoredApprovals?: string[];
   recovered: DurableAgentRecoveredRun[];
   /** Number of runs that restarted successfully. */
   succeeded: number;
@@ -961,6 +965,22 @@ export class DurableAgent<
     }
 
     return { snapshot, workflowInput };
+  }
+
+  async #bindScheduledController(input: DurableAgenticWorkflowInput): Promise<void> {
+    const target = input.options?.toolApprovalContext;
+    if (!target) return;
+    const memory = input.messageListState.memoryInfo;
+    if (
+      target.agentId !== input.agentId ||
+      target.threadId !== memory?.threadId ||
+      target.resourceId !== memory?.resourceId
+    ) {
+      throw new Error('Saved scheduled controller target does not match its run');
+    }
+    // DurableAgent changes stream's return type, while Session uses the shared
+    // thread subscription and approval API on this exact instance.
+    await bindToolApprovalContext(this.#mastra, this as unknown as Agent, target);
   }
 
   /**
@@ -3373,6 +3393,8 @@ export class DurableAgent<
         loaded.snapshot.context?.[MAP_FINAL_OUTPUT_STEP_ID]?.status === 'success';
       assertAdmission();
       recoveryLease.assertOwned();
+      if (!cancellation) await this.#bindScheduledController(workflowInput);
+      recoveryLease.assertOwned();
       recoveryState = await this.#rehydrateRecoveryState({
         runId,
         workflowInput,
@@ -4105,8 +4127,34 @@ export class DurableAgent<
     const recovered: DurableAgentRecoveredRun[] = [];
     let succeeded = 0;
     let failed = 0;
+    const restoredApprovals: string[] = [];
+    const scheduledSuspensions = new Set<string>();
+    // Suspended approval gates are intentionally absent from listActiveRuns.
+    // Reattach their native consumer without restarting a manual gate.
+    const suspended = await this.listSuspendedRuns(discoveryOptions);
+    for (const pending of suspended.runs) {
+      if (runId && pending.runId !== runId) continue;
+      if (!pending.toolCalls.some(call => call.requiresApproval && call.toolApprovalContext)) continue;
+      scheduledSuspensions.add(pending.runId);
+      if (this.#mastra?.isShuttingDown) break;
+      try {
+        const store = await this.#mastra?.getStorage()?.getStore('workflows');
+        if (!store) throw new Error('Scheduled approval recovery requires storage');
+        const { workflowInput: input } = await this.#loadRecoverableSnapshot(store, pending.runId);
+        await this.#bindScheduledController(input);
+        restoredApprovals.push(pending.runId);
+      } catch (error) {
+        recovered.push({
+          runId: pending.runId,
+          status: 'failed',
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+        failed++;
+      }
+    }
 
     for (const targetRunId of targetRunIds) {
+      if (scheduledSuspensions.has(targetRunId)) continue;
       if (this.#mastra?.isShuttingDown) break;
       let runError: Error | undefined;
       try {
@@ -4146,7 +4194,7 @@ export class DurableAgent<
       }
     }
 
-    return { recovered, succeeded, failed };
+    return { recovered, succeeded, failed, ...(restoredApprovals.length ? { restoredApprovals } : {}) };
   }
 
   /**

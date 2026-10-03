@@ -272,7 +272,8 @@ export class AgenticLoopBuilder<Tools extends ToolSet = ToolSet, OUTPUT = undefi
       // called tool set is not known yet, and map-tool-calls narrows it before the
       // foreach actually consumes this value.
       concurrency: resolveToolCallConcurrency({
-        requireToolApproval: rest.toolApprovalPolicy === 'manual' || rest.requireToolApproval,
+        requireToolApproval:
+          rest.toolApprovalPolicy === 'manual' || rest.toolApprovalPolicy === 'auto' || rest.requireToolApproval,
         tools: rest.tools,
         activeTools: rest.activeTools as string[] | undefined,
         configuredConcurrency: configuredToolCallConcurrency,
@@ -296,12 +297,13 @@ export class AgenticLoopBuilder<Tools extends ToolSet = ToolSet, OUTPUT = undefi
     // exclusion a stated condition rather than a consequence of the option not being
     // threaded through. The same goes for any other caller reaching the loop directly.
     const toolCallStep = this.toolCallStep();
-    // A manual approval policy gates every tool, so no call may run eagerly.
+    // A manual or auto (scheduled) approval policy gates every tool, so no call may run eagerly.
     const eagerCoordinator =
       rest.eagerToolExecution === true &&
       rest.methodType === 'stream' &&
       toolCallConcurrencyStrategy === 'available' &&
-      rest.toolApprovalPolicy !== 'manual'
+      rest.toolApprovalPolicy !== 'manual' &&
+      rest.toolApprovalPolicy !== 'auto'
         ? // Read the limit late: map-tool-calls recomputes it per step, and the eager
           // path must honour the same recomputed value rather than a construction-time copy.
           new EagerToolExecutionCoordinator(() => toolCallForeachOptions.concurrency)
@@ -402,6 +404,7 @@ export class AgenticLoopBuilder<Tools extends ToolSet = ToolSet, OUTPUT = undefi
           return resolveToolCallConcurrency({
             requireToolApproval:
               rest.toolApprovalPolicy === 'manual' ||
+              rest.toolApprovalPolicy === 'auto' ||
               (rest.requireToolApproval ?? rest.requestContext?.get('__mastra_requireToolApproval')),
             tools: (readScoped(scopeCtx, STEP_TOOLS_KEY, 'stepTools') as Tools | undefined) ?? rest.tools,
             activeTools:

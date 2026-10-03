@@ -482,6 +482,8 @@ export class AgentController<TState = {}> {
     workspace,
     browser,
     requestContext,
+    existingThreadOnly = false,
+    subscriptionAgent,
   }: {
     resourceId?: string;
     id?: string;
@@ -511,11 +513,46 @@ export class AgentController<TState = {}> {
     workspace?: Workspace;
     browser?: MastraBrowser;
     requestContext?: RequestContext;
+    /** Reject missing or rebound threads. Intended for existing scheduled-run targets. */
+    existingThreadOnly?: boolean;
+    /** @internal Actual agent owning a scheduled run; does not change the chat mode. */
+    subscriptionAgent?: Agent;
   } = {}): Promise<Session<TState>> {
     const effectiveResourceId = resourceId ?? this.config.resourceId ?? this.config.id;
     const effectiveSessionId = id ?? this.config.id;
     const effectiveOwnerId = ownerId ?? this.config.id;
     const registryKey = sessionRegistryKey(effectiveResourceId, scope);
+    if (existingThreadOnly && !threadId) throw new Error('An existing thread is required');
+    if (subscriptionAgent && ![...this.backingAgents()].includes(subscriptionAgent)) {
+      throw new Error('Scheduled agent does not belong to this controller');
+    }
+    const validateTarget = async (session: Session<TState>) => {
+      if (!existingThreadOnly) return;
+      const operationId = session.run.getOperationId();
+      const thread = await session.thread.getById({ threadId: threadId! });
+      if (
+        !thread ||
+        thread.resourceId !== effectiveResourceId ||
+        session.thread.getId() !== threadId ||
+        session.identity.getResourceId() !== effectiveResourceId ||
+        session.run.getOperationId() !== operationId ||
+        this.#sessionsBeingDeleted.has(session) ||
+        this.#deletionsInProgress.has(registryKey)
+      ) {
+        throw new Error('Scheduled Session target changed or no longer exists');
+      }
+      if (subscriptionAgent) {
+        await session.thread.ensureSubscription(threadId!, subscriptionAgent, requestContext, true);
+        if (
+          session.thread.getId() !== threadId ||
+          session.identity.getResourceId() !== effectiveResourceId ||
+          this.#sessionsBeingDeleted.has(session) ||
+          this.#deletionsInProgress.has(registryKey)
+        ) {
+          throw new Error('Scheduled Session target changed during binding');
+        }
+      }
+    };
 
     // Get-or-create loop: a (resourceId, scope) pair maps to exactly one
     // durable session per AgentController. Asking for the same resource+scope
@@ -560,6 +597,7 @@ export class AgentController<TState = {}> {
         // would leave the session bound to a different thread and the requested
         // thread never created.
         if (threadId && session.thread.getId() !== threadId) {
+          if (existingThreadOnly) throw new Error('Scheduled Session is bound to another thread');
           const existingThread = await session.thread.getById({ threadId });
           if (existingThread) {
             if (existingThread.resourceId !== effectiveResourceId) {
@@ -586,6 +624,7 @@ export class AgentController<TState = {}> {
           this.#sessionsByResource.delete(registryKey);
           continue;
         }
+        await validateTarget(session);
         return session;
       }
 
@@ -596,6 +635,8 @@ export class AgentController<TState = {}> {
         workspace,
         browser,
         requestContext,
+        existingThreadOnly,
+        subscriptionAgent,
       });
       this.#sessionsByResource.set(registryKey, creation);
       try {
@@ -607,6 +648,7 @@ export class AgentController<TState = {}> {
           continue;
         }
         if (scope !== undefined) this.#sessionScopes.set(session, scope);
+        await validateTarget(session);
         return session;
       } catch (error) {
         // Don't cache a failed creation — let the next call retry.
@@ -630,6 +672,8 @@ export class AgentController<TState = {}> {
       workspace?: Workspace;
       browser?: MastraBrowser;
       requestContext?: RequestContext;
+      existingThreadOnly?: boolean;
+      subscriptionAgent?: Agent;
     },
   ): Promise<Session<TState>> {
     // Seed the session's tags into its state so thread tagging + the workspace
@@ -723,8 +767,14 @@ export class AgentController<TState = {}> {
         await this.config.threadLock?.acquire(existingThread.id);
         session.thread.set({ threadId: existingThread.id });
         await session.thread.loadMetadata();
-        await session.thread.ensureCurrentSubscription(requestContext);
+        await session.thread.ensureSubscription(
+          existingThread.id,
+          overrides.subscriptionAgent,
+          requestContext,
+          overrides.existingThreadOnly,
+        );
       } else {
+        if (overrides.existingThreadOnly) throw new Error(`Thread not found: ${overrides.threadId}`);
         await session.thread.create({ id: overrides.threadId, requestContext });
       }
     } else {

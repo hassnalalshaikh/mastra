@@ -821,7 +821,8 @@ interface ToolExecutionAbortPayload {
 }
 
 interface ToolCallApprovalPayload {
-  toolApprovalPolicy?: 'manual';
+  toolApprovalPolicy?: 'manual' | 'auto';
+  toolApprovalContext?: import('../agent/tool-approval-context').ToolApprovalContext;
   toolCallId: string;
   toolName: string;
   args: Record<string, any>;

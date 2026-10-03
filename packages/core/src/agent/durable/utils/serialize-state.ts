@@ -275,7 +275,8 @@ export function serializeDurableOptions(options: {
   agentMaxRetries?: number;
   agentMaxRetriesConfigured?: boolean;
   requireToolApproval?: boolean;
-  toolApprovalPolicy?: 'manual';
+  toolApprovalPolicy?: 'manual' | 'auto';
+  toolApprovalContext?: import('../../tool-approval-context').ToolApprovalContext;
   toolCallConcurrency?: ToolCallConcurrency;
   autoResumeSuspendedTools?: boolean;
   maxProcessorRetries?: number;
@@ -320,6 +321,7 @@ export function serializeDurableOptions(options: {
     agentMaxRetriesConfigured: options.agentMaxRetriesConfigured,
     requireToolApproval: options.requireToolApproval,
     toolApprovalPolicy: options.toolApprovalPolicy,
+    toolApprovalContext: options.toolApprovalContext,
     toolCallConcurrency: options.toolCallConcurrency,
     autoResumeSuspendedTools: options.autoResumeSuspendedTools,
     maxProcessorRetries: options.maxProcessorRetries,

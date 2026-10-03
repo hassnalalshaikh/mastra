@@ -8,6 +8,7 @@ import type {
   MastraToolInvocationPart,
 } from '../agent/message-list/state/types';
 import { AgentThreadLeaseLostError, agentThreadStreamRuntime } from '../agent/thread-stream-runtime';
+import type { ToolApprovalContext } from '../agent/tool-approval-context';
 import { TripWire } from '../agent/trip-wire';
 import type { AgentThreadSubscription } from '../agent/types';
 import { getErrorFromUnknown, MastraError } from '../error';
@@ -878,9 +879,13 @@ export class SessionRunEngine {
           ? approvalTransform.transformed
           : getDisplayTransform(chunk.metadata, 'input-available', getPayload(chunk).args);
 
-        // A run persisted with a manual approval policy asks for every tool.
-        const runPolicy = getPayload(chunk).toolApprovalPolicy === 'manual' ? 'manual' : undefined;
-        const policy = this.#session.resolveToolApproval(toolName, state.threadId, runPolicy);
+        // A run persisted with a manual or auto approval policy (scheduled
+        // runs) decides every tool from that saved policy plus its deny lists.
+        const requestedPolicy = getPayload(chunk).toolApprovalPolicy;
+        const runPolicy: 'manual' | 'auto' | undefined =
+          requestedPolicy === 'manual' || requestedPolicy === 'auto' ? requestedPolicy : undefined;
+        const toolApprovalContext = getPayload(chunk).toolApprovalContext as ToolApprovalContext | undefined;
+        const policy = this.#session.resolveToolApproval(toolName, state.threadId, runPolicy, toolApprovalContext);
 
         // Resolve the call against the run that raised it, not the session's
         // currently-bound thread/run/resource. The session can switch thread or
@@ -899,6 +904,9 @@ export class SessionRunEngine {
           // be read now — while this run is the session's current run.
           agent,
           abortSignal: this.#session.run.getAbortSignal(),
+          toolName,
+          toolApprovalPolicy: runPolicy,
+          toolApprovalContext,
         };
 
         // A retained approval prompt can be replayed after this run has already
