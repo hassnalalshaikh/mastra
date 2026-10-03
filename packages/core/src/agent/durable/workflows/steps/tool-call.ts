@@ -361,6 +361,7 @@ export function createDurableToolCallStep() {
 
       const { runId, options: agentOptions, state } = initData;
       const logger = (mastra as any)?.getLogger?.();
+      const isAborted = () => (globalRunRegistry.get(runId)?.abortSignal ?? params.abortSignal)?.aborted === true;
 
       // End the open MODEL_STEP + MODEL_GENERATION + AGENT_RUN as `suspended` before
       // pausing — stores persist only span-end events, so an un-ended root is dropped if
@@ -806,6 +807,13 @@ export function createDurableToolCallStep() {
         (suspendData as { type?: unknown }).type === 'approval';
       const approvalGated = suspendedForApproval || (requiresApproval && suspendData === undefined);
 
+      // A completed response can still be running async processors when Stop arrives.
+      // Do not enter a new approval wait or execute its tools after cancellation.
+      // Existing resumes still need their normal approval/suspension metadata cleanup.
+      if (isAborted() && resumeData === undefined) {
+        return { ...typedInput, aborted: true };
+      }
+
       if (approvalGated && !approvalDecision) {
         const resumeSchema = JSON.stringify({
           type: 'object',
@@ -818,6 +826,8 @@ export function createDurableToolCallStep() {
 
         // Persist active goal time before exposing the approval wait.
         await stopGoalActivity({ agentId: initData.agentId, runId });
+
+        if (isAborted()) return { ...typedInput, aborted: true };
 
         // Emit approval chunk via PubSub (mirrors base agent's controller.enqueue).
         // Apply the tool payload transform first so display targets never see raw
@@ -855,6 +865,11 @@ export function createDurableToolCallStep() {
 
         // Flush messages before suspension
         await doFlush();
+
+        if (isAborted()) {
+          await removeToolMetadata({ toolCallId, toolName }, 'approval');
+          return { ...typedInput, aborted: true };
+        }
 
         // End the trace's open spans as suspended before pausing.
         endSpansAsSuspended({ toolCallId, toolName, reason: 'approval' });
@@ -1013,6 +1028,10 @@ export function createDurableToolCallStep() {
         }
       }
 
+      // Stop can arrive while an approved or resumed call is being prepared.
+      // Finish the call as canceled instead of starting background or tool work.
+      if (isAborted()) return { ...typedInput, aborted: true };
+
       // Fire onInputAvailable lifecycle hook before execution (matches non-durable path).
       if (tool && 'onInputAvailable' in tool && typeof (tool as any).onInputAvailable === 'function') {
         try {
@@ -1027,6 +1046,8 @@ export function createDurableToolCallStep() {
       }
 
       // Execute the tool
+      if (isAborted()) return { ...typedInput, aborted: true };
+
       if (!tool.execute) {
         return {
           ...typedInput,
