@@ -365,6 +365,13 @@ describe('stored completion records', () => {
     expect(windowed.slice(0, -1).map(row => row.id)).toEqual(later.slice(-9).map(row => row.id));
   });
 
+  it('projects the full history for a window wider than the completion index', async () => {
+    const { session, memory } = await storedSession();
+    await memory.saveMessages({ messages: history() });
+    const rows = await session.thread.listMessages({ threadId: 'thread', limit: 2000 });
+    expect(rows.map(row => row.id)).toEqual(['old', 'later', 'old:tool-result:call-1']);
+  });
+
   it('returns no rows for an empty display window', async () => {
     const { controller, memory } = await storedSession();
     await memory.saveMessages({ messages: history() });
