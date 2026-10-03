@@ -3903,6 +3903,7 @@ export class Session<TState = unknown> {
             approved: decision.decision === 'approve',
             declineContext: decision.declineContext,
             requireToolApproval: (this.state.get() as Record<string, unknown>).yolo !== true,
+            toolApprovalPolicy: call.toolApprovalPolicy,
             memory: { thread: threadId, resource: resourceId },
             requestContext,
             toolsets,
@@ -4217,12 +4218,17 @@ export class Session<TState = unknown> {
    * session-wide bucket, so a grant made from one thread's approval prompt is
    * not inherited by every other thread in the session.
    */
-  resolveToolApproval(toolName: string, threadId?: string): PermissionPolicy {
+  resolveToolApproval(toolName: string, threadId?: string, toolApprovalPolicy?: 'manual'): PermissionPolicy {
     const state = this.state.get() as Record<string, unknown>;
     const rules = this.permissions.getRules();
 
     const toolPolicy = rules.tools[toolName];
     if (toolPolicy === 'deny') return 'deny';
+
+    const category = this.#resolveCategory?.(toolName);
+    if (toolApprovalPolicy === 'manual') {
+      return category && rules.categories[category] === 'deny' ? 'deny' : 'ask';
+    }
 
     if (state.yolo === true) return 'allow';
 
@@ -4230,7 +4236,6 @@ export class Session<TState = unknown> {
 
     if (this.hasToolGrant(toolName, threadId)) return 'allow';
 
-    const category = this.#resolveCategory?.(toolName);
     if (category) {
       if (this.hasCategoryGrant(category, threadId)) return 'allow';
       const categoryPolicy = rules.categories[category];

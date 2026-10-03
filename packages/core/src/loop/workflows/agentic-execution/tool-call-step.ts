@@ -107,6 +107,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
   agentVersionId,
   mastra,
   requireToolApproval: requireToolApprovalFromFactory,
+  toolApprovalPolicy,
   actor,
   mcp,
 }: OuterLLMRun<Tools, OUTPUT>) {
@@ -545,7 +546,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         // Approval decisions must come from the workflow resume boundary; model-authored
         // resumeData is untrusted and cannot grant or decline consent.
         const approvalGated =
-          !isDelegatedApproval && (suspendedForApproval || (toolRequiresApproval && suspendData === undefined));
+          !isDelegatedApproval &&
+          (suspendedForApproval ||
+            ((toolRequiresApproval || toolApprovalPolicy === 'manual') && suspendData === undefined));
 
         // The real suspension sequence, extracted so it has exactly one implementation with
         // two entry points: the tool's own `suspend()` closure below, and the hand-back of an
@@ -584,6 +587,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 args: approvalArgs,
                 resumeSchema: approvalResumeSchema,
                 updatedAt: Date.now(),
+                toolApprovalPolicy,
               },
             });
             // Persist the pending request before exposing it to a client.
@@ -625,6 +629,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   args: approvalArgs,
                 },
                 __mastraToolInput: acceptedInput,
+                toolApprovalPolicy,
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
                 ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
@@ -679,6 +684,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
               {
                 toolCallSuspended: suspendPayload,
                 __mastraToolInput: acceptedInput,
+                toolApprovalPolicy,
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
                 ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
@@ -723,6 +729,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 args: inputData.args,
                 resumeSchema: approvalResumeSchema,
                 updatedAt: Date.now(),
+                toolApprovalPolicy,
               },
             });
             // Persist the pending request before exposing it to a client.
@@ -752,6 +759,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             });
             return suspend(
               {
+                toolApprovalPolicy,
                 requireToolApproval: {
                   toolCallId: inputData.toolCallId,
                   toolName: inputData.toolName,
