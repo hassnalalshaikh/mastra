@@ -49,6 +49,8 @@ export type EagerSuspensionIntent = {
   options: {
     resumeLabel?: string | string[];
     resumeSchema?: unknown;
+    /** Who supplies resume data for this suspension. Defaults to 'user'. */
+    waitingFor?: 'user' | 'external';
     runId?: string;
     requireToolApproval?: boolean | { toolName?: string; args?: unknown };
   };

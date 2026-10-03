@@ -788,9 +788,10 @@ export function cleanStepResult(stepResult: unknown): unknown {
  */
 export function omitPriorSuspensionFields<T extends Record<string, unknown>>(
   stepInfo: T,
-): Omit<T, 'suspendedAt' | 'suspendPayload' | 'suspendOutput'> {
+): Omit<T, 'suspendedAt' | 'suspendPayload' | 'suspendOutput' | 'waitingFor'> {
   const {
     suspendedAt: _suspendedAt,
+    waitingFor: _waitingFor,
     suspendPayload: _suspendPayload,
     suspendOutput: _suspendOutput,
     ...rest
@@ -802,12 +803,21 @@ export function omitPriorCompletionFields<T extends Record<string, unknown>>(
   stepInfo: T,
 ): Omit<
   T,
-  'output' | 'error' | 'endedAt' | 'suspendedAt' | 'suspendPayload' | 'suspendOutput' | 'tripwire' | 'nonRetryable'
+  | 'output'
+  | 'error'
+  | 'endedAt'
+  | 'suspendedAt'
+  | 'suspendPayload'
+  | 'suspendOutput'
+  | 'waitingFor'
+  | 'tripwire'
+  | 'nonRetryable'
 > {
   const {
     output: _output,
     error: _error,
     endedAt: _endedAt,
+    waitingFor: _waitingFor,
     suspendedAt: _suspendedAt,
     suspendPayload: _suspendPayload,
     suspendOutput: _suspendOutput,

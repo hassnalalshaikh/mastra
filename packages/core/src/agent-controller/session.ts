@@ -3131,6 +3131,7 @@ export class SessionDisplayState {
           args: event.args,
           suspendPayload: event.suspendPayload,
           resumeSchema: event.resumeSchema,
+          waitingFor: event.waitingFor ?? 'user',
         });
         break;
 

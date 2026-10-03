@@ -708,6 +708,7 @@ export interface AgentControllerDisplayState {
       args: unknown;
       suspendPayload: unknown;
       resumeSchema?: string;
+      waitingFor?: 'user' | 'external';
     }
   >;
 
@@ -856,6 +857,7 @@ export type AgentControllerEvent =
           args: unknown;
           suspendPayload: unknown;
           resumeSchema?: string;
+          waitingFor?: 'user' | 'external';
         }
       | { type: 'tool_suspension_cancelled'; toolCallId: string; toolName: string; reason: string }
       | { type: 'tool_update'; toolCallId: string; partialResult: unknown }
