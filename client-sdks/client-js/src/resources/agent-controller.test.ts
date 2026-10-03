@@ -107,6 +107,21 @@ describe('AgentController Resource', () => {
     expect(JSON.parse(init.body as string)).toEqual({ message: 'hello' });
   });
 
+  it.each(['followUp', 'steer'] as const)(
+    '%s forwards attached-only messages and text through the normal command route',
+    async method => {
+      const session = client.getAgentController('code').session('user-1');
+      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+      mockJson({ ok: true });
+      await session[method]({ content: '', files });
+      expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: '', files });
+      expect(lastCall()[0]).toContain(method === 'steer' ? '/steer' : '/follow-up');
+      mockJson({ ok: true });
+      await session[method]('Still supports text');
+      expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: 'Still supports text' });
+    },
+  );
+
   it('sends a message with file attachments', async () => {
     mockJson({ ok: true });
     const files = [{ data: 'aGVsbG8=', mediaType: 'image/png', filename: 'shot.png' }];
