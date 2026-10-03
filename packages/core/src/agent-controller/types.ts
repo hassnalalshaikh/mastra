@@ -810,6 +810,8 @@ export type AgentControllerEvent =
   | { type: 'agent_start' }
   | { type: 'agent_end'; reason?: 'complete' | 'aborted' | 'error' | 'suspended' }
   | { type: 'message_start'; message: MastraDBMessage }
+  /** Forward-only assistant text, excluding reasoning and tool payloads. */
+  | { type: 'text_delta'; runId: string; messageId: string; textDelta: string }
   | {
       type: 'message_update';
       id: string;

@@ -57,6 +57,76 @@ function assistantStarts(events: AgentControllerEvent[]) {
   );
 }
 
+// 1.74 port: createStreamState takes (threadId, runId); these cases bind only the run.
+describe('SessionRunEngine answer text events', () => {
+  const requestContext = () => new RequestContext();
+
+  it('emits immutable run-bound text deltas before completion, excluding reasoning and tools', async () => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState(undefined, 'run-1');
+    const ctx = requestContext();
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'step-start', runId: 'run-1', payload: { messageId: 'answer-1' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'reasoning-start', runId: 'run-1', payload: { id: 'r1' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'reasoning-delta', runId: 'run-1', payload: { id: 'r1', text: 'private thought' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'tool-call',
+        runId: 'run-1',
+        payload: { toolCallId: 'tc1', toolName: 'read', args: { text: 'tool input' } },
+      }),
+      ctx,
+    );
+    await engine.processStreamChunk(state, chunk({ type: 'text-start', runId: 'run-1', payload: { id: 't1' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-delta', runId: 'run-1', payload: { id: 't1', text: 'Hello' } }),
+      ctx,
+    );
+    const first = events.find(event => event.type === 'text_delta');
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-delta', runId: 'run-1', payload: { id: 't1', text: ' world' } }),
+      ctx,
+    );
+    expect(first).toEqual({ type: 'text_delta', runId: 'run-1', messageId: 'answer-1', textDelta: 'Hello' });
+    expect(events.filter(event => event.type === 'text_delta')).toEqual([
+      first,
+      { type: 'text_delta', runId: 'run-1', messageId: 'answer-1', textDelta: ' world' },
+    ]);
+    expect(events.some(event => event.type === 'agent_end')).toBe(false);
+  });
+
+  it.each([null, 'run-1'])('does not emit text with unknown or mismatched stream identity %s', async runId => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState(undefined, runId);
+    const ctx = requestContext();
+    await engine.processStreamChunk(state, chunk({ type: 'text-start', payload: { id: 't1' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'text-delta',
+        ...(runId ? { runId: 'other-run' } : {}),
+        payload: { id: 't1', text: 'Do not forward' },
+      }),
+      ctx,
+    );
+    expect(events.filter(event => event.type === 'text_delta')).toEqual([]);
+  });
+});
+
 describe('SessionRunEngine compact message lifecycle', () => {
   it('keeps delayed tool events and rotated messages on their originating thread', async () => {
     const { engine, events, session } = createHarness();
