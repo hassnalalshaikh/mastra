@@ -1,4 +1,4 @@
-import type { Agent } from '../agent';
+import type { Agent, AgentRunToolCall } from '../agent';
 import { globalRunRegistry } from '../agent/durable/run-registry';
 import type { MastraDBMessage, MastraProviderMetadata } from '../agent/message-list/state/types';
 import { createSignal, resolveDeliveryAttributes } from '../agent/signals';
@@ -4016,10 +4016,38 @@ export class Session<TState = unknown> {
         waitingFor: call.waitingFor ?? 'user',
       });
     }
-    const approvals = pending.filter(({ call }) => call.requiresApproval);
-    if (approvals.length > 1) throw new Error('Multiple saved approvals match this Session thread');
-    const approval = approvals[0];
-    if (!approval) return;
+    // 1.72 keys parked approvals per tool call (#24776): each saved run's
+    // approval is restored as its own gate and answered by its own toolCallId.
+    // Refusing several used to fail the whole attach, so a thread with two
+    // parked runs could not be opened after a restart. A single run that saved
+    // more than one approval is still never resolved by picking one of them:
+    // it is left saved (Stop discovers and cancels it) and the others restore.
+    const approvalsByRun = new Map<string, Array<(typeof pending)[number]>>();
+    for (const entry of pending) {
+      if (!entry.call.requiresApproval) continue;
+      approvalsByRun.set(entry.runId, [...(approvalsByRun.get(entry.runId) ?? []), entry]);
+    }
+    for (const runApprovals of approvalsByRun.values()) {
+      if (runApprovals.length !== 1) continue;
+      this.#restoreSavedApproval({ approval: runApprovals[0]!, threadId, subscription, agent, operationId, resourceId });
+    }
+  }
+
+  #restoreSavedApproval({
+    approval,
+    threadId,
+    subscription,
+    agent,
+    operationId,
+    resourceId,
+  }: {
+    approval: { runId: string; call: AgentRunToolCall };
+    threadId: string;
+    subscription: AgentThreadSubscription<any, true>;
+    agent: Agent;
+    operationId: number;
+    resourceId: string;
+  }): void {
     const { runId, call } = approval;
     const { toolName, toolCallId } = call;
     if (!toolName || !toolCallId) throw new Error('Saved approval is missing its tool identity');
