@@ -23,7 +23,9 @@ function signalResult(
 
 function makeStorage(deleteSchedule = vi.fn().mockResolvedValue(undefined)) {
   return {
-    getStore: vi.fn(async (name: string) => (name === 'schedules' ? { deleteSchedule } : null)),
+    getStore: vi.fn(async (name: string) =>
+      name === 'schedules' ? { deleteSchedule, getSchedule: vi.fn(async () => null) } : null,
+    ),
     deleteSchedule,
   };
 }
