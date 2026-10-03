@@ -1011,7 +1011,6 @@ export class SessionRunEngine {
           });
 
           const approval = await approvalPromise;
-          if (!isCurrent()) return;
 
           // A gated `session.abort()` releases a parked gate as a decline and
           // defers the stream/signal teardown to us, so the decline can still be
@@ -1048,7 +1047,6 @@ export class SessionRunEngine {
             continue;
           }
 
-          if (!isCurrent()) return;
           if (deferredAbort) {
             // The denial chunk the agent emits for this decline can never reach
             // us: we are blocking the consumer loop that would read it, and the
