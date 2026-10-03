@@ -20,8 +20,6 @@ import { ChunkFrom } from '../../stream';
 import type { ChunkType } from '../../stream';
 import { escapeUnescapedControlCharsInJsonStrings } from '../../stream/base/output-format-handlers';
 import { MastraAgentNetworkStream } from '../../stream/MastraAgentNetworkStream';
-import { executionStartHook, notifyToolExecutionStart, TOOL_EXECUTION_START } from '../../tools/tool-execution-events';
-import { isPolicyExecutor } from '../../tools/tool-policy-execution';
 import { getNeedsApprovalFn } from '../../tools/toolchecks';
 import type { IdGeneratorContext } from '../../types';
 import { createWorkflow } from '../../workflows/create';
@@ -1556,14 +1554,7 @@ export async function createNetworkLoop({
         throw mastraError;
       }
 
-      const originalExecuteTool = tool.execute;
-      const executeTool = isPolicyExecutor(originalExecuteTool)
-        ? originalExecuteTool
-        : async (input: any, context: any, options: any) => {
-            await notifyToolExecutionStart(context, input);
-            const { [TOOL_EXECUTION_START]: _start, ...publicContext } = context;
-            return originalExecuteTool(input, publicContext, options);
-          };
+      const executeTool = tool.execute;
       const toolId = 'id' in tool && typeof tool.id === 'string' ? tool.id : inputData.primitiveId;
       // Use safeParseLLMJson to handle malformed JSON from LLM (truncated, unescaped chars, etc.)
       const inputDataToUse = await safeParseLLMJson(inputData.prompt);
@@ -1592,6 +1583,21 @@ export async function createNetworkLoop({
         source: 'agent',
         entityId: toolId,
         stepType: 'tool-execution',
+      });
+
+      await writer?.write({
+        type: 'tool-execution-start',
+        payload: {
+          args: {
+            ...inputData,
+            args: inputDataToUse,
+            toolName: toolId,
+            toolCallId,
+          },
+          runId,
+        },
+        from: ChunkFrom.NETWORK,
+        runId,
       });
 
       // Check if approval is required
@@ -1775,22 +1781,6 @@ export async function createNetworkLoop({
       const finalResult = await executeTool(
         inputDataToUse,
         {
-          ...executionStartHook(async acceptedInput => {
-            await writer?.write({
-              type: 'tool-execution-start',
-              payload: {
-                args: {
-                  ...inputData,
-                  args: acceptedInput,
-                  toolName: toolId,
-                  toolCallId,
-                },
-                runId,
-              },
-              from: ChunkFrom.NETWORK,
-              runId,
-            });
-          }),
           abortSignal,
           requestContext,
           mastra: agent.getMastraInstance(),

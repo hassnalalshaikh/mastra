@@ -655,13 +655,14 @@ export class CoreToolBuilder extends MastraBase {
             [TOOL_EXECUTION_POLICY]: _toolPolicy,
             [TOOL_EXECUTION_START]: _executionStart,
             ...publicOptions
-          } = execOptions;
+          } = execOptions ?? {};
           // Handle Vercel tools (AI SDK tools)
           result = await executeWithContext({
             span: contextSpan,
             fn: async () => {
               await notifyToolExecutionStart(execOptions, args);
-              return tool?.execute?.(args, publicOptions as ToolExecutionOptions);
+              // Keep 1.74's arguments-only call shape when no options were passed.
+              return tool?.execute?.(args, (execOptions ? publicOptions : execOptions) as ToolExecutionOptions);
             },
           });
         } else {

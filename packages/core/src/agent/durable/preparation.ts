@@ -651,7 +651,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       // fresh preparation can resolve policy, while allowing the saved denial.
       setPreparedToolPolicy(tools, () => ({ allowed: false, error: { code: error.code, retryable: error.retryable } }));
     } else {
-      if (mastra?.getToolPolicy() || typedAgent.getToolPolicy?.()) throw error;
+      if (mastra?.getToolPolicy?.() || typedAgent.getToolPolicy?.()) throw error;
       logger?.warn?.(`[DurableAgent] Error converting tools: ${error}`);
     }
   }
