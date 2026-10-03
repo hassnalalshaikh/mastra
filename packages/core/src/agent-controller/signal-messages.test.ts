@@ -608,7 +608,8 @@ describe('AgentController signal messages', () => {
     await session.thread.create();
 
     expect(session.displayState.get().queuedFollowUps).toBe(1);
-    expect(events).toContainEqual({ type: 'follow_up_queued', count: 1 });
+    // 1.74 rebase port (P28): follow_up_queued also carries the queued items.
+    expect(events).toContainEqual(expect.objectContaining({ type: 'follow_up_queued', count: 1 }));
   });
 
   it('does not retain queued display state when queue acceptance rejects', async () => {
@@ -794,7 +795,8 @@ describe('AgentController signal messages', () => {
     );
     expect(sendSignal).not.toHaveBeenCalled();
     expect(session.displayState.get().queuedFollowUps).toBe(1);
-    expect(events).toContainEqual({ type: 'follow_up_queued', count: 1 });
+    // 1.74 rebase port (P28): follow_up_queued also carries the queued items.
+    expect(events).toContainEqual(expect.objectContaining({ type: 'follow_up_queued', count: 1 }));
   });
 
   it('updates queued display state from Agent snapshots before queue acceptance resolves', async () => {
