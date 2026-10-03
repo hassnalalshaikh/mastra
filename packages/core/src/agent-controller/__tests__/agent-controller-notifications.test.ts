@@ -25,6 +25,8 @@ function createAgentMock() {
     listScorers: vi.fn(async () => []),
     getChannels: vi.fn(() => null),
     subscribeToThread: vi.fn(async () => createSubscription()),
+    // 1.74 rebase (fork P15): attaching a thread reads saved approvals.
+    listSuspendedRuns: vi.fn(async () => ({ runs: [], total: 0 })),
     subscribeThreadEvents: vi.fn((_scope, listener) => {
       listener({ type: 'queue-count-changed', count: 0 });
       return vi.fn();
