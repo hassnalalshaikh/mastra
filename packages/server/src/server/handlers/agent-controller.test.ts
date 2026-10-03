@@ -456,7 +456,12 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'change course', requestContext });
+      expect(spy).toHaveBeenCalledWith({
+        content: 'change course',
+        files: undefined,
+        followUpId: undefined,
+        requestContext,
+      });
     });
 
     it('forwards requestContext to session.followUp', async () => {
@@ -472,7 +477,28 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', requestContext });
+      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', files: undefined, requestContext });
+    });
+
+    // 1.74 port of the fork's attached steer/follow-up case: 1.74 acknowledges these
+    // commands and runs them as background session work, so a later refusal is an
+    // error event (covered above), not a rejected route.
+    it.each([
+      ['steer', STEER_AGENT_CONTROLLER_SESSION_ROUTE],
+      ['followUp', FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE],
+    ] as const)('%s validates and forwards files', async (method, route) => {
+      const session = await getRouteSession(`attached-${method}`);
+      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+      expect(route.bodySchema!.safeParse({ message: '', files }).success).toBe(true);
+      expect(
+        route.bodySchema!.safeParse({ message: '', files: [{ ...files[0], data: 'a'.repeat(14 * 1024 * 1024 + 1) }] })
+          .success,
+      ).toBe(false);
+      const spy = vi.spyOn(session, method).mockResolvedValue(undefined);
+      await expect(
+        route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
+      ).resolves.toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ content: '', files }));
     });
 
     it('forwards requestContext to session.respondToToolApproval', async () => {
