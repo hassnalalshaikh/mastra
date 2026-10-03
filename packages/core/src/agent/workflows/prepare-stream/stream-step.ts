@@ -24,6 +24,7 @@ interface StreamStepOptions<OUTPUT = undefined> {
   runId: string;
   returnScorerData?: boolean;
   requireToolApproval?: RequireToolApproval;
+  toolApprovalPolicy?: 'manual';
   toolCallConcurrency?: ToolCallConcurrency;
   eagerToolExecution?: boolean;
   resumeContext?: {
@@ -59,6 +60,7 @@ export function createStreamStep<OUTPUT = undefined>({
   runId: _runId,
   returnScorerData,
   requireToolApproval,
+  toolApprovalPolicy,
   toolCallConcurrency,
   eagerToolExecution,
   resumeContext,
@@ -110,6 +112,7 @@ export function createStreamStep<OUTPUT = undefined>({
         returnScorerData,
         ...resolveObservabilityContext(observabilityContext),
         requireToolApproval,
+        toolApprovalPolicy,
         toolCallConcurrency,
         eagerToolExecution,
         resumeContext,

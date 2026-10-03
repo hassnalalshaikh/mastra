@@ -819,6 +819,7 @@ interface ToolExecutionAbortPayload {
 }
 
 interface ToolCallApprovalPayload {
+  toolApprovalPolicy?: 'manual';
   toolCallId: string;
   toolName: string;
   args: Record<string, any>;

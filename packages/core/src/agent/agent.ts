@@ -396,6 +396,8 @@ export interface AgentRunToolCall {
   args?: unknown;
   /** True when the run is waiting on a tool-call approval. */
   requiresApproval: boolean;
+  /** The saved run requires an explicit decision, regardless of Session grants. */
+  toolApprovalPolicy?: 'manual';
   /** The tool-defined suspend payload when the tool itself called `suspend()`. */
   suspendPayload?: unknown;
 }
@@ -7388,6 +7390,7 @@ export class Agent<
           toolName: payload.requireToolApproval.toolName,
           args: payload.requireToolApproval.args,
           requiresApproval: true,
+          ...(payload.toolApprovalPolicy === 'manual' ? { toolApprovalPolicy: 'manual' as const } : {}),
         });
       } else if (payload.type === 'approval' && payload.toolCallId) {
         // Durable tool-call step suspending a directly approval-gated tool.
@@ -7396,6 +7399,7 @@ export class Agent<
           toolName: payload.toolName,
           args: payload.args,
           requiresApproval: true,
+          ...(payload.toolApprovalPolicy === 'manual' ? { toolApprovalPolicy: 'manual' as const } : {}),
         });
       } else if (payload.toolCallSuspended || payload.toolName || payload.toolCallId) {
         toolCalls.push({
@@ -7403,6 +7407,7 @@ export class Agent<
           toolName: payload.toolName,
           requiresApproval: false,
           suspendPayload: payload.toolCallSuspended,
+          ...(payload.toolApprovalPolicy === 'manual' ? { toolApprovalPolicy: 'manual' as const } : {}),
         });
       }
     };
@@ -7687,6 +7692,12 @@ export class Agent<
   }: InnerAgentExecutionOptions<OUTPUT> & { _threadStreamPubSub?: PubSub }) {
     const threadStreamPubSub = _threadStreamPubSub ?? this.getPubSub();
     const existingSnapshot = resumeContext?.snapshot;
+    // A saved run keeps its manual policy when resumed through any public API.
+    const toolApprovalPolicy = this.#getSuspendedToolCalls(existingSnapshot).some(
+      call => call.toolApprovalPolicy === 'manual',
+    )
+      ? 'manual'
+      : options.toolApprovalPolicy;
     const snapshotMemoryInfo = this.#getSnapshotMemoryInfo(existingSnapshot);
     const requestContext = options.requestContext || new RequestContext();
 
@@ -8060,6 +8071,7 @@ export class Agent<
       saveQueueManager,
       returnScorerData: options.returnScorerData,
       requireToolApproval: options.requireToolApproval,
+      toolApprovalPolicy,
       toolCallConcurrency: options.toolCallConcurrency,
       // Resolved to a boolean here, at the one entry point the contract covers, rather
       // than left undefined and defaulted deep in the loop. Anything that reaches the
