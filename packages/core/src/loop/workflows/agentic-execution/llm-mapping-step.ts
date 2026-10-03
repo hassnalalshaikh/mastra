@@ -243,8 +243,6 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
               },
               toolCall,
             );
-            const processed = await processAndEnqueueChunk(chunk);
-            if (processed) await rest.options?.onChunk?.(processed);
 
             // Use the already-reified Error rather than `toolCall.error` (which is the
             // plain {name,message,stack} shape after the pubsub JSON round-trip).
@@ -263,6 +261,8 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                 chunk.metadata,
               ) as ProviderMetadata | undefined,
             });
+            const processed = await processAndEnqueueChunk(chunk);
+            if (processed) await rest.options?.onChunk?.(processed);
           }
         }
 
@@ -315,6 +315,7 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                   toolCallId: toolCall.toolCallId,
                   toolName: toolCall.toolName,
                   result: toolCall.result,
+                  ...(toolCall.isError ? { isError: true } : {}),
                   providerMetadata: chunkProviderMetadata,
                   providerExecuted: toolCall.providerExecuted,
                 },
@@ -471,6 +472,7 @@ export function createLLMMappingStep<Tools extends ToolSet = ToolSet, OUTPUT = u
                 toolCallId: toolCall.toolCallId,
                 toolName: toolCall.toolName,
                 result: toolCall.result,
+                ...(toolCall.isError ? { isError: true } : {}),
                 providerMetadata: chunkProviderMetadata,
                 providerExecuted: toolCall.providerExecuted,
               },

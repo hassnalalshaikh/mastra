@@ -605,9 +605,12 @@ export interface OMProgressState {
  * State of an active tool execution, tracked by the AgentController for UI consumption.
  */
 export interface ActiveToolState {
+  runId?: string;
+  /** A preliminary background dispatch remains active after the foreground run ends. */
+  background?: boolean;
   name: string;
   args: unknown;
-  status: 'streaming_input' | 'running' | 'completed' | 'error';
+  status: 'streaming_input' | 'running' | 'executing' | 'completed' | 'error';
   partialResult?: string;
   result?: unknown;
   isError?: boolean;
@@ -708,6 +711,7 @@ export interface AgentControllerDisplayState {
       args: unknown;
       suspendPayload: unknown;
       resumeSchema?: string;
+      waitingFor?: 'user' | 'external';
     }
   >;
 
@@ -822,6 +826,8 @@ export type AgentControllerEvent =
   | { type: 'agent_start' }
   | { type: 'agent_end'; reason?: 'complete' | 'aborted' | 'error' | 'suspended' }
   | { type: 'message_start'; message: MastraDBMessage }
+  /** Forward-only assistant text, excluding reasoning and tool payloads. */
+  | { type: 'text_delta'; runId: string; messageId: string; textDelta: string }
   | {
       type: 'message_update';
       id: string;
@@ -833,6 +839,8 @@ export type AgentControllerEvent =
   | { type: 'message_end'; id: string }
   | ({ threadId?: string } & (
       | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown; title?: string }
+      /** Final validation, approval and policy checks have passed; execution is entering the tool. */
+      | { type: 'tool_execution_start'; runId: string; toolCallId: string; toolName: string; args: unknown }
       | { type: 'tool_approval_required'; toolCallId: string; toolName: string; args: unknown }
       | {
           type: 'tool_suspended';
@@ -841,12 +849,18 @@ export type AgentControllerEvent =
           args: unknown;
           suspendPayload: unknown;
           resumeSchema?: string;
+          waitingFor?: 'user' | 'external';
         }
       | { type: 'tool_suspension_cancelled'; toolCallId: string; toolName: string; reason: string }
-      | { type: 'tool_update'; toolCallId: string; partialResult: unknown }
+      | { type: 'tool_update'; toolCallId: string; partialResult: unknown; preliminary?: boolean }
       | {
           type: 'tool_end';
           toolCallId: string;
+          runId?: string;
+          toolName?: string;
+          messageId?: string;
+          completedAt?: string;
+          cancelled?: boolean;
           result: unknown;
           isError: boolean;
           /**
@@ -1070,6 +1084,8 @@ export interface AgentControllerRequestState<TState = unknown> {
 }
 
 export interface AgentControllerRequestSession<TState = unknown> {
+  /** Identifies this live session incarnation; never use it as persisted identity. */
+  runtimeId?: string;
   /** Stable session identifier (mirrors SessionRecord.id in storage). */
   id: string;
   /** Stable session owner (mirrors SessionRecord.ownerId in storage). */

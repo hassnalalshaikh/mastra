@@ -4,6 +4,7 @@ import type { MastraLanguageModel } from '../../../llm/model/shared.types';
 import type { StreamInternal } from '../../../loop/types';
 import type { Mastra } from '../../../mastra';
 import type { MastraMemory } from '../../../memory/memory';
+import { MemoryRunState } from '../../../memory/run-state';
 import type {
   ProcessorState,
   ErrorProcessorOrWorkflow,
@@ -12,6 +13,7 @@ import type {
   OutputProcessorOrWorkflow,
 } from '../../../processors';
 import { MASTRA_AUTH_TOKEN_KEY, RequestContext } from '../../../request-context';
+import { getPreparedToolPolicy } from '../../../tools/tool-policy-execution';
 import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import type { CoreTool, RequireToolApproval, ToolApprovalContext } from '../../../tools/types';
 import type { Workspace } from '../../../workspace';
@@ -127,6 +129,16 @@ export function restoreRequestContext(entries?: Record<string, unknown>, runLeve
 }
 
 /**
+ * A real in-process registry entry: seeded with the live model by the process
+ * that prepared the run. Placeholders and metadata-only stubs (cross-process
+ * workers) are not hydrated.
+ */
+function isHydratedRegistryEntry(entry: RunRegistryEntry | undefined): boolean {
+  const model = entry?.model as (MastraLanguageModel & { __metadataOnly?: boolean }) | undefined;
+  return !!entry && entry.isPlaceholder !== true && !!model && model.__metadataOnly !== true;
+}
+
+/**
  * Thrown when the per-request processor pipeline cannot be rebuilt during
  * cross-process rehydration. Propagated (not swallowed) because continuing
  * without the rebuilt processors would silently drop skills / workspace
@@ -191,9 +203,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
   // real model instance (every in-process seeding site stores the live model;
   // placeholders and metadata-only stubs do not).
   const globalEntry = globalRunRegistry.get(runId);
-  const registryModel = globalEntry?.model as (MastraLanguageModel & { __metadataOnly?: boolean }) | undefined;
-  const hasHydratedEntry =
-    !!globalEntry && globalEntry.isPlaceholder !== true && !!registryModel && registryModel.__metadataOnly !== true;
+  const hasHydratedEntry = isHydratedRegistryEntry(globalEntry);
   // Prefer the full toolset over `tools`: after the first step `tools` holds the
   // per-step snapshot the model was shown (possibly narrowed by processors such
   // as ToolSearchProcessor), and seeding from it would drop every tool the
@@ -209,6 +219,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
   let errorProcessors: ErrorProcessorOrWorkflow[] | undefined = globalEntry?.errorProcessors;
   let processorStates: Map<string, ProcessorState> | undefined = globalEntry?.processorStates;
   let rehydratedFromMastra = false;
+  let preparedRequestContext = globalEntry?.requestContext;
 
   // If the registry entry is a real (non-placeholder) in-process entry we
   // trust it wholesale (in-process / same-process resume). Otherwise fall
@@ -225,7 +236,9 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
       // the same configuration as the original call site.
       const resolveRequestContext = restoreRequestContext(input.requestContextEntries, options.requestContext);
 
+      preparedRequestContext = resolveRequestContext;
       tools = await agent.getToolsForExecution({
+        resumeMessageList: messageList,
         runId,
         threadId: input.state.threadId,
         resourceId: input.state.resourceId,
@@ -251,6 +264,23 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
 
       memory = await (agent as any).getMemory?.({ requestContext: resolveRequestContext });
       workspace = await (agent as any).getWorkspace?.({ requestContext: resolveRequestContext });
+
+      if (memory && input.state.threadId && input.state.resourceId) {
+        // Live accessors do not cross workflow snapshots. Rebuild empty read
+        // state on a cold worker; never trust a serialized thread as validated.
+        const memoryRunState = new MemoryRunState({
+          memory,
+          threadId: input.state.threadId,
+          resourceId: input.state.resourceId,
+        });
+        const memoryContext = resolveRequestContext.get('MastraMemory') as Record<string, unknown> | undefined;
+        resolveRequestContext.set('MastraMemory', {
+          ...memoryContext,
+          resourceId: input.state.resourceId,
+          memoryConfig: input.state.memoryConfig,
+          runState: () => memoryRunState,
+        });
+      }
 
       // Rebuild the per-request processor pipeline. `listInputProcessors` /
       // `listOutputProcessors` already inject the SkillsProcessor and
@@ -283,7 +313,14 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
 
       rehydratedFromMastra = true;
     } catch (error) {
-      if (error instanceof DurableProcessorRebuildError) throw error;
+      if (
+        error instanceof DurableProcessorRebuildError ||
+        mastra.getToolPolicy() ||
+        Object.values(mastra.listAgents())
+          .find(agent => agent.id === agentId)
+          ?.getToolPolicy()
+      )
+        throw error;
       logger?.debug?.(`[DurableAgent:${agentId}] Failed to get agent from Mastra: ${error}`);
       model = resolveModel(input.modelConfig, mastra);
     }
@@ -310,7 +347,10 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
       // The entry now carries real runtime state — drop the placeholder mark
       // so sibling steps in this process trust it instead of rebuilding.
       isPlaceholder: false,
+      toolPolicy: getPreparedToolPolicy(tools),
+      requestContext: preparedRequestContext,
       tools,
+      baseTools: tools,
       model,
       modelList,
       workspace,
@@ -406,6 +446,7 @@ export async function rebuildRunToolsFromMastra(options: {
    * absent. See `restoreRequestContext`.
    */
   requestContext?: RequestContext;
+  messageList?: MessageList;
   logger?: { debug?: (...args: any[]) => void };
 }): Promise<RebuiltRunTools | undefined> {
   const {
@@ -422,11 +463,17 @@ export async function rebuildRunToolsFromMastra(options: {
 
   try {
     const agent = mastra.getAgentById(agentId);
-    // Restore the caller's request context so request-scoped tools, workspace
-    // and memory resolve with the same configuration as the original call.
-    const resolveRequestContext = restoreRequestContext(requestContextEntries, requestContext);
+    // A hydrated in-process entry holds the run's live RequestContext. Native
+    // processor state (e.g. skill readiness) is keyed by that object, so the
+    // rebuild must reuse it instead of swapping in a snapshot copy. Only an
+    // unhydrated entry (cross-process worker) restores the caller's context
+    // from the JSON-safe snapshot.
+    const liveEntry = globalRunRegistry.get(runId);
+    const liveRequestContext = isHydratedRegistryEntry(liveEntry) ? liveEntry?.requestContext : undefined;
+    const resolveRequestContext = liveRequestContext ?? restoreRequestContext(requestContextEntries, requestContext);
 
     const tools = await agent.getToolsForExecution({
+      resumeMessageList: options.messageList,
       runId,
       threadId: state.threadId,
       resourceId: state.resourceId,
@@ -441,10 +488,19 @@ export async function rebuildRunToolsFromMastra(options: {
 
     // Write back so sibling steps in this process reuse the rebuilt tools.
     const existing = globalRunRegistry.get(runId);
-    const patch: Partial<RunRegistryEntry> = { tools, workspace, memory, saveQueueManager };
+    const patch: Partial<RunRegistryEntry> = {
+      tools,
+      workspace,
+      memory,
+      saveQueueManager,
+      toolPolicy: getPreparedToolPolicy(tools),
+      requestContext: resolveRequestContext,
+    };
     if (existing) {
       // Only fill fields the entry is missing — never clobber a populated entry.
       if (Object.keys(existing.tools ?? {}).length === 0) existing.tools = tools;
+      existing.toolPolicy = getPreparedToolPolicy(tools);
+      existing.requestContext = resolveRequestContext;
       existing.workspace ??= workspace;
       existing.memory ??= memory;
       existing.saveQueueManager ??= saveQueueManager;
@@ -454,6 +510,13 @@ export async function rebuildRunToolsFromMastra(options: {
 
     return { tools, workspace, memory, saveQueueManager, requestContext: resolveRequestContext };
   } catch (error) {
+    if (
+      mastra.getToolPolicy() ||
+      Object.values(mastra.listAgents())
+        .find(agent => agent.id === agentId)
+        ?.getToolPolicy()
+    )
+      throw error;
     logger?.debug?.(`[DurableAgent:${agentId}] Failed to rebuild tools from Mastra for run ${runId}: ${error}`);
     return undefined;
   }

@@ -44,6 +44,7 @@ import { ChunkFrom } from '../../../../stream/types';
 import { withToolPayloadTransformProviderMetadata } from '../../../../tools/payload-transform';
 import { findProviderToolByName, inferProviderExecuted } from '../../../../tools/provider-tool-utils';
 import type { ToolToConvert } from '../../../../tools/tool-builder/builder';
+import { filterToolsByPolicy } from '../../../../tools/tool-policy-execution';
 import { isMastraTool } from '../../../../tools/toolchecks';
 import type { CoreTool } from '../../../../tools/types';
 import { createMastraProxy, makeCoreTool } from '../../../../utils';
@@ -565,6 +566,10 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 : undefined;
 
             const registryEntry = globalRunRegistry.get(runId);
+            const toolPolicy =
+              registryEntry && 'toolPolicy' in registryEntry
+                ? registryEntry.toolPolicy
+                : await mastra?.getAgentById(agentId)?.resolveToolPolicy({ requestContext, runId });
             const executionAbortSignal = registryEntry?.abortSignal ?? abortSignal;
             const baseInputProcessors = registryEntry?.inputProcessors ?? resolvedInputProcessors ?? [];
             // Use `llmRequestInputProcessors` (uncombined) because combined
@@ -602,6 +607,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
               try {
                 const processInputStepResult = await runner.runProcessInputStep({
                   llmRequestProcessorIds: ProcessorRunner.getLLMRequestProcessorIds(llmRequestInputProcessors),
+                  toolPolicy,
                   messageList,
                   stepNumber: stepIndex,
                   steps: inputData.accumulatedSteps ?? [],
@@ -763,6 +769,20 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 logger?.error?.('Error in processInputStep processors:', error);
                 throw error;
               }
+            }
+
+            currentTools = await filterToolsByPolicy(
+              currentTools,
+              toolPolicy,
+              registryEntry?.requestContext ?? requestContext,
+            );
+            if (currentActiveTools)
+              currentActiveTools = currentActiveTools.filter((name: string) => !!currentTools?.[name]);
+            if (registryEntry) {
+              // The policy decision is per step: keep the full set for later steps,
+              // so a tool whose skill becomes ready can return (same as #22933).
+              registryEntry.baseTools ??= tools;
+              registryEntry.tools = currentTools as any;
             }
 
             // ── Signal echo & pre-run drain ───────────────────────────────
@@ -1680,7 +1700,11 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                       providerMetadata: payload.providerMetadata as Record<string, unknown> | undefined,
                       providerExecuted: payload.providerExecuted,
                       output: payload.output,
-                      activeTools: currentActiveTools ?? null,
+                      // Persist the tool set shown on this inference step, even when
+                      // no explicit allowlist was supplied. The tool step can resolve
+                      // globally registered tools after a restart; that must not let
+                      // a remembered but undiscovered tool bypass this step's schema.
+                      activeTools: currentActiveTools ?? Object.keys(currentTools ?? {}),
                     });
                     break;
                   }

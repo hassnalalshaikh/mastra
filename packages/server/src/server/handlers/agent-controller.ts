@@ -21,7 +21,7 @@ import { HTTPException } from '../http-exception';
 import { filterSchema, includeSchema, messageOrderBySchema } from '../schemas/memory';
 import { createRoute } from '../server-adapter/routes/route-builder';
 import { handleError } from './error';
-import { enforceThreadAccess } from './utils';
+import { enforceThreadAccess, getEffectiveResourceId, getEffectiveThreadId } from './utils';
 
 /**
  * AgentController session routes.
@@ -187,7 +187,7 @@ const sendMessageBodySchema = z.object({
     })
     .optional(),
 });
-const steerBodySchema = z.object({ message: z.string(), requestContext: bodyRequestContextSchema });
+const steerBodySchema = sendMessageBodySchema;
 const toolApprovalBodySchema = z.object({
   toolCallId: z.string(),
   approved: z.boolean(),
@@ -262,7 +262,7 @@ const listThreadsQuerySchema = z.object({
     }, z.record(z.string(), z.string()).optional())
     .optional(),
 });
-const followUpBodySchema = z.object({ message: z.string(), requestContext: bodyRequestContextSchema });
+const followUpBodySchema = sendMessageBodySchema;
 
 const sendNotificationBodySchema = z.object({
   source: z.string(),
@@ -522,7 +522,23 @@ function toWireEvent(event: AgentControllerEvent): JsonReadyAgentControllerEvent
     return { ...event, displayState: toWireDisplayState(event.displayState) };
   }
   if (carriesError(event)) {
-    return { ...event, error: { name: event.error.name, message: event.error.message } };
+    const error = event.error as Error & Record<string, unknown>;
+    const dependency =
+      error.name === 'ToolDependencyError'
+        ? {
+            ...(typeof error.code === 'string' ? { code: error.code } : {}),
+            ...(typeof error.tool === 'string' ? { tool: error.tool } : {}),
+            ...(Array.isArray(error.missingSkills) && error.missingSkills.every(value => typeof value === 'string')
+              ? { missingSkills: error.missingSkills as string[] }
+              : {}),
+            ...(Array.isArray(error.unavailableSkills) &&
+            error.unavailableSkills.every(value => typeof value === 'string')
+              ? { unavailableSkills: error.unavailableSkills as string[] }
+              : {}),
+            ...(typeof error.retryable === 'boolean' ? { retryable: error.retryable } : {}),
+          }
+        : {};
+    return { ...event, error: { name: error.name, message: error.message, ...dependency } };
   }
   return event;
 }
@@ -643,6 +659,61 @@ export const SEND_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error sending controller message');
+    }
+  },
+});
+
+export const EDIT_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
+  method: 'POST',
+  path: '/agent-controller/:controllerId/sessions/:resourceId/threads/:threadId/messages/:messageId/edit',
+  responseType: 'json' as const,
+  pathParamSchema: threadPathParams.extend({ messageId: z.string() }),
+  queryParamSchema: sessionScopeQuerySchema,
+  bodySchema: z.object({
+    content: z.string().trim().min(1),
+    newThreadId: z.string().uuid(),
+    newSessionScope: z.string().min(1).max(512),
+  }),
+  responseSchema: threadResponseSchema,
+  summary: 'Start an edited copy of a conversation',
+  description: 'Keeps the original intact, copies earlier messages and submits the edited message in a new session.',
+  tags: ['AgentController', 'Threads'],
+  requiresAuth: true,
+  requiresPermission: 'agent-controller:execute',
+  handler: async ({
+    mastra,
+    controllerId,
+    resourceId,
+    threadId,
+    messageId,
+    content,
+    newThreadId,
+    newSessionScope,
+    requestContext,
+  }) => {
+    try {
+      if (getEffectiveThreadId(requestContext, threadId) !== threadId) {
+        throw new HTTPException(403, { message: 'The source thread does not match this session' });
+      }
+      const controller = getAgentControllerOrThrow(mastra, controllerId);
+      const thread = await controller.editMessage({
+        resourceId: getEffectiveResourceId(requestContext, resourceId)!,
+        sourceThreadId: threadId,
+        messageId,
+        content,
+        newThreadId,
+        newSessionScope,
+        requestContext,
+      });
+      return {
+        id: thread.id,
+        title: thread.title,
+        resourceId: thread.resourceId,
+        createdAt: thread.createdAt.toISOString(),
+        updatedAt: thread.updatedAt.toISOString(),
+      };
+    } catch (error) {
+      return handleError(error, 'error editing controller message');
     }
   },
 });
@@ -783,12 +854,12 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, requestContext }) => {
+  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, files, requestContext }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(controller, resourceId, { scope: sessionScope }, requestContext);
       ackBackgroundSessionWork({
-        work: session.steer({ content: message, requestContext }),
+        work: session.steer({ content: message, files, requestContext }),
         session,
         mastra,
         operation: 'steer',
@@ -1380,12 +1451,12 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   tags: ['AgentController'],
   requiresAuth: true,
   requiresPermission: 'agent-controller:execute',
-  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, requestContext }) => {
+  handler: async ({ mastra, controllerId, resourceId, sessionScope, message, files, requestContext }) => {
     try {
       const controller = getAgentControllerOrThrow(mastra, controllerId);
       const session = await getSession(controller, resourceId, { scope: sessionScope }, requestContext);
       ackBackgroundSessionWork({
-        work: session.followUp({ content: message, requestContext }),
+        work: session.followUp({ content: message, files, requestContext }),
         session,
         mastra,
         operation: 'followUp',

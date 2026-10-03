@@ -55,6 +55,8 @@ export async function executeToolCall(deps: {
   toolCallId: string;
   toolName: string;
   abortSignal?: AbortSignal;
+  /** Native tool-policy dispatch for the selected tool; defaults to `tool.execute`. */
+  execute?: (args: unknown, options: unknown) => Promise<unknown> | unknown;
   /** Engine wrapper around live execution (e.g. durable's `markRunActive`); returns a release fn. */
   acquireExecution?: () => () => void;
   /**
@@ -74,7 +76,9 @@ export async function executeToolCall(deps: {
     const release = deps.acquireExecution?.();
     let rawResult: unknown;
     try {
-      rawResult = await tool.execute(deps.args, deps.toolOptions);
+      rawResult = deps.execute
+        ? await deps.execute(deps.args, deps.toolOptions)
+        : await tool.execute(deps.args, deps.toolOptions);
     } finally {
       release?.();
     }

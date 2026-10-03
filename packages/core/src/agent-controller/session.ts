@@ -33,6 +33,7 @@ import type { TracingContext, TracingOptions } from '../observability';
 import type { RequestContext } from '../request-context';
 import { toStandardSchema } from '../schema';
 import type { PublicSchema, StandardSchemaWithJSON } from '../schema';
+import type { MemoryStorage } from '../storage/domains/memory/base';
 import type { StorageListMessagesOutput } from '../storage/types';
 import type { SubmitPlanResumeData } from '../tools/builtin/submit-plan';
 import { safeStringify } from '../utils';
@@ -317,6 +318,8 @@ export interface ThreadDataStore {
  * capabilities it is allowed to use, nothing more.
  */
 export interface SessionMachinery {
+  /** Native controller storage used for recorded conversation turns. */
+  getMessageStorage?(): Promise<MemoryStorage>;
   /** Resolve the agent that should answer for the session's current mode/model. */
   getAgent(): Agent;
   /** Get the ephemeral state associated with an active or suspended run. */
@@ -2784,7 +2787,7 @@ export class SessionDisplayState {
       // ── Agent lifecycle ────────────────────────────────────────────────
       case 'agent_start':
         ds.isRunning = true;
-        ds.activeTools = new Map();
+        ds.activeTools = new Map([...ds.activeTools].filter(([, tool]) => tool.background));
         ds.toolInputBuffers = new Map();
         ds.currentMessage = null;
         // Parked approvals are deliberately NOT cleared here either: a run on
@@ -2806,8 +2809,12 @@ export class SessionDisplayState {
           ds.pendingSuspensions.clear();
         }
         // Mark any still-running tools as errored (handles abort mid-run)
-        for (const [, tool] of ds.activeTools) {
-          if (tool.status === 'running' || tool.status === 'streaming_input') {
+        for (const [toolCallId, tool] of ds.activeTools) {
+          if (
+            (tool.status === 'running' || tool.status === 'executing' || tool.status === 'streaming_input') &&
+            !tool.background &&
+            !(event.reason === 'suspended' && ds.pendingSuspensions.has(toolCallId))
+          ) {
             tool.status = 'error';
           }
         }
@@ -2904,9 +2911,21 @@ export class SessionDisplayState {
         break;
       }
 
+      case 'tool_execution_start': {
+        ds.activeTools.set(event.toolCallId, {
+          ...ds.activeTools.get(event.toolCallId),
+          name: event.toolName,
+          args: event.args,
+          status: 'executing',
+          runId: event.runId,
+        });
+        break;
+      }
+
       case 'tool_update': {
         const tool = ds.activeTools.get(event.toolCallId);
         if (tool) {
+          if (event.preliminary) tool.background = true;
           tool.partialResult =
             typeof event.partialResult === 'string' ? event.partialResult : safeStringify(event.partialResult);
         }
@@ -2917,6 +2936,7 @@ export class SessionDisplayState {
         const endedTool = ds.activeTools.get(event.toolCallId);
         if (endedTool) {
           endedTool.status = event.isError ? 'error' : 'completed';
+          endedTool.background = false;
           endedTool.result = event.result;
           endedTool.isError = event.isError;
         }
@@ -2972,6 +2992,7 @@ export class SessionDisplayState {
           args: event.args,
           suspendPayload: event.suspendPayload,
           resumeSchema: event.resumeSchema,
+          waitingFor: event.waitingFor ?? 'user',
         });
         break;
 
@@ -3264,6 +3285,12 @@ export class SessionBus {
   }
 
   emit(event: AgentControllerEvent): void {
+    // Incremental consumers observe this event without changing the display
+    // snapshot or forcing a per-token flush of its coalesced message updates.
+    if (event.type === 'text_delta') {
+      this.#dispatch(event);
+      return;
+    }
     if (
       event.type === 'workspace_status_changed' ||
       event.type === 'workspace_ready' ||
@@ -3350,6 +3377,131 @@ export class SessionBus {
 export class Session<TState = unknown> {
   /** Every cancellation intent invalidates pending startup, even when teardown is already in progress. */
   #abortGeneration = 0;
+  readonly #messageWrites = new Map<string, Promise<unknown>>();
+  readonly #messageDeliveries = new Map<
+    string,
+    {
+      threadId: string;
+      resourceId: string;
+      fingerprint: string;
+      receipt: ReturnType<Session['sendSignal']>;
+      settled: boolean;
+    }
+  >();
+
+  private serializeMessage<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#messageWrites.get(id) ?? Promise.resolve();
+    const pending = previous.catch(() => undefined).then(operation);
+    this.#messageWrites.set(id, pending);
+    void pending
+      .finally(() => {
+        if (this.#messageWrites.get(id) === pending) this.#messageWrites.delete(id);
+      })
+      .catch(() => undefined);
+    return pending;
+  }
+
+  private assertMessageScope(threadId: string, resourceId: string) {
+    if (this.thread.getId() !== threadId || this.identity.getResourceId() !== resourceId) {
+      throw new Error('Message scope changed before delivery');
+    }
+  }
+
+  private async messageStorage(id: string, threadId: string, resourceId: string) {
+    if (!id.trim()) throw new Error('Message id must not be empty');
+    this.assertMessageScope(threadId, resourceId);
+    const storage = await this.machinery.getMessageStorage?.();
+    if (!storage) throw new Error('Recording messages requires controller storage');
+    const thread = await storage.getThreadById({ threadId });
+    if (thread && thread.resourceId !== resourceId) throw new Error('Message thread belongs to another resource');
+    this.assertMessageScope(threadId, resourceId);
+    if (!thread) await this.thread.create({ id: threadId });
+    const { messages } = await storage.listMessagesById({ messageIds: [id] });
+    const existing = messages[0];
+    if (existing && (existing.threadId !== threadId || existing.resourceId !== resourceId)) {
+      throw new Error('Message id belongs to another conversation');
+    }
+    this.assertMessageScope(threadId, resourceId);
+    return { storage, existing };
+  }
+
+  /**
+   * Record a completed external conversation turn without starting a run.
+   * Reuse its id with sendMessageWithReceipt to deliver that same user input.
+   * A late transcript cannot replace a delivered signal or its attachments.
+   */
+  async recordMessage({
+    id,
+    role,
+    content,
+    createdAt = new Date(),
+  }: {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    createdAt?: Date;
+  }): Promise<void> {
+    if (
+      !id.trim() ||
+      !content.trim() ||
+      !['user', 'assistant'].includes(role) ||
+      !Number.isFinite(createdAt.getTime())
+    ) {
+      throw new Error('Invalid recorded message');
+    }
+    if (!this.thread.getId()) await this.thread.create();
+    const threadId = this.thread.getId()!;
+    const resourceId = this.identity.getResourceId();
+    const delivery = this.#messageDeliveries.get(id);
+    await this.serializeMessage(id, async () => {
+      if (delivery) {
+        if (role !== 'user' || delivery.threadId !== threadId || delivery.resourceId !== resourceId) {
+          throw new Error('Message identity conflicts with a delivered user input');
+        }
+        try {
+          const accepted = await delivery.receipt.accepted;
+          if (accepted.action === 'wake' || accepted.action === 'deliver') return;
+        } catch {
+          // A rejected handoff does not discard the original spoken turn.
+        }
+      }
+      const { storage, existing } = await this.messageStorage(id, threadId, resourceId);
+      if (existing) {
+        const signal = existing.content.metadata?.signal as { type?: string } | undefined;
+        if (role === 'user' && existing.role === 'signal' && signal?.type === 'user') return;
+        if (
+          existing.role !== role ||
+          JSON.stringify(existing.content.parts) !== JSON.stringify([{ type: 'text', text: content }])
+        ) {
+          throw new Error('Message id conflicts with an existing turn');
+        }
+        return;
+      }
+      await storage.saveMessages({
+        messages: [
+          {
+            id,
+            role,
+            threadId,
+            resourceId,
+            createdAt,
+            type: 'text',
+            content: { format: 2, parts: [{ type: 'text', text: content }] },
+          },
+        ],
+      });
+      const thread = await storage.getThreadById({ threadId });
+      if (
+        role === 'user' &&
+        thread &&
+        !thread.title?.trim() &&
+        this.thread.getId() === threadId &&
+        this.identity.getResourceId() === resourceId
+      ) {
+        await this.thread.rename({ title: content.length > 80 ? `${content.slice(0, 80)}…` : content });
+      }
+    });
+  }
   /** This session's event bus. Constructed first so every subsystem can route its events here. */
   readonly #bus = new SessionBus();
   /** Process-local hooks that must finish before the session exposes a terminal agent event. */
@@ -3412,7 +3564,29 @@ export class Session<TState = unknown> {
    */
   readonly #tags: Record<string, string>;
   readonly #workspace: Workspace | undefined;
-  browser?: MastraBrowser;
+  #browser?: MastraBrowser;
+  #browserIdentity?: { resourceId: string; threadId: string | null };
+
+  /** The browser bound to this session's current identity, if available. */
+  get browser(): MastraBrowser | undefined {
+    if (
+      this.#browserIdentity &&
+      (this.#browserIdentity.resourceId !== this.identity.getResourceId() ||
+        this.#browserIdentity.threadId !== this.thread.getId())
+    )
+      return undefined;
+    return this.#browser;
+  }
+
+  set browser(browser: MastraBrowser | undefined) {
+    this.#browser = browser;
+    this.#browserIdentity = undefined;
+  }
+
+  /** @internal Bind a controller factory result to the identity it was created for. */
+  __bindBrowserIdentity(): void {
+    this.#browserIdentity = { resourceId: this.identity.getResourceId(), threadId: this.thread.getId() };
+  }
 
   constructor({
     resourceId,
@@ -3517,6 +3691,25 @@ export class Session<TState = unknown> {
     reason: NonNullable<Extract<AgentControllerEvent, { type: 'agent_end' }>['reason']>,
     isCurrent?: () => boolean,
   ): Promise<void> {
+    if (reason === 'aborted' || reason === 'error') {
+      const state = this.displayState.get();
+      for (const [toolCallId, tool] of state.activeTools) {
+        if (tool.background) continue;
+        if (tool.status !== 'running' && tool.status !== 'executing' && tool.status !== 'streaming_input') continue;
+        if (isCurrent && !isCurrent()) return;
+        this.emit({
+          type: 'tool_end',
+          toolCallId,
+          toolName: tool.name,
+          runId: tool.runId ?? this.getCurrentRunId() ?? undefined,
+          messageId: state.currentMessage?.id,
+          completedAt: new Date().toISOString(),
+          result: reason === 'aborted' ? 'Tool execution was cancelled' : 'The run ended before this tool completed',
+          isError: true,
+          cancelled: reason === 'aborted',
+        });
+      }
+    }
     const event = { type: 'agent_end', reason } as const;
     for (const listener of this.#beforeAgentEndListeners) {
       if (isCurrent && !isCurrent()) return;
@@ -4753,6 +4946,106 @@ export class Session<TState = unknown> {
   }
 
   /**
+   * Send a user message, including files, and return its exact delivery receipt.
+   * Uses the same file conversion as sendMessage without waiting for the run to
+   * finish. Conversion may throw before delivery; accepted rejects on routing
+   * or stream setup failure. Subscribe before sending to observe early output.
+   */
+  sendMessageWithReceipt({
+    id,
+    content,
+    files,
+    tracingContext,
+    tracingOptions,
+    requestContext,
+  }: {
+    id?: string;
+    content: string;
+    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    tracingContext?: TracingContext;
+    tracingOptions?: TracingOptions;
+    requestContext?: RequestContext;
+  }): ReturnType<Session['sendSignal']> {
+    if (id !== undefined) {
+      if (!id.trim()) throw new Error('Message id must not be empty');
+      const contents = this.createMessageInput({ content, files });
+      const threadId = this.thread.getId();
+      if (!threadId) throw new Error('Bind a thread before delivering an identified message');
+      const resourceId = this.identity.getResourceId();
+      const fingerprint = JSON.stringify(contents);
+      const previous = this.#messageDeliveries.get(id);
+      if (previous) {
+        if (
+          previous.threadId !== threadId ||
+          previous.resourceId !== resourceId ||
+          previous.fingerprint !== fingerprint
+        ) {
+          throw new Error('Message id conflicts with an earlier delivery');
+        }
+        return previous.receipt;
+      }
+      // Keep live receipts bounded. Evicted deliveries remain protected by their
+      // persisted signal: an uncertain replay is refused, never run again.
+      const oldest =
+        this.#messageDeliveries.size >= 1024
+          ? [...this.#messageDeliveries].find(([, value]) => value.settled)
+          : undefined;
+      if (this.#messageDeliveries.size >= 1024 && (!oldest || this.#messageDeliveries.size > 1024)) {
+        throw new Error('Too many pending message deliveries');
+      }
+      const accepted = this.serializeMessage(id, async () => {
+        const { storage, existing } = await this.messageStorage(id, threadId, resourceId);
+        const memory = await this.machinery.getAgent().getMemory({ requestContext });
+        if (!memory || (await memory.storage.getStore('memory')) !== storage) {
+          throw new Error('Identified delivery requires the agent and controller to share memory storage');
+        }
+        if (oldest) {
+          const { messages } = await storage.listMessagesById({ messageIds: [oldest[0]] });
+          const persisted = messages[0];
+          if (
+            persisted?.role !== 'signal' ||
+            persisted.threadId !== oldest[1].threadId ||
+            persisted.resourceId !== oldest[1].resourceId
+          ) {
+            throw new Error('Cannot release a delivery receipt before its signal is persisted');
+          }
+          if (this.#messageDeliveries.get(oldest[0]) === oldest[1]) this.#messageDeliveries.delete(oldest[0]);
+        }
+        if (existing && existing.role !== 'user') {
+          throw new Error('Message id has already been delivered or belongs to another role');
+        }
+        this.assertMessageScope(threadId, resourceId);
+        return this.sendSignal(
+          { id, type: 'user', contents, createdAt: existing?.createdAt },
+          {
+            requireDelivery: true,
+            tracingContext,
+            tracingOptions,
+            requestContext,
+          },
+        ).accepted;
+      });
+      const receipt: ReturnType<Session['sendSignal']> = { id, type: 'user', accepted };
+      const entry = { threadId, resourceId, fingerprint, receipt, settled: false };
+      this.#messageDeliveries.set(id, entry);
+      void accepted.then(
+        result => {
+          if (result.action === 'wake' || result.action === 'deliver') entry.settled = true;
+          else if (this.#messageDeliveries.get(id) === entry) this.#messageDeliveries.delete(id);
+        },
+        () => {
+          if (this.#messageDeliveries.get(id) === entry) this.#messageDeliveries.delete(id);
+        },
+      );
+      return receipt;
+    }
+    return this.sendSignal(
+      { content: this.createMessageInput({ content, files }), tracingContext, tracingOptions, requestContext },
+      { requireDelivery: true },
+    );
+  }
+
+  /**
    * Send a message to this session's current agent and await the run. Streams
    * the response and emits events.
    */
@@ -4827,9 +5120,17 @@ export class Session<TState = unknown> {
   }
 
   /** Abort the current run and send steering input without clearing queued follow-ups. */
-  async steer({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
+  async steer({
+    content,
+    files,
+    requestContext,
+  }: {
+    content: string;
+    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    requestContext?: RequestContext;
+  }): Promise<void> {
     this.abort();
-    await this.sendMessage({ content, requestContext });
+    await this.sendMessage({ content, files, requestContext });
   }
 
   ensureFollowUpBinding(agent: Agent, resourceId: string, threadId: string) {
@@ -4927,8 +5228,16 @@ export class Session<TState = unknown> {
   }
 
   /** Queue a follow-up through the Agent runtime, or send it immediately while idle. */
-  async followUp({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
-    if (!this.run.isRunning()) return this.sendMessage({ content, requestContext });
+  async followUp({
+    content,
+    files,
+    requestContext,
+  }: {
+    content: string;
+    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    requestContext?: RequestContext;
+  }): Promise<void> {
+    if (!this.run.isRunning()) return this.sendMessage({ content, files, requestContext });
     const threadId = this.thread.getId();
     if (!threadId) return;
     const resourceId = this.identity.getResourceId();
@@ -4952,7 +5261,7 @@ export class Session<TState = unknown> {
       try {
         queued = agent.queueMessage(
           {
-            contents: this.createMessageInput({ content }),
+            contents: this.createMessageInput({ content, files }),
             providerOptions: withMessageAuthor(undefined, readMessageAuthor(requestContext)),
           },
           {
@@ -5088,7 +5397,7 @@ export class Session<TState = unknown> {
     } catch (error) {
       const err = getErrorFromUnknown(error);
       this.emit({ type: 'error', error: err });
-      await this.finishAgentRun('error');
+      if (err.name !== 'ToolDependencyError') await this.finishAgentRun('error');
     }
   }
 
@@ -5314,12 +5623,15 @@ export class Session<TState = unknown> {
     // originating agent so another mode's agent cannot reclaim one by run id.
     // An explicit, authorized run-handoff would be required to transfer ownership.
     const agent =
-      this.machinery.getRunScope(suspension.runId)?.get(SUSPENDED_RUN_AGENT_KEY) ?? this.machinery.getAgent();
+      this.machinery.getRunScope(suspension.runId)?.get(SUSPENDED_RUN_AGENT_KEY) ??
+      this.stream.getCurrentAgent() ??
+      this.machinery.getAgent();
 
     // Remove before resuming so a re-suspend during the resumed run can
     // re-register the same toolCallId without being clobbered by this cleanup.
     // Drop the matching display-state entry too so the UI stops rendering the
     // resolved prompt while any other parked suspensions stay visible.
+    const pendingDisplay = this.displayState.get().pendingSuspensions.get(toolCallId);
     this.suspensions.delete({ toolCallId });
     this.displayState.deletePendingSuspension(toolCallId);
 
@@ -5358,6 +5670,12 @@ export class Session<TState = unknown> {
         },
       });
       await resumedSubscriptionBoundary.promise;
+    } catch (error) {
+      if (getErrorFromUnknown(error).name === 'ToolDependencyError') {
+        this.suspensions.register({ toolCallId, ...suspension });
+        if (pendingDisplay) this.emit({ type: 'tool_suspended', ...pendingDisplay });
+      }
+      throw error;
     } finally {
       resumedSubscriptionBoundary.cancel();
       await this.thread.ensureSubscription(threadId, undefined, requestContext);

@@ -20,6 +20,20 @@
 
 export { ViewerRegistry } from './viewer-registry.js';
 export { handleInputMessage } from './input-handler.js';
+export {
+  BROWSER_SOCKET_PROTOCOL,
+  BROWSER_SOCKET_TOKEN_PREFIX,
+  BROWSER_SOCKET_TOKEN_EXPIRED,
+  openControllerBrowserSocket,
+  readBrowserSocketProtocols,
+} from '../handlers/agent-controller-browser-socket.js';
+export type {
+  BrowserSocketClientMessage,
+  BrowserSocketServerMessage,
+  BrowserSocketTransport,
+  OpenControllerBrowserSocketArgs,
+  OpenedControllerBrowserSocket,
+} from '../handlers/agent-controller-browser-socket.js';
 export type {
   StatusMessage,
   ErrorMessage,

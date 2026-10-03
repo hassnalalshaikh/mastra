@@ -604,6 +604,7 @@ export interface AgentSuspendedEventData {
   args?: Record<string, unknown>;
   suspendPayload?: unknown;
   resumeSchema?: string;
+  waitingFor?: 'user' | 'external';
   type: 'approval' | 'suspension';
 }
 
@@ -660,6 +661,8 @@ export interface RegistryModelListEntry {
  * Registry entry for a single run's non-serializable state
  */
 export interface RunRegistryEntry {
+  /** Configured Agent policy; reconstructed from the registered Agent after restart. */
+  toolPolicy?: import('../../tools/tool-policy').ToolPolicy;
   /**
    * Marks a minimal cross-process placeholder entry (e.g. seeded by
    * @mastra/inngest resume() to carry an abort controller). Placeholder
@@ -681,9 +684,9 @@ export interface RunRegistryEntry {
   tools: Record<string, CoreTool>;
   /**
    * The complete resolved toolset for the run, before any per-step processor
-   * narrowing. Set by the durable LLM step the first time it overwrites `tools`
-   * with a per-step snapshot; `resolveRuntimeDependencies` prefers it over
-   * `tools` when seeding a step (issue #22933).
+   * or tool-policy narrowing. Set by the durable LLM step the first time it
+   * overwrites `tools` with a per-step snapshot; `resolveRuntimeDependencies`
+   * prefers it over `tools` when seeding a step (issue #22933).
    */
   baseTools?: Record<string, CoreTool>;
   /** SaveQueueManager for message persistence (undefined when memory is not configured) */

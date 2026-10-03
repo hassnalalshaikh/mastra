@@ -30,6 +30,299 @@ function createMockProvider(overrides?: {
 }
 
 describe('ScreencastStream', () => {
+  it('bounds high-density capture and drops an in-flight frame after stop', async () => {
+    let receive!: (frame: any) => void;
+    const finish: Array<(value: string) => void> = [];
+    const session = createMockCdpSession({
+      on: vi.fn((_event, handler) => {
+        receive = handler;
+      }),
+      detach: vi.fn(async () => {}),
+    });
+    const capture = new ScreencastStream(
+      {
+        getCdpSession: async () => session,
+        isBrowserRunning: () => true,
+        captureFrame: async () => new Promise(resolve => finish.push(resolve)),
+      },
+      { maxWidth: 1600, maxHeight: 1200, format: 'png' },
+    );
+    const frames = vi.fn();
+    capture.on('frame', frames);
+    await capture.start();
+    for (let id = 0; id < 10; id++)
+      receive({ data: `low-${id}`, sessionId: id, metadata: { deviceWidth: 800, deviceHeight: 600 } });
+    expect(finish).toHaveLength(1);
+    finish[0]('sharp');
+    await vi.waitFor(() => expect(finish).toHaveLength(2));
+    expect(frames).toHaveBeenCalledTimes(1);
+    expect(frames.mock.calls[0][0]).toMatchObject({ data: 'sharp', viewport: { width: 800, height: 600 } });
+    await capture.stop();
+    finish[1]('late');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(frames).toHaveBeenCalledTimes(1);
+  });
+  describe('live then sharp', () => {
+    function sharpFixture(options?: ConstructorParameters<typeof ScreencastStream>[1]) {
+      let receive!: (frame: any) => void;
+      const finish: Array<(value: string) => void> = [];
+      const session = createMockCdpSession({
+        on: vi.fn((_event, handler) => {
+          receive = handler;
+        }),
+        detach: vi.fn(async () => {}),
+      });
+      const stream = new ScreencastStream(
+        {
+          getCdpSession: async () => session,
+          isBrowserRunning: () => true,
+          captureFrame: async () => new Promise(resolve => finish.push(resolve)),
+        },
+        options,
+      );
+      const frames = vi.fn();
+      stream.on('frame', frames);
+      const frame = (data: string, sessionId: number) =>
+        receive({ data, sessionId, metadata: { deviceWidth: 800, deviceHeight: 600 } });
+      const acked = (sessionId: number) =>
+        vi
+          .mocked(session.send)
+          .mock.calls.some(
+            ([method, params]) => method === 'Page.screencastFrameAck' && params?.sessionId === sessionId,
+          );
+      return { stream, finish, frames, frame, acked };
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('does not capture again for the echo of its own capture', async () => {
+      const { stream, finish, frames, frame, acked } = sharpFixture();
+      await stream.start();
+      frame('page', 1);
+      finish[0]('sharp');
+      await vi.waitFor(() => expect(frames).toHaveBeenCalledTimes(1));
+      frame('page', 2);
+      frame('page', 3);
+      expect(finish).toHaveLength(1);
+      expect(frames).toHaveBeenCalledTimes(1);
+      expect(acked(2) && acked(3)).toBe(true);
+      await stream.stop();
+    });
+
+    it('stops capturing when a still page answers each capture with a slightly different live picture', async () => {
+      const { stream, finish, frames, frame } = sharpFixture();
+      await stream.start();
+      frame('view-a', 1);
+      finish[0]('sharp');
+      await vi.waitFor(() => expect(frames).toHaveBeenCalledTimes(1));
+      frame('view-b', 2);
+      await new Promise(resolve => setTimeout(resolve, 350));
+      expect(finish).toHaveLength(2);
+      finish[1]('sharp');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      frame('view-a', 3);
+      frame('view-b', 4);
+      expect(finish).toHaveLength(2);
+      expect(frames).toHaveBeenCalledTimes(1);
+      frame('view-c', 5);
+      await new Promise(resolve => setTimeout(resolve, 350));
+      expect(finish).toHaveLength(3);
+      finish[2]('changed');
+      await vi.waitFor(() => expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['sharp', 'changed']));
+      await stream.stop();
+    });
+
+    it('lets user input skip the capture in progress and forwards the waiting picture live', async () => {
+      const { stream, finish, frames, frame, acked } = sharpFixture();
+      await stream.start();
+      frame('animation-1', 1);
+      frame('animation-2', 2);
+      expect(finish).toHaveLength(1);
+      expect(acked(1) || acked(2)).toBe(false);
+      stream.markInteractive();
+      expect(acked(1) && acked(2)).toBe(true);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['animation-2']);
+      finish[0]('stale');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['animation-2']);
+      await stream.stop();
+    });
+
+    it('paces sharp pictures of a page that keeps changing while nobody touches it', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame, acked } = sharpFixture();
+      await stream.start();
+      frame('animation-1', 1);
+      finish[0]('sharp-1');
+      await vi.advanceTimersByTimeAsync(0);
+      frame('animation-2', 2);
+      frame('animation-3', 3);
+      expect(finish).toHaveLength(1);
+      expect(acked(3)).toBe(false);
+      await vi.advanceTimersByTimeAsync(332);
+      expect(finish).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(finish).toHaveLength(2);
+      finish[1]('sharp-3');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['sharp-1', 'sharp-3']);
+      await stream.stop();
+    });
+
+    it('ends the pacing wait at once when the user drives the page', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame, acked } = sharpFixture();
+      await stream.start();
+      frame('animation-1', 1);
+      finish[0]('sharp-1');
+      await vi.advanceTimersByTimeAsync(0);
+      frame('animation-2', 2);
+      stream.markInteractive();
+      expect(acked(2)).toBe(true);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['sharp-1', 'animation-2']);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(finish).toHaveLength(2);
+      await stream.stop();
+    });
+
+    it('keeps the sharp picture when the capture echo arrives inside the input window', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture();
+      await stream.start();
+      stream.markInteractive();
+      frame('scroll', 1);
+      await vi.advanceTimersByTimeAsync(400);
+      finish[0]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      frame('scroll-echo', 2);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll', 'sharp']);
+      await vi.advanceTimersByTimeAsync(333);
+      expect(finish).toHaveLength(2);
+      finish[1]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll', 'sharp']);
+      await stream.stop();
+    });
+
+    it('forwards live pictures while the user drives the page, then one sharp picture', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture();
+      await stream.start();
+      stream.markInteractive();
+      frame('scroll-1', 1);
+      frame('scroll-2', 2);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll-1', 'scroll-2']);
+      expect(finish).toHaveLength(0);
+      // The pictures stop at 150 ms, but the input was 400 ms ago only at 400 ms.
+      await vi.advanceTimersByTimeAsync(399);
+      expect(finish).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(finish).toHaveLength(1);
+      finish[0]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['scroll-1', 'scroll-2', 'sharp']);
+      await stream.stop();
+    });
+
+    it('sends only live pictures while the user types, then one sharp picture when the typing stops', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture();
+      await stream.start();
+      for (let key = 1; key <= 8; key++) {
+        stream.markInteractive();
+        frame(`key-${key}`, key);
+        // A human gap between keys is longer than the 150 ms picture settle time.
+        await vi.advanceTimersByTimeAsync(250);
+      }
+      expect(finish).toHaveLength(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(Array.from({ length: 8 }, (_, i) => `key-${i + 1}`));
+      await vi.advanceTimersByTimeAsync(149);
+      expect(finish).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(finish).toHaveLength(1);
+      finish[0]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.at(-1)?.[0].data).toBe('sharp');
+      await stream.stop();
+    });
+
+    it('marks a sharp picture with its own format and leaves live pictures in the screencast format', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture({
+        format: 'jpeg',
+        sharp: { format: 'webp', quality: 80 },
+      });
+      await stream.start();
+      stream.markInteractive();
+      frame('live', 1);
+      await vi.advanceTimersByTimeAsync(400);
+      finish[0]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => [f.data, f.format])).toEqual([
+        ['live', undefined],
+        ['sharp', 'webp'],
+      ]);
+      await stream.stop();
+    });
+
+    it('drops a sharp picture that finishes after a newer live picture', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frames, frame } = sharpFixture();
+      await stream.start();
+      frame('before', 1);
+      expect(finish).toHaveLength(1);
+      stream.markInteractive();
+      frame('after', 2);
+      finish[0]('stale');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['after']);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(finish).toHaveLength(2);
+      finish[1]('sharp');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames.mock.calls.map(([f]) => f.data)).toEqual(['after', 'sharp']);
+      await stream.stop();
+    });
+
+    it('returns to sharp pictures when the user stops, and cancels the pending one on stop', async () => {
+      vi.useFakeTimers();
+      const { stream, finish, frame } = sharpFixture();
+      await stream.start();
+      stream.markInteractive();
+      frame('live', 1);
+      await stream.stop();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(finish).toHaveLength(0);
+      await stream.start();
+      frame('animated', 2);
+      expect(finish).toHaveLength(1);
+      await stream.stop();
+    });
+  });
+
+  it('serializes tab reconnects and releases a capture stopped while reconnecting', async () => {
+    const first = createMockCdpSession({ detach: vi.fn(async () => {}) });
+    const second = createMockCdpSession({ detach: vi.fn(async () => {}) });
+    let connect!: (session: CdpSessionLike) => void;
+    const pending = new Promise<CdpSessionLike>(resolve => {
+      connect = resolve;
+    });
+    const getCdpSession = vi.fn().mockResolvedValueOnce(first).mockReturnValueOnce(pending);
+    const capture = new ScreencastStream({ getCdpSession, isBrowserRunning: () => true });
+    await capture.start();
+    const reconnect = capture.reconnect();
+    const again = capture.reconnect();
+    const stopped = capture.stop();
+    connect(second);
+    await Promise.all([reconnect, again, stopped]);
+    expect(getCdpSession).toHaveBeenCalledTimes(2);
+    expect(capture.isActive()).toBe(false);
+    expect(first.detach).toHaveBeenCalledTimes(1);
+    expect(second.detach).toHaveBeenCalledTimes(1);
+  });
   let provider: CdpSessionProvider;
   let stream: ScreencastStream;
 

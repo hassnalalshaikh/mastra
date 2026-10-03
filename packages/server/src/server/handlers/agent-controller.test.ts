@@ -453,7 +453,12 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'change course', requestContext });
+      expect(spy).toHaveBeenCalledWith({
+        content: 'change course',
+        files: undefined,
+        followUpId: undefined,
+        requestContext,
+      });
     });
 
     it('forwards requestContext to session.followUp', async () => {
@@ -469,7 +474,28 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', requestContext });
+      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', files: undefined, requestContext });
+    });
+
+    // 1.74 port of the fork's attached steer/follow-up case: 1.74 acknowledges these
+    // commands and runs them as background session work, so a later refusal is an
+    // error event (covered above), not a rejected route.
+    it.each([
+      ['steer', STEER_AGENT_CONTROLLER_SESSION_ROUTE],
+      ['followUp', FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE],
+    ] as const)('%s validates and forwards files', async (method, route) => {
+      const session = await getRouteSession(`attached-${method}`);
+      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+      expect(route.bodySchema!.safeParse({ message: '', files }).success).toBe(true);
+      expect(
+        route.bodySchema!.safeParse({ message: '', files: [{ ...files[0], data: 'a'.repeat(14 * 1024 * 1024 + 1) }] })
+          .success,
+      ).toBe(false);
+      const spy = vi.spyOn(session, method).mockResolvedValue(undefined);
+      await expect(
+        route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
+      ).resolves.toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ content: '', files }));
     });
 
     it('forwards requestContext to session.respondToToolApproval', async () => {
@@ -754,6 +780,54 @@ describe('agent-controller routes', () => {
       // as plain properties so JSON.stringify doesn't send `"error": {}`.
       expect(received.error).toEqual({ name: 'Error', message: 'model quota exhausted' });
       expect(JSON.parse(JSON.stringify(received)).error.message).toBe('model quota exhausted');
+      expect(received.errorType).toBe('provider');
+    });
+
+    it('preserves only dependency recovery fields on the controller event stream', async () => {
+      const stream = (await STREAM_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-err',
+        abortSignal: new AbortController().signal,
+      } as any)) as ReadableStream<unknown>;
+
+      const reader = stream.getReader();
+
+      const controller = mastra.getAgentController('code')!;
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'user-err', id: 'user-err', ownerId: 'code' });
+      session.emit({
+        type: 'error',
+        error: Object.assign(new Error('Load the skill'), {
+          name: 'ToolDependencyError',
+          code: 'MISSING_REQUIRED_SKILL',
+          tool: 'protected_tool',
+          missingSkills: ['required'],
+          retryable: true,
+          privateField: 'not-on-wire',
+        }),
+        errorType: 'provider',
+      } as any);
+
+      let received: any;
+      for (let i = 0; i < 10 && received === undefined; i++) {
+        const { value } = await reader.read();
+        if (value && typeof value === 'object' && (value as any).type === 'error') received = value;
+      }
+      await reader.cancel();
+
+      expect(received).toBeDefined();
+      // Error's message/name are non-enumerable; the wire event must carry them
+      // as plain properties so JSON.stringify doesn't send `"error": {}`.
+      expect(received.error).toEqual({
+        name: 'ToolDependencyError',
+        message: 'Load the skill',
+        code: 'MISSING_REQUIRED_SKILL',
+        tool: 'protected_tool',
+        missingSkills: ['required'],
+        retryable: true,
+      });
+      expect(JSON.parse(JSON.stringify(received)).error.message).toBe('Load the skill');
       expect(received.errorType).toBe('provider');
     });
 

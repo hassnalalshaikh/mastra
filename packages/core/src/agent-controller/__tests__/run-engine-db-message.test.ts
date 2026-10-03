@@ -57,6 +57,76 @@ function assistantStarts(events: AgentControllerEvent[]) {
   );
 }
 
+// 1.74 port: createStreamState takes (threadId, runId); these cases bind only the run.
+describe('SessionRunEngine answer text events', () => {
+  const requestContext = () => new RequestContext();
+
+  it('emits immutable run-bound text deltas before completion, excluding reasoning and tools', async () => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState(undefined, 'run-1');
+    const ctx = requestContext();
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'step-start', runId: 'run-1', payload: { messageId: 'answer-1' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'reasoning-start', runId: 'run-1', payload: { id: 'r1' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'reasoning-delta', runId: 'run-1', payload: { id: 'r1', text: 'private thought' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'tool-call',
+        runId: 'run-1',
+        payload: { toolCallId: 'tc1', toolName: 'read', args: { text: 'tool input' } },
+      }),
+      ctx,
+    );
+    await engine.processStreamChunk(state, chunk({ type: 'text-start', runId: 'run-1', payload: { id: 't1' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-delta', runId: 'run-1', payload: { id: 't1', text: 'Hello' } }),
+      ctx,
+    );
+    const first = events.find(event => event.type === 'text_delta');
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-delta', runId: 'run-1', payload: { id: 't1', text: ' world' } }),
+      ctx,
+    );
+    expect(first).toEqual({ type: 'text_delta', runId: 'run-1', messageId: 'answer-1', textDelta: 'Hello' });
+    expect(events.filter(event => event.type === 'text_delta')).toEqual([
+      first,
+      { type: 'text_delta', runId: 'run-1', messageId: 'answer-1', textDelta: ' world' },
+    ]);
+    expect(events.some(event => event.type === 'agent_end')).toBe(false);
+  });
+
+  it.each([null, 'run-1'])('does not emit text with unknown or mismatched stream identity %s', async runId => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState(undefined, runId);
+    const ctx = requestContext();
+    await engine.processStreamChunk(state, chunk({ type: 'text-start', payload: { id: 't1' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'text-delta',
+        ...(runId ? { runId: 'other-run' } : {}),
+        payload: { id: 't1', text: 'Do not forward' },
+      }),
+      ctx,
+    );
+    expect(events.filter(event => event.type === 'text_delta')).toEqual([]);
+  });
+});
+
 describe('SessionRunEngine compact message lifecycle', () => {
   it('keeps delayed tool events and rotated messages on their originating thread', async () => {
     const { engine, events, session } = createHarness();
@@ -387,4 +457,101 @@ describe('SessionRunEngine compact message lifecycle', () => {
     ]);
     expect(events.filter(event => event.type === 'message_end')).toContainEqual({ type: 'message_end', id: 'msg-1' });
   });
+});
+
+// 1.74 port: createStreamState takes (threadId, runId), and a dispatched background
+// task reports its placeholder with native `backgroundTask.status: 'running'` metadata.
+const requestContext = () => new RequestContext();
+
+describe('truthful native tool lifecycle', () => {
+  it('preparation stays distinct from execution and the terminal outcome keeps run identity', async () => {
+    const { engine, session, events } = createHarness();
+    const state = engine.createStreamState(undefined, 'run-exact');
+    const ctx = requestContext();
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tool-call', payload: { toolCallId: 'task', toolName: 'work', args: { visible: true } } }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('running');
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'tool-execution-start',
+        payload: { runId: 'run-exact', args: { toolCallId: 'task', toolName: 'work', args: { visible: true } } },
+      }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('executing');
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tool-result', payload: { toolCallId: 'task', toolName: 'work', result: 'done' } }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('completed');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_end',
+        runId: 'run-exact',
+        toolCallId: 'task',
+        toolName: 'work',
+        messageId: state.currentMessage.id,
+        completedAt: expect.any(String),
+        isError: false,
+      }),
+    );
+  });
+
+  it('cancelled active work has one failed outcome, never a successful completion', async () => {
+    const { session, events } = createHarness();
+    session.emit({ type: 'tool_execution_start', runId: 'run-cancel', toolCallId: 'task', toolName: 'work', args: {} });
+    await session.finishAgentRun('aborted');
+    await session.finishAgentRun('aborted');
+    const outcomes = events.filter(event => event.type === 'tool_end');
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ toolCallId: 'task', isError: true, cancelled: true });
+  });
+});
+
+it('a background dispatch stays active and announces only its real final result', async () => {
+  const { engine, session, events } = createHarness();
+  const state = engine.createStreamState(undefined, 'background-run');
+  const ctx = requestContext();
+  await engine.processStreamChunk(
+    state,
+    chunk({ type: 'tool-call', payload: { toolCallId: 'bg', toolName: 'work', args: {} } }),
+    ctx,
+  );
+  await engine.processStreamChunk(
+    state,
+    chunk({
+      type: 'tool-execution-start',
+      payload: { runId: 'background-run', args: { toolCallId: 'bg', toolName: 'work' } },
+    }),
+    ctx,
+  );
+  await engine.processStreamChunk(
+    state,
+    chunk({
+      type: 'tool-result',
+      payload: {
+        toolCallId: 'bg',
+        toolName: 'work',
+        result: 'Dispatched',
+        providerMetadata: { mastra: { backgroundTask: { taskId: 'bg-task', status: 'running' } } },
+      },
+    }),
+    ctx,
+  );
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(0);
+  await session.finishAgentRun('complete');
+  session.emit({ type: 'agent_start' });
+  expect(session.displayState.get().activeTools.get('bg')).toMatchObject({ status: 'executing', background: true });
+  await engine.processStreamChunk(
+    state,
+    chunk({ type: 'tool-result', payload: { toolCallId: 'bg', toolName: 'work', result: 'Actual result' } }),
+    ctx,
+  );
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(1);
+  expect(session.displayState.get().activeTools.get('bg')).toMatchObject({ status: 'completed', background: false });
 });

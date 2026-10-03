@@ -315,6 +315,56 @@ describe('TrailingAssistantGuard', () => {
     ]);
   });
 
+  it.each([
+    ['Gemini', gemini3, undefined],
+    [
+      'Anthropic structured output',
+      { provider: 'anthropic.messages', modelId: 'claude-opus-4-6' },
+      { schema: z.object({ answer: z.string() }) },
+    ],
+  ] as const)('preserves a denied tool result without adding a continuation for %s', (_, model, structuredOutput) => {
+    const messageList = new MessageList({ threadId: 'test-thread' });
+    messageList.add(createMessage('user', 'question'), 'input');
+    messageList.add(
+      {
+        ...createMessage('assistant', 'denied tool'),
+        content: {
+          format: 2,
+          parts: [
+            { type: 'text', text: 'Let me check.' },
+            {
+              type: 'tool-invocation',
+              toolInvocation: {
+                state: 'output-denied',
+                toolCallId: 'denied-call',
+                toolName: 'get-weather',
+                args: { location: 'SF' },
+                approval: { id: 'approval-1', approved: false, reason: 'Do not run it.' },
+              },
+            },
+          ],
+        },
+      },
+      'input',
+    );
+    const prompt = messageList.get.all.aiV5.prompt();
+    expect(prompt.at(-1)).toMatchObject({
+      role: 'tool',
+      content: [{ type: 'tool-result', toolCallId: 'denied-call', output: { type: 'text', value: 'Do not run it.' } }],
+    });
+    expect(
+      new TrailingAssistantGuard().processInputStep(
+        makeArgs({
+          messages: messageList.get.all.db(),
+          messageList,
+          model,
+          structuredOutput,
+        }),
+      ),
+    ).toBeUndefined();
+    expect(messageList.get.all.aiV5.prompt()).toEqual(prompt);
+  });
+
   it('does not append a message when the last message is not from the assistant', () => {
     const guard = new TrailingAssistantGuard();
 

@@ -35,10 +35,18 @@ import type { ToolOptions } from '../../utils';
 import { isZodObject, safeExtendZodObject } from '../../utils/zod-utils';
 
 import type { SuspendOptions } from '../../workflows';
+import { getSuspensionWaitingFor } from '../../workflows/step';
 import { markBuilderValidatedInput } from '../builder-validation-context';
 import { createToolObserve } from '../observe';
 import { captureToolInput, restoreToolInput, TOOL_INPUT_STATE } from '../resumable-input';
 import { ToolStream } from '../stream';
+import { notifyToolExecutionStart, TOOL_EXECUTION_START } from '../tool-execution-events';
+import {
+  checkExecutionPolicy,
+  isPolicyExecutor,
+  markPolicyExecutor,
+  TOOL_EXECUTION_POLICY,
+} from '../tool-policy-execution';
 import type {
   CoreTool,
   McpMetadata,
@@ -644,12 +652,21 @@ export class CoreToolBuilder extends MastraBase {
         let suspendData = null;
 
         if (isVercelTool(tool)) {
-          // Internal accepted-input state never reaches an AI SDK tool.
-          const { [TOOL_INPUT_STATE]: _toolInputState, ...publicOptions } = execOptions ?? {};
+          // Internal accepted-input, policy and start state never reach an AI SDK tool.
+          const {
+            [TOOL_INPUT_STATE]: _toolInputState,
+            [TOOL_EXECUTION_POLICY]: _toolPolicy,
+            [TOOL_EXECUTION_START]: _executionStart,
+            ...publicOptions
+          } = execOptions ?? {};
           // Handle Vercel tools (AI SDK tools)
           result = await executeWithContext({
             span: contextSpan,
-            fn: async () => tool?.execute?.(args, (execOptions ? publicOptions : execOptions) as ToolExecutionOptions),
+            fn: async () => {
+              await notifyToolExecutionStart(execOptions, args);
+              // Keep 1.74's arguments-only call shape when no options were passed.
+              return tool?.execute?.(args, (execOptions ? publicOptions : execOptions) as ToolExecutionOptions);
+            },
           });
         } else {
           // Handle Mastra tools - wrap mastra instance with tracing context for context propagation
@@ -697,6 +714,10 @@ export class CoreToolBuilder extends MastraBase {
             memory: options.memory,
             runId: options.runId,
             requestContext: mergeRequestContexts(options.requestContext, execOptions.requestContext),
+            ...(execOptions[TOOL_EXECUTION_POLICY]
+              ? { [TOOL_EXECUTION_POLICY]: execOptions[TOOL_EXECUTION_POLICY] }
+              : {}),
+            ...(execOptions[TOOL_EXECUTION_START] ? { [TOOL_EXECUTION_START]: execOptions[TOOL_EXECUTION_START] } : {}),
             actor: execOptions.actor,
             // Workspace for file operations and command execution
             // Execution-time workspace (from prepareStep/processInputStep) takes precedence over build-time workspace
@@ -717,6 +738,7 @@ export class CoreToolBuilder extends MastraBase {
             abortSignal: execOptions.abortSignal,
             background: execOptions.background,
             suspend: (args: any, suspendOptions?: SuspendOptions) => {
+              getSuspensionWaitingFor(suspendOptions);
               suspendData = args;
               const newSuspendOptions = {
                 ...(suspendOptions ?? {}),
@@ -818,6 +840,10 @@ export class CoreToolBuilder extends MastraBase {
               // createExecute already validated (or restored) this input even
               // when the provider needs no compatibility layer.
               markBuilderValidatedInput(toolContext);
+              if (!isPolicyExecutor(tool?.execute)) {
+                await notifyToolExecutionStart(execOptions, executionArgs);
+                delete toolContext[TOOL_EXECUTION_START];
+              }
               return tool?.execute?.(executionArgs, toolContext);
             },
           });
@@ -863,7 +889,7 @@ export class CoreToolBuilder extends MastraBase {
       }
     };
 
-    return async (args: unknown, execOptions?: MastraToolInvocationOptions) => {
+    return markPolicyExecutor(async (args: unknown, execOptions?: MastraToolInvocationOptions) => {
       let logger = options.logger || this.logger;
 
       // Create tool span early so validation failures are always observable.
@@ -975,6 +1001,12 @@ export class CoreToolBuilder extends MastraBase {
         return await new Promise((resolve, reject) => {
           setImmediate(async () => {
             try {
+              const decision = await checkExecutionPolicy(execOptions, args);
+              if (decision?.allowed === false) {
+                toolSpan?.end({ output: decision.error, attributes: { success: false } });
+                resolve(decision.error);
+                return;
+              }
               const result = await execFunction(args, execOptions!, toolSpan);
               resolve(result);
             } catch (err) {
@@ -1001,7 +1033,7 @@ export class CoreToolBuilder extends MastraBase {
         logger.trackException(mastraError, { ...logData, ...rest, model: logModelObject });
         throw mastraError;
       }
-    };
+    });
   }
 
   buildV5() {

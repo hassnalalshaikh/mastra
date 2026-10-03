@@ -1428,19 +1428,6 @@ export class BackgroundTaskManager {
 
     try {
       if (status === 'completed') {
-        ctx.onChunk?.({
-          type: 'background-task-completed',
-          payload: {
-            taskId: task.id,
-            toolName: task.toolName,
-            toolCallId: task.toolCallId,
-            runId: task.runId,
-            result: extras.result,
-            completedAt: task.completedAt!,
-            agentId: task.agentId,
-          },
-        });
-
         await ctx.onResult?.({
           runId: task.runId,
           taskId: task.id,
@@ -1455,25 +1442,25 @@ export class BackgroundTaskManager {
           startedAt: task.startedAt!,
         });
 
+        ctx.onChunk?.({
+          type: 'background-task-completed',
+          payload: {
+            taskId: task.id,
+            toolName: task.toolName,
+            toolCallId: task.toolCallId,
+            runId: task.runId,
+            result: extras.result,
+            completedAt: task.completedAt!,
+            agentId: task.agentId,
+          },
+        });
+
         // Globals (this.config.onTaskComplete / onTaskFailed) fire from
         // handleResult via pubsub so they run once per subscribing process
         // — in distributed deployments that's the dispatching process, which
         // is where observers/metrics are typically wired.
         await ctx.onComplete?.(task);
       } else {
-        ctx.onChunk?.({
-          type: 'background-task-failed',
-          payload: {
-            taskId: task.id,
-            toolName: task.toolName,
-            toolCallId: task.toolCallId,
-            runId: task.runId,
-            error: extras.error ?? { message: 'Unknown error' },
-            completedAt: task.completedAt!,
-            agentId: task.agentId,
-          },
-        });
-
         await ctx.onResult?.({
           runId: task.runId,
           taskId: task.id,
@@ -1486,6 +1473,19 @@ export class BackgroundTaskManager {
           status: 'failed',
           completedAt: task.completedAt!,
           startedAt: task.startedAt!,
+        });
+
+        ctx.onChunk?.({
+          type: 'background-task-failed',
+          payload: {
+            taskId: task.id,
+            toolName: task.toolName,
+            toolCallId: task.toolCallId,
+            runId: task.runId,
+            error: extras.error ?? { message: 'Unknown error' },
+            completedAt: task.completedAt!,
+            agentId: task.agentId,
+          },
         });
 
         // See comment above — globals are handled exclusively by
@@ -1554,19 +1554,6 @@ export class BackgroundTaskManager {
 
     try {
       if (event.type === 'task.completed') {
-        ctx?.onChunk?.({
-          type: 'background-task-completed',
-          payload: {
-            taskId,
-            toolName,
-            toolCallId,
-            runId,
-            result: event.data.result,
-            completedAt: task.completedAt,
-            agentId: task.agentId,
-          },
-        });
-
         await ctx?.onResult?.({
           runId,
           taskId,
@@ -1579,6 +1566,19 @@ export class BackgroundTaskManager {
           status: 'completed',
           completedAt: task.completedAt,
           startedAt: task.startedAt!,
+        });
+
+        ctx?.onChunk?.({
+          type: 'background-task-completed',
+          payload: {
+            taskId,
+            toolName,
+            toolCallId,
+            runId,
+            result: event.data.result,
+            completedAt: task.completedAt,
+            agentId: task.agentId,
+          },
         });
 
         await Promise.all([
@@ -1596,19 +1596,6 @@ export class BackgroundTaskManager {
       }
 
       if (event.type === 'task.failed') {
-        ctx?.onChunk?.({
-          type: 'background-task-failed',
-          payload: {
-            taskId,
-            toolName,
-            toolCallId,
-            runId,
-            error: event.data.error,
-            completedAt: task.completedAt,
-            agentId: task.agentId,
-          },
-        });
-
         await ctx?.onResult?.({
           runId,
           taskId,
@@ -1621,6 +1608,19 @@ export class BackgroundTaskManager {
           status: 'failed',
           completedAt: task.completedAt,
           startedAt: task.startedAt!,
+        });
+
+        ctx?.onChunk?.({
+          type: 'background-task-failed',
+          payload: {
+            taskId,
+            toolName,
+            toolCallId,
+            runId,
+            error: event.data.error,
+            completedAt: task.completedAt,
+            agentId: task.agentId,
+          },
         });
 
         await Promise.all([

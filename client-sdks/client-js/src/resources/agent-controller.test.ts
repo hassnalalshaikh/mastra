@@ -8,6 +8,25 @@ import type { AgentControllerEvent, KnownAgentControllerEvent } from './agent-co
 global.fetch = vi.fn();
 
 describe('AgentController Resource', () => {
+  it('recognizes native run-bound answer text without widening unknown events', () => {
+    const event: AgentControllerEvent = {
+      type: 'text_delta',
+      runId: 'run-1',
+      messageId: 'answer-1',
+      textDelta: 'Hello',
+    };
+    expect(isKnownAgentControllerEvent(event)).toBe(true);
+    expect(isKnownAgentControllerEvent({ type: 'unknown_future_event' })).toBe(false);
+    expect(
+      isKnownAgentControllerEvent({
+        type: 'tool_execution_start',
+        runId: 'run',
+        toolCallId: 'tool',
+        toolName: 'work',
+        args: {},
+      }),
+    ).toBe(true);
+  });
   let client: MastraClient;
   const clientOptions = { baseUrl: 'http://localhost:4111' };
 
@@ -87,6 +106,21 @@ describe('AgentController Resource', () => {
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body as string)).toEqual({ message: 'hello' });
   });
+
+  it.each(['followUp', 'steer'] as const)(
+    '%s forwards attached-only messages and text through the normal command route',
+    async method => {
+      const session = client.getAgentController('code').session('user-1');
+      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+      mockJson({ ok: true });
+      await session[method]({ content: '', files });
+      expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: '', files });
+      expect(lastCall()[0]).toContain(method === 'steer' ? '/steer' : '/follow-up');
+      mockJson({ ok: true });
+      await session[method]('Still supports text');
+      expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: 'Still supports text' });
+    },
+  );
 
   it('sends a message with file attachments', async () => {
     mockJson({ ok: true });
@@ -398,6 +432,31 @@ describe('AgentController Resource', () => {
     expect(agentControllerMessageText(messageStart.message)).toBe('');
     expect(messageUpdate).toEqual({ type: 'message_update', id: 'm1', event: { type: 'text-delta', delta: 'hi' } });
     expect(messageEnd).toEqual({ type: 'message_end', id: 'm1' });
+  });
+
+  it('preserves typed dependency recovery fields from native error SSE', async () => {
+    const error = {
+      name: 'ToolDependencyError',
+      message: 'Load the skill',
+      code: 'MISSING_REQUIRED_SKILL',
+      tool: 'protected_tool',
+      missingSkills: ['required'],
+      retryable: true,
+    };
+    mockSse([`data: ${JSON.stringify({ type: 'error', error })}\n\n`]);
+    const received: KnownAgentControllerEvent[] = [];
+    const sub = await client
+      .getAgentController('code')
+      .session('user-1')
+      .subscribe({
+        onEvent: event => {
+          if (isKnownAgentControllerEvent(event)) received.push(event);
+        },
+      });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    sub.unsubscribe();
+    const event = received.find(event => event.type === 'error');
+    expect(event?.error).toEqual(error);
   });
 
   it('hydrates thread timestamps from SSE events', async () => {

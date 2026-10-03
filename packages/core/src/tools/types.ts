@@ -334,6 +334,8 @@ export interface MCPToolExecutionContext {
  */
 export type MastraToolInvocationOptions = ToolInvocationOptions &
   import('./resumable-input').ToolInputOptions &
+  import('./tool-policy-execution').ToolPolicyInvocationOptions &
+  import('./tool-execution-events').ToolExecutionStartOptions &
   Partial<ObservabilityContext> & {
     suspend?: (suspendPayload: any, suspendOptions?: SuspendOptions) => Promise<any>;
     resumeData?: any;

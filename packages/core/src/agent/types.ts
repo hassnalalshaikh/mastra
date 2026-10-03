@@ -64,6 +64,7 @@ import type {
 } from '../stream/types';
 import type { ToolAction, ToolHooks, VercelTool, VercelToolV5 } from '../tools';
 import type { WebSearchToolPlaceholder } from '../tools/builtin/web-search';
+import type { ToolPolicy } from '../tools/tool-policy';
 import type { ToolPayloadTransformPolicy } from '../tools/types';
 import type { DynamicArgument } from '../types';
 import type { MastraVoice } from '../voice';
@@ -830,6 +831,8 @@ interface AgentConfigBase<
    * If a workspace also defines tool hooks, workspace hooks wrap the workspace tool first, then agent hooks wrap the exposed tool call.
    */
   hooks?: ToolHooks;
+  /** Mandatory execution policy. Per-run hooks cannot override this policy. */
+  toolPolicy?: ToolPolicy;
   /**
    * Workflows that the agent can execute. Can be static or dynamically resolved.
    */
@@ -960,7 +963,7 @@ interface AgentConfigBase<
    * When configured, browser tools are automatically injected into the agent.
    * Accessible via agent.browser for server-side features like screencast.
    */
-  browser?: MastraBrowser;
+  browser?: DynamicArgument<MastraBrowser | undefined, TRequestContext>;
   /**
    * Voice settings for speech input and output. Can be provided statically or resolved dynamically per request.
    *

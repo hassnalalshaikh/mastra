@@ -18,9 +18,12 @@ import {
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
 import { createToolInputState, persistedToolInput, TOOL_INPUT_STATE } from '../../../tools/resumable-input';
 import type { ToolInputOptions } from '../../../tools/resumable-input';
+import { executionStartHook } from '../../../tools/tool-execution-events';
+import { executeToolWithPolicy, isToolPolicyRejection } from '../../../tools/tool-policy-execution';
 import { getToolTitle } from '../../../tools/tool-title';
+
 import type { MastraToolInvocationOptions } from '../../../tools/types';
-import { resolveToolOutputValidationSchema, validateToolOutput } from '../../../tools/validation';
+import { isValidationError, resolveToolOutputValidationSchema, validateToolOutput } from '../../../tools/validation';
 import { ensureSerializable } from '../../../utils';
 import type { SuspendOptions } from '../../../workflows/step';
 import { createStep } from '../../../workflows/workflow';
@@ -63,6 +66,7 @@ import { serializeToolError, ToolNotFoundError } from '../errors';
 import { toolCallInputSchema, toolCallOutputSchema } from '../schema';
 import {
   EAGER_TOOL_ABORT_SIGNAL,
+  EAGER_EXECUTION_STARTED,
   EAGER_TOOL_BAILOUT,
   EAGER_TOOL_EXECUTION_MARKER,
   eagerToolCallAlreadyAnnouncedInput,
@@ -80,6 +84,7 @@ type AddToolMetadataOptions = {
   parentToolName?: string;
   parentArgs?: unknown;
   resumeSchema: string;
+  waitingFor?: 'user' | 'external';
   suspendedToolRunId?: string;
   metadata?: Record<string, unknown>;
 } & (
@@ -110,6 +115,8 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
   requireToolApproval: requireToolApprovalFromFactory,
   toolApprovalPolicy,
   toolApprovalContext,
+  toolPolicy,
+  requestContext: policyRequestContext,
   actor,
   mcp,
 }: OuterLLMRun<Tools, OUTPUT>) {
@@ -148,6 +155,19 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
       // Stashed here and consumed further down, where the suspension helper's dependencies
       // (`args`, `transformChunk`, `flushMessagesBeforeSuspension`) exist.
       let eagerSuspensionIntent: EagerSuspensionIntent | undefined;
+      // Admitted execution is announced by the iteration that owns the call. An eager
+      // attempt stays silent so the stream order matches the ordinary foreach; its
+      // adopting iteration announces the start once the attempt's body has run.
+      const announceExecutionStart = async () => {
+        const chunk = {
+          type: 'tool-execution-start' as const,
+          runId,
+          from: ChunkFrom.AGENT,
+          payload: { runId, args: { toolCallId: inputData.toolCallId, toolName: inputData.toolName } },
+        };
+        safeEnqueue(controller, chunk);
+        await options?.onChunk?.(chunk);
+      };
       if (!isEagerExecution) {
         // Take rather than read: adoption is exactly-once, so a later iteration that
         // reuses this toolCallId executes again instead of replaying a stale result.
@@ -156,7 +176,11 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         );
         if (eagerExecution) {
           try {
-            return (await eagerExecution) as any;
+            const adopted = await eagerExecution;
+            if ((adopted as Record<symbol, unknown> | undefined)?.[EAGER_EXECUTION_STARTED]) {
+              await announceExecutionStart();
+            }
+            return adopted as any;
           } catch (error) {
             // The eager attempt produced nothing adoptable: it was cancelled while
             // still queued, or it turned out to need suspension. Run it normally
@@ -165,6 +189,8 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             if (!eagerToolCallDidNotExecute(error)) throw error;
             inputAlreadyAnnouncedEagerly = eagerToolCallAlreadyAnnouncedInput(error);
             eagerSuspensionIntent = eagerToolCallSuspensionIntent(error);
+            // The eager body ran before it requested suspension.
+            if (eagerSuspensionIntent) await announceExecutionStart();
           }
         }
       }
@@ -199,6 +225,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         parentArgs,
         suspendPayload,
         resumeSchema,
+        waitingFor,
         type,
         suspendedToolRunId,
         metadata: toolStateTransformMetadata,
@@ -240,7 +267,9 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           // from `runId` directly; legacy entries with `parentRunId` keep working.
           runId,
           ...(suspendedToolRunId && suspendedToolRunId !== runId ? { delegatedRunId: suspendedToolRunId } : {}),
-          ...(type === 'suspension' ? { suspendPayload: transformedSuspendPayload } : {}),
+          ...(type === 'suspension'
+            ? { suspendPayload: transformedSuspendPayload, waitingFor: waitingFor ?? 'user' }
+            : {}),
           resumeSchema,
           ...(toolStateTransformMetadata ? { metadata: toolStateTransformMetadata } : {}),
         };
@@ -249,10 +278,23 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           (message.content?.parts ?? []).some(
             part => part.type === 'tool-invocation' && part.toolInvocation.toolCallId === toolCallId,
           );
+        // Keep the native wait kind on the invocation after pending metadata is
+        // removed during resume. Display placement must not depend on tool names.
+        const retainWaitKind = (message: MastraDBMessage) => {
+          if (type !== 'suspension') return;
+          for (const part of message.content.parts) {
+            if (part.type !== 'tool-invocation' || part.toolInvocation.toolCallId !== toolCallId) continue;
+            part.providerMetadata = {
+              ...part.providerMetadata,
+              mastra: { ...part.providerMetadata?.mastra, toolSuspensionWaitingFor: waitingFor ?? 'user' },
+            };
+          }
+        };
 
         const responseMessages = messageList.get.response.db();
         const responseMessage = [...responseMessages].reverse().find(carriesToolCall);
         if (responseMessage?.content) {
+          retainWaitKind(responseMessage);
           const metadata =
             typeof responseMessage.content.metadata === 'object' && responseMessage.content.metadata !== null
               ? (responseMessage.content.metadata as Record<string, any>)
@@ -277,6 +319,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           typeof target.content.metadata === 'object' && target.content.metadata !== null
             ? (target.content.metadata as Record<string, any>)
             : {};
+        retainWaitKind(target);
         const existingEntries = (existingMetadata[metadataKey] ?? {}) as Record<string, any>;
         const updated = messageList.updateMessageMetadataByToolCallId(toolCallId, {
           [metadataKey]: { ...existingEntries, [toolCallId]: entry },
@@ -686,6 +729,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 suspendPayload,
                 args: inputData.args,
                 resumeSchema: options?.resumeSchema,
+                waitingFor: options?.waitingFor ?? 'user',
               },
             });
             // Persist the pending request before exposing it to a client.
@@ -702,6 +746,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   suspendedToolRunId: options?.runId,
                   type: 'suspension',
                   resumeSchema: options?.resumeSchema,
+                  waitingFor: options?.waitingFor ?? 'user',
                   metadata: suspensionChunk.metadata,
                 });
               },
@@ -718,6 +763,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 __mastraToolInput: acceptedInput,
                 toolApprovalPolicy,
                 toolApprovalContext,
+                waitingFor: options?.waitingFor ?? 'user',
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
                 ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
@@ -856,6 +902,10 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             : resumeData;
 
         const toolOptions: MastraToolInvocationOptions = {
+          ...executionStartHook(async () => {
+            if (!isEagerExecution) await announceExecutionStart();
+            else if (eagerBailout) eagerBailout.executionStarted = true;
+          }),
           abortSignal,
           toolCallId: inputData.toolCallId,
           // Agent tools receive the exact processor-adjusted prompt visible to the parent model.
@@ -903,6 +953,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 options: {
                   resumeLabel: options?.resumeLabel,
                   resumeSchema: options?.resumeSchema,
+                  waitingFor: options?.waitingFor,
                   runId: options?.runId,
                   requireToolApproval: options?.requireToolApproval,
                 },
@@ -1130,33 +1181,40 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
                     abortSignal: opts?.abortSignal ?? options?.abortSignal,
                     execute: background =>
-                      resolvedTool.execute!(bgArgs, {
-                        ...toolOptions,
-                        [TOOL_INPUT_STATE]: backgroundInputState,
-                        isBackgroundTask: true,
-                        background,
-                        [BACKGROUND_WORK_CONTEXT]: {
-                          originRunId: runId,
-                          originToolCallId: inputData.toolCallId,
-                          taskId,
-                          invocationKind: isAgentTool ? 'agent' : 'tool',
-                          disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
-                        },
-                        ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
-                        // Framework-resolved delegated run id recovered from persisted
-                        // suspension state (#23739) — never the model-authored one.
-                        suspendedToolRunId: opts?.suspendedToolRunId,
-                        suspend: async (data?: unknown, options?: SuspendOptions) => {
-                          Object.assign(toolInputState, backgroundInputState);
-                          await toolOptions.suspend?.(data, options);
-                          return opts?.suspend?.(data, options);
-                        },
-                        outputWriter: async (chunk: any) => {
-                          await opts?.onProgress?.(chunk);
-                          return toolOptions.outputWriter?.(chunk);
-                        },
-                        abortSignal: opts?.abortSignal ?? options?.abortSignal,
-                      } as any),
+                      executeToolWithPolicy(
+                        resolvedTool,
+                        toolKey ?? inputData.toolName,
+                        bgArgs,
+                        {
+                          ...toolOptions,
+                          [TOOL_INPUT_STATE]: backgroundInputState,
+                          isBackgroundTask: true,
+                          background,
+                          [BACKGROUND_WORK_CONTEXT]: {
+                            originRunId: runId,
+                            originToolCallId: inputData.toolCallId,
+                            taskId,
+                            invocationKind: isAgentTool ? 'agent' : 'tool',
+                            disposition: info.disposition === 'awaited' ? 'awaited' : 'deferred',
+                          },
+                          ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
+                          // Framework-resolved delegated run id recovered from persisted
+                          // suspension state (#23739) — never the model-authored one.
+                          suspendedToolRunId: opts?.suspendedToolRunId,
+                          suspend: async (data?: unknown, options?: SuspendOptions) => {
+                            Object.assign(toolInputState, backgroundInputState);
+                            await toolOptions.suspend?.(data, options);
+                            return opts?.suspend?.(data, options);
+                          },
+                          outputWriter: async (chunk: any) => {
+                            await opts?.onProgress?.(chunk);
+                            return toolOptions.outputWriter?.(chunk);
+                          },
+                          abortSignal: opts?.abortSignal ?? options?.abortSignal,
+                        } as any,
+                        toolPolicy,
+                        policyRequestContext ?? requestContext,
+                      ),
                     onCancelError: error => logger?.warn('Failed to cancel adopted background operation', error),
                   });
 
@@ -1442,6 +1500,15 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           toolCallId: inputData.toolCallId,
           toolName: inputData.toolName,
           abortSignal,
+          execute: (toolArgs, executionOptions) =>
+            executeToolWithPolicy(
+              tool,
+              toolKey ?? inputData.toolName,
+              toolArgs,
+              executionOptions as MastraToolInvocationOptions,
+              toolPolicy,
+              policyRequestContext ?? requestContext,
+            ),
           // The tool asked to suspend or bail and then swallowed the throw. Its return value
           // is the return value of a call that was never supposed to complete here, so bail
           // before it is published: `onOutput` is a side effect the foreach will produce
@@ -1477,7 +1544,14 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           return { error: serializeToolError(outcome.error), ...inputData };
         }
 
-        return { result: outcome.result, ...inputData, ...(approvalGrant ?? {}) };
+        return {
+          result: outcome.result,
+          ...inputData,
+          ...(isToolPolicyRejection(outcome.rawResult) || isValidationError(outcome.rawResult)
+            ? { isError: true }
+            : {}),
+          ...(approvalGrant ?? {}),
+        };
       } catch (error) {
         // Re-throw FGA authorization errors instead of swallowing them
         const suspensionError = findToolSuspensionError(error);

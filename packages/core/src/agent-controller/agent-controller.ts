@@ -1,11 +1,12 @@
 import { Agent } from '../agent';
 import { MessageList } from '../agent/message-list';
 import type { MastraDBMessage, MastraMessageContentV2 } from '../agent/message-list/state/types';
-import { isUserAuthoredMessage } from '../agent/signals';
+import { isUserAuthoredMessage, mastraDBMessageToSignal } from '../agent/signals';
 import type { ActiveThreadRun } from '../agent/thread-stream-runtime';
 import type { AgentInstructions, ToolsInput, ToolsetsInput } from '../agent/types';
 import type { MastraBrowser } from '../browser/browser';
 import { AgentControllerChannels } from '../channels/agent-controller-channels';
+import { ErrorCategory, ErrorDomain, MastraError } from '../error';
 import { GatewayManager } from '../llm/model/gateways';
 import { defaultGateways } from '../llm/model/gateways/defaults';
 import type { MastraModelConfig } from '../llm/model/shared.types';
@@ -14,7 +15,7 @@ import { TITLE_PINNED_THREAD_METADATA_KEY } from '../memory';
 import type { MastraMemory } from '../memory/memory';
 import type { StorageThreadType } from '../memory/types';
 import type { TracingContext, TracingOptions } from '../observability';
-import { RequestContext } from '../request-context';
+import { MASTRA_THREAD_ID_KEY, RequestContext } from '../request-context';
 import type { MastraCompositeStore } from '../storage/base';
 import type { MemoryStorage } from '../storage/domains/memory/base';
 import type { ObservationalMemoryRecord, StorageListMessagesInput, StorageListMessagesOutput } from '../storage/types';
@@ -179,6 +180,7 @@ const TITLE_WINDOW_MESSAGES = 20;
  * ```
  */
 export class AgentController<TState = {}> {
+  #pendingMessageEdits = new Set<string>();
   readonly id: string;
 
   private config: AgentControllerConfig<TState>;
@@ -233,6 +235,12 @@ export class AgentController<TState = {}> {
    * (e.g. {@link setResourceId}) preserve the session's registry scope.
    */
   readonly #sessionScopes = new WeakMap<Session<TState>, string>();
+  readonly #sessionRuntimeIds = new WeakMap<Session<TState>, string>();
+  readonly #sessionBrowserOwners = new WeakMap<MastraBrowser, Set<Session<TState>>>();
+  readonly #sessionOwnedBrowsers = new WeakMap<Session<TState>, MastraBrowser>();
+  readonly #borrowedBrowsers = new WeakSet<MastraBrowser>();
+  readonly #browserReleases = new WeakMap<MastraBrowser, { pending: boolean; promise: Promise<void> }>();
+  readonly #failedSessionCleanup = new Map<string, Session<TState>>();
   private availableModelsCache: AvailableModel[] | null = null;
   private availableModelsCacheTime: number = 0;
   readonly #instructions?: string;
@@ -245,6 +253,7 @@ export class AgentController<TState = {}> {
    */
   #externalMastra: Mastra | undefined = undefined;
   #gatewayManager: GatewayManager | undefined = undefined;
+  #availableModelsRevision = 0;
   #legacyAgentMode: Record<string, Agent<any, any, any, any>> = {};
   /** Chat channels running this controller inside messaging threads (from `config.channels`). */
   #channels: AgentControllerChannels | null = null;
@@ -261,7 +270,7 @@ export class AgentController<TState = {}> {
     }
     // Gateway manager merges configured gateways with the router defaults
     // (custom takes precedence). Shared by listAvailableModels,
-    // getCurrentModelAuthStatus, and the OM model resolver.
+    // and getCurrentModelAuthStatus. Parent gateways are refreshed on access.
     this.#gatewayManager = new GatewayManager([...(config.gateways ?? []), ...defaultGateways]);
 
     const defaultMode = config.defaultModeId
@@ -405,6 +414,7 @@ export class AgentController<TState = {}> {
     });
     session.thread.connect(this.createThreadDataStore(session), session as Session);
     session.setMachinery({
+      getMessageStorage: () => this.getMemoryStorage(),
       getAgent: () => this.getCurrentAgent(session),
       getRunScope: runId => this.getMastra()?.__getRunScope(runId),
       getAgents: () => [...this.backingAgents()],
@@ -556,6 +566,11 @@ export class AgentController<TState = {}> {
       let pendingDeletion = this.#deletionsInProgress.get(registryKey);
       if (pendingDeletion) await pendingDeletion;
 
+      if (this.#failedSessionCleanup.has(registryKey)) {
+        await this.deleteSession({ resourceId: effectiveResourceId, scope });
+        continue;
+      }
+
       const existing = this.#sessionsByResource.get(registryKey);
       if (existing) {
         const session = await existing;
@@ -593,6 +608,11 @@ export class AgentController<TState = {}> {
             await session.thread.switch({ threadId, requestContext });
           } else {
             await session.thread.create({ id: threadId, requestContext });
+          }
+          // An early subscription may create the Session before its exact thread
+          // arrives. Only an unused factory browser can follow that initial bind.
+          if (this.#sessionOwnedBrowsers.get(session)?.status === 'pending') {
+            session.__bindBrowserIdentity();
           }
         }
         // A deletion may have started during the thread-rebinding awaits.
@@ -722,8 +742,15 @@ export class AgentController<TState = {}> {
     }
 
     let browserToConnect = overrides?.browser ?? this.browser;
+    const ownsBrowser = typeof browserToConnect === 'function';
     if (typeof browserToConnect === 'function') {
       browserToConnect = await browserToConnect({ requestContext, mastra: this.getMastra() });
+    }
+
+    // Do not hand a closing browser to a new owner or static borrower. A failed
+    // release remains an admission barrier until the owning session retries it.
+    while (browserToConnect && this.#browserReleases.has(browserToConnect)) {
+      await this.#browserReleases.get(browserToConnect)!.promise;
     }
 
     const session = this.#wireSession(
@@ -741,50 +768,104 @@ export class AgentController<TState = {}> {
       }),
     );
 
-    if (overrides?.threadId) {
-      const existingThread = await session.thread.getById({ threadId: overrides.threadId });
-      if (existingThread) {
-        if (existingThread.resourceId !== effectiveResourceId) {
-          throw new Error(`Thread not found: ${overrides.threadId}`);
-        }
-        await this.config.threadLock?.acquire(existingThread.id);
-        session.thread.set({ threadId: existingThread.id });
-        await session.thread.loadMetadata();
-        await session.thread.ensureSubscription(
-          existingThread.id,
-          overrides.subscriptionAgent,
-          requestContext,
-          overrides.existingThreadOnly,
-        );
-      } else {
-        if (overrides.existingThreadOnly) throw new Error(`Thread not found: ${overrides.threadId}`);
-        await session.thread.create({ id: overrides.threadId, requestContext });
-      }
-    } else {
-      // Same scope `thread.create()` stamps, matched strictly: a thread outside
-      // this session's scope — including one carrying no scope at all — belongs
-      // to nobody here and must not be auto-resumed.
-      const scopeEntries = Object.entries(session.getThreadScope());
-
-      const threads = await session.thread.list();
-      const candidates = threads.filter(t => {
-        const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
-        return scopeEntries.every(([key, value]) => metadata[key] === value);
-      });
-
-      if (candidates.length === 0) {
-        await session.thread.create({ requestContext });
-      } else {
-        const mostRecent = [...candidates].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]!;
-        await this.config.threadLock?.acquire(mostRecent.id);
-        session.thread.set({ threadId: mostRecent.id });
-        await session.thread.loadMetadata();
-        await session.thread.ensureCurrentSubscription(requestContext);
-      }
+    this.#sessionRuntimeIds.set(session, globalThis.crypto.randomUUID());
+    if (ownsBrowser && session.browser) {
+      this.#sessionOwnedBrowsers.set(session, session.browser);
+      const owners = this.#sessionBrowserOwners.get(session.browser) ?? new Set<Session<TState>>();
+      owners.add(session);
+      this.#sessionBrowserOwners.set(session.browser, owners);
+    } else if (session.browser) {
+      this.#borrowedBrowsers.add(session.browser);
     }
 
-    await this.#notifySessionCreated(session);
-    return session;
+    try {
+      if (overrides?.threadId) {
+        const existingThread = await session.thread.getById({ threadId: overrides.threadId });
+        if (existingThread) {
+          if (existingThread.resourceId !== effectiveResourceId) {
+            throw new Error(`Thread not found: ${overrides.threadId}`);
+          }
+          await this.config.threadLock?.acquire(existingThread.id);
+          session.thread.set({ threadId: existingThread.id });
+          await session.thread.loadMetadata();
+          await session.thread.ensureSubscription(
+            existingThread.id,
+            overrides.subscriptionAgent,
+            requestContext,
+            overrides.existingThreadOnly,
+          );
+        } else {
+          if (overrides.existingThreadOnly) throw new Error(`Thread not found: ${overrides.threadId}`);
+          await session.thread.create({ id: overrides.threadId, requestContext });
+        }
+      } else {
+        // Same scope `thread.create()` stamps, matched strictly: a thread outside
+        // this session's scope — including one carrying no scope at all — belongs
+        // to nobody here and must not be auto-resumed.
+        const scopeEntries = Object.entries(session.getThreadScope());
+
+        const threads = await session.thread.list();
+        const candidates = threads.filter(t => {
+          const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
+          return scopeEntries.every(([key, value]) => metadata[key] === value);
+        });
+
+        if (candidates.length === 0) {
+          await session.thread.create({ requestContext });
+        } else {
+          const mostRecent = [...candidates].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]!;
+          await this.config.threadLock?.acquire(mostRecent.id);
+          session.thread.set({ threadId: mostRecent.id });
+          await session.thread.loadMetadata();
+          await session.thread.ensureCurrentSubscription(requestContext);
+        }
+      }
+
+      if (ownsBrowser) session.__bindBrowserIdentity();
+      await this.#notifySessionCreated(session);
+      return session;
+    } catch (error) {
+      const registryKey = sessionRegistryKey(effectiveResourceId, overrides?.scope);
+      this.#failedSessionCleanup.set(registryKey, session);
+      await this.#releaseSessionBrowser(session);
+      this.#failedSessionCleanup.delete(registryKey);
+      throw error;
+    }
+  }
+
+  async #releaseSessionBrowser(session: Session<TState>): Promise<void> {
+    const browser = this.#sessionOwnedBrowsers.get(session);
+    const owners = browser && this.#sessionBrowserOwners.get(browser);
+    if (!browser || !owners?.has(session)) return;
+    const detach = () => {
+      owners.delete(session);
+      this.#sessionOwnedBrowsers.delete(session);
+      session.browser = undefined;
+      if (owners.size === 0) this.#sessionBrowserOwners.delete(browser);
+    };
+    if (owners.size > 1 || this.#borrowedBrowsers.has(browser)) {
+      detach();
+      return;
+    }
+    const existingRelease = this.#browserReleases.get(browser);
+    if (existingRelease?.pending) {
+      await existingRelease.promise;
+      return;
+    }
+    const release = {
+      pending: true,
+      promise: Promise.resolve().then(async () => {
+        await browser.close();
+        detach();
+        this.#browserReleases.delete(browser);
+      }),
+    };
+    this.#browserReleases.set(browser, release);
+    try {
+      await release.promise;
+    } finally {
+      release.pending = false;
+    }
   }
 
   /**
@@ -810,22 +891,37 @@ export class AgentController<TState = {}> {
     if (this.#deletionsInProgress.has(registryKey)) return false;
 
     const pending = this.#sessionsByResource.get(registryKey);
-    if (!pending) return false;
+    if (!pending && !this.#failedSessionCleanup.has(registryKey)) return false;
 
     // Track the deletion by registry key and set it synchronously, before any
     // await, so a concurrent createSession that resumes from `await existing`
     // sees the flag and waits instead of returning a session being torn down.
     const deletion: { tolerantPromise?: Promise<void> } = {};
     const deletionPromise = (async () => {
-      const session = await pending;
+      const session = pending
+        ? await pending.catch(error => {
+            const failed = this.#failedSessionCleanup.get(registryKey);
+            if (!failed) throw error;
+            return failed;
+          })
+        : await Promise.resolve(this.#failedSessionCleanup.get(registryKey)!);
       this.#sessionsBeingDeleted.add(session);
       // tolerantPromise is set synchronously below before this microtask runs.
       this.#sessionDeletionPromises.set(session, deletion.tolerantPromise!);
       session.abort({ localOnly: true });
+      try {
+        await this.#releaseSessionBrowser(session);
+      } catch (error) {
+        // Keep the session and browser reachable so deletion can retry cleanup.
+        this.#sessionsBeingDeleted.delete(session);
+        this.#sessionDeletionPromises.delete(session);
+        throw error;
+      }
       session.thread.cleanupSubscription();
       try {
         await session.thread.clearAndReleaseLock();
       } finally {
+        this.#failedSessionCleanup.delete(registryKey);
         // Notify inside the finally: even when lock release fails the session
         // is deregistered for good, and listeners mirror the registry.
         await this.#dropSessionFromRegistry(registryKey, session);
@@ -924,6 +1020,7 @@ export class AgentController<TState = {}> {
    */
   __registerMastra(mastra: Mastra): void {
     this.#externalMastra = mastra;
+    this.invalidateAvailableModelsCache();
 
     // If `init()` already built an internal Mastra before we were wired to a
     // parent, drop it: the parent now owns storage/agents/observability, but the
@@ -1178,6 +1275,150 @@ export class AgentController<TState = {}> {
       }
     }
     return cloned;
+  }
+
+  /**
+   * Start an edited copy of a saved conversation. The original thread and its
+   * effects remain intact. Only messages before the selected user message are
+   * copied; thread summaries are rebuilt and resource memory remains shared.
+   */
+  async editMessage({
+    resourceId,
+    sourceThreadId,
+    messageId,
+    content,
+    newThreadId,
+    newSessionScope,
+    requestContext,
+  }: {
+    resourceId: string;
+    sourceThreadId: string;
+    messageId: string;
+    content: string;
+    newThreadId: string;
+    newSessionScope: string;
+    requestContext?: RequestContext;
+  }): Promise<AgentControllerThread> {
+    if (this.#pendingMessageEdits.has(newThreadId))
+      throw new MastraError({
+        id: 'AGENT_CONTROLLER_EDIT_CONFLICT',
+        domain: ErrorDomain.AGENT,
+        category: ErrorCategory.USER,
+        text: 'Edited thread is already being created',
+        details: { status: 409 },
+      });
+    this.#pendingMessageEdits.add(newThreadId);
+    try {
+      if (!content.trim())
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_INVALID_INPUT',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'The edited message must not be empty',
+          details: { status: 400 },
+        });
+      if (!newThreadId || !newSessionScope)
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_INVALID_INPUT',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'An edited copy requires its own thread and session scope',
+          details: { status: 400 },
+        });
+      await this.initStorage();
+      const store = await this.getMemoryStorage();
+      const source = await store.getThreadById({ threadId: sourceThreadId });
+      if (!source || source.resourceId !== resourceId)
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_NOT_FOUND',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'Source thread not found',
+          details: { status: 404 },
+        });
+      if (await store.getThreadById({ threadId: newThreadId }))
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_CONFLICT',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'Edited thread already exists',
+          details: { status: 409 },
+        });
+      if (await this.getSessionByResource(resourceId, newSessionScope))
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_CONFLICT',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'Edited session already exists',
+          details: { status: 409 },
+        });
+      const { messages } = await store.listMessages({
+        threadId: sourceThreadId,
+        resourceId,
+        perPage: false,
+        orderBy: { field: 'createdAt', direction: 'ASC' },
+      });
+      const index = messages.findIndex(message => message.id === messageId);
+      const original = messages[index];
+      if (!original || !isUserAuthoredMessage(original))
+        throw new MastraError({
+          id: 'AGENT_CONTROLLER_EDIT_NOT_FOUND',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'User message not found',
+          details: { status: 404 },
+        });
+      const originalContents = mastraDBMessageToSignal({ ...original, type: 'user' }).contents;
+      const files = typeof originalContents === 'string' ? [] : originalContents.filter(part => part.type === 'file');
+      const { workingMemory: _workingMemory, ...metadata } = source.metadata ?? {};
+      const editedMetadata = { ...metadata, editedFrom: { threadId: sourceThreadId, messageId } };
+      let thread: StorageThreadType;
+      if (index === 0) {
+        // Empty ID filters mean "no filter" in several stores. Create an empty
+        // thread explicitly, so editing the first message never copies the future.
+        const now = new Date();
+        thread = await store.saveThread({
+          thread: {
+            id: newThreadId,
+            resourceId,
+            title: source.title,
+            metadata: editedMetadata,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      } else {
+        const cloned = await store.cloneThread({
+          sourceThreadId,
+          newThreadId,
+          resourceId,
+          title: source.title,
+          metadata: editedMetadata,
+          options: { messageFilter: { messageIds: messages.slice(0, index).map(message => message.id) } },
+        });
+        thread = cloned.thread;
+      }
+      const context = new RequestContext(requestContext?.entries());
+      context.set(MASTRA_THREAD_ID_KEY, newThreadId);
+      const session = await this.createSession({
+        resourceId,
+        id: newThreadId,
+        ownerId: this.id,
+        scope: newSessionScope,
+        threadId: newThreadId,
+        requestContext: context,
+      });
+      await session.sendSignal(
+        {
+          content: [{ type: 'text', text: content }, ...files],
+          requestContext: context,
+        },
+        { requireDelivery: true },
+      ).accepted;
+      return { ...thread, title: thread.title ?? '' };
+    } finally {
+      this.#pendingMessageEdits.delete(newThreadId);
+    }
   }
 
   private async readThreadMetadataValue({ threadId, key }: { threadId: string; key: string }): Promise<unknown> {
@@ -1476,13 +1717,26 @@ export class AgentController<TState = {}> {
     if (this.workspace && typeof agent.hasOwnWorkspace === 'function' && !agent.hasOwnWorkspace()) {
       agent.__setWorkspace(this.workspace);
     }
-    if (
-      this.browser &&
-      typeof agent.hasOwnBrowser === 'function' &&
-      !agent.hasOwnBrowser() &&
-      typeof this.browser !== 'function'
-    ) {
-      agent.setBrowser(this.browser);
+    if (this.browser && typeof agent.hasOwnBrowser === 'function' && !agent.hasOwnBrowser()) {
+      if (typeof this.browser === 'function') {
+        agent.setBrowser(async ({ requestContext }) => {
+          const context = requestContext.get('controller') as AgentControllerRequestContext<TState> | undefined;
+          if (!context || context.controllerId !== this.id || !context.resourceId || !context.session?.id)
+            return undefined;
+          const session = await this.getSessionByResource(context.resourceId, context.scope);
+          if (
+            !session ||
+            this.#sessionsBeingDeleted.has(session) ||
+            this.#sessionRuntimeIds.get(session) !== context.session.runtimeId ||
+            session.identity.getId() !== context.session.id ||
+            session.thread.getId() !== context.threadId
+          )
+            return undefined;
+          return session.browser;
+        });
+      } else {
+        agent.setBrowser(this.browser);
+      }
     }
 
     // Propagate controller channels onto the resolved (possibly lazily-built)
@@ -1663,7 +1917,7 @@ export class AgentController<TState = {}> {
     // and falls back to "no auth" instead of erroring.
     let hasAuth = true;
     try {
-      hasAuth = this.#gatewayManager ? await this.#gatewayManager.hasAuth(modelId) : true;
+      hasAuth = await this.#resolveGatewayManager().hasAuth(modelId);
     } catch {
       hasAuth = false;
     }
@@ -1687,6 +1941,8 @@ export class AgentController<TState = {}> {
    * Get available models from the app-provided catalog hook with use counts applied.
    */
   async listAvailableModels(): Promise<AvailableModel[]> {
+    const manager = this.#resolveGatewayManager();
+    const revision = this.#availableModelsRevision;
     const now = Date.now();
     if (this.availableModelsCache && now - this.availableModelsCacheTime < 10_000) {
       return this.availableModelsCache;
@@ -1703,18 +1959,41 @@ export class AgentController<TState = {}> {
       });
     };
 
-    const catalog = await this.#gatewayManager!.listAvailableModels();
+    const catalog = await manager.listAvailableModels();
     for (const model of catalog) {
       upsertModel(model);
     }
 
     const result = [...modelsById.values()];
-    this.availableModelsCache = result;
-    this.availableModelsCacheTime = Date.now();
+    // A publication can invalidate the list while providers are still loading.
+    // Its older response must never repopulate the newer cache.
+    if (revision === this.#availableModelsRevision) {
+      this.availableModelsCache = result;
+      this.availableModelsCacheTime = Date.now();
+    }
     return result;
   }
 
+  #resolveGatewayManager(): GatewayManager {
+    const manager = new GatewayManager([
+      ...(this.config.gateways ?? []),
+      ...Object.values(this.getMastra()?.listGateways() ?? {}),
+      ...defaultGateways,
+    ]);
+    const previous = this.#gatewayManager?.gateways;
+    if (
+      !previous ||
+      previous.length !== manager.gateways.length ||
+      manager.gateways.some((gateway, i) => gateway !== previous[i])
+    ) {
+      this.#gatewayManager = manager;
+      this.invalidateAvailableModelsCache();
+    }
+    return this.#gatewayManager!;
+  }
+
   invalidateAvailableModelsCache(): void {
+    this.#availableModelsRevision++;
     this.availableModelsCache = null;
     this.availableModelsCacheTime = 0;
   }
@@ -1753,6 +2032,7 @@ export class AgentController<TState = {}> {
     }
 
     session.thread.cleanupSubscription();
+    if (previousResourceId !== resourceId) await this.#releaseSessionBrowser(session);
     session.identity.setResourceId({ resourceId });
     const releasePreviousThreadLock = session.thread.clearAndReleaseLock();
 
@@ -2425,6 +2705,7 @@ export class AgentController<TState = {}> {
       scope: this.#sessionScopes.get(session),
       session: {
         id: session.identity.getId(),
+        runtimeId: this.#sessionRuntimeIds.get(session),
         ownerId: session.identity.getOwnerId(),
         modeId: scope?.modeId ?? session.mode.get(),
         modelId: session.model.get(),

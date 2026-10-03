@@ -119,7 +119,7 @@ The session is organized into sub-objects, each owning one domain of per-convers
     name: 'browser',
     type: 'MastraBrowser | undefined',
     description:
-      'The browser automation instance for this session. Set at creation via createSession, or from the AgentController config default. Undefined when no browser is configured.',
+      'The browser automation instance for this session. Set at creation via createSession, or from the AgentController config default. Undefined when no browser is configured or a factory-owned browser no longer matches the current resource and thread.',
   },
 ]}
 />
@@ -152,7 +152,26 @@ unsubscribe()
 
 Returns: `() => void`
 
+The forward-only `text_delta` event contains `{ type: 'text_delta', runId, messageId, textDelta }`. It emits assistant text as the native stream processes it, before the run finishes. It excludes reasoning, tool input, and tool results. Each event contains only the new text, not the accumulated message. Subscribe before sending and match `runId` to the accepted command's run. Early events can arrive before the receipt resolves. These events aren't replayed and don't replace the display snapshot or terminal events. Generated text doesn't establish speech playback or successful tool execution.
+
 ### Messages and run control
+
+#### `sendMessageWithReceipt({ content, files?, requestContext?, tracingContext?, tracingOptions? })`
+
+Send a user message with the same file conversion as `sendMessage`, and return an immediate delivery handle instead of waiting for the run to finish. Text and JSON attachments are included as fenced text; binary attachments remain file parts. JSON content is document text and isn't parsed as JSON.
+
+```typescript
+const delivery = session.sendMessageWithReceipt({
+  content: 'Summarize the notes.',
+  files: [{ data: 'Meeting notes', mediaType: 'text/plain', filename: 'notes.txt' }],
+})
+const accepted = await delivery.accepted
+console.log(delivery.id, accepted.runId, accepted.action)
+```
+
+Returns the same `{ id, type, accepted }` handle as `sendSignal`. The `accepted` promise waits for the actual routing decision with `requireDelivery: true` and resolves to `{ accepted: true, runId?, action? }`. Check the action and run ID when your caller requires delivery into a running agent. Acceptance isn't completion. Use session events to observe the run's result.
+
+File conversion can throw before a signal is sent. Routing and stream setup failures reject `accepted`. The method doesn't retry. Existing `sendMessage` behavior is unchanged.
 
 #### `sendMessage({ content, files?, requestContext? })`
 
@@ -167,17 +186,17 @@ await session.sendMessage({
 
 When `requestContext` carries `MASTRA_MESSAGE_AUTHOR_KEY`, the stored message names that sender under `content.providerMetadata.mastra.author`. See [Reserved keys](/docs/server/request-context#reserved-keys).
 
-#### `steer({ content, requestContext? })`
+#### `steer({ content, files?, requestContext? })`
 
-Queue steering content into an active run.
+Queue steering content into an active run. `files` use the same conversion as `sendMessage`.
 
 ```typescript
 await session.steer({ content: 'Focus on the failing tests.' })
 ```
 
-#### `followUp({ content, requestContext? })`
+#### `followUp({ content, files?, requestContext? })`
 
-Queue a follow-up while a run is active, or send it immediately while idle.
+Queue a follow-up while a run is active, or send it immediately while idle. `files` use the same conversion as `sendMessage`.
 
 ```typescript
 await session.followUp({ content: 'Then propose a fix.' })

@@ -123,7 +123,8 @@ export function buildAutoResumeSystemMessageSuffix(
   // parentRunId is internal bookkeeping for channel resume routing. The model
   // uses the original toolCallId to identify the suspension; runId remains
   // visible only for compatibility and diagnostics.
-  const toolsForPrompt = resumableTools.map(({ parentRunId: _parentRunId, ...rest }) => rest);
+  // `waitingFor` (P39) tells clients who answers a suspension; the model prompt stays as before.
+  const toolsForPrompt = resumableTools.map(({ parentRunId: _parentRunId, waitingFor: _waitingFor, ...rest }) => rest);
   return `\n\nAnalyse the suspended tools: ${JSON.stringify(toolsForPrompt)}, using the messages available to you and the resumeSchema of each suspended tool, find the tool whose resumeData you can construct properly.
                       resumeData can not be an empty object nor null/undefined.
                       When you find that and call that tool, add the resumeData to the tool call arguments/input.

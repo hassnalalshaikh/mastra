@@ -69,6 +69,32 @@ API. Approving one call does not approve subsequent calls. Explicit Session
 tool or category denies still apply. Without an attached Session, the run stays
 suspended until a consumer responds. Omitting the policy preserves existing
 tool approval behavior; it does not force automatic approval of every tool.
+### Limit agent dispatch attempts
+
+Set `maxRuns` when creating an agent schedule to pause it automatically after a
+fixed number of dispatch attempts. PostgreSQL and in-memory storage support this
+option; other adapters reject it until they implement atomic admission.
+
+```typescript
+const heartbeat = await mastra.schedules.create({
+  agentId: 'pinger',
+  cron: '*/30 * * * *',
+  prompt: 'Check progress.',
+  maxRuns: 5,
+})
+```
+
+The returned `runCount` is reserved before execution. Failed, aborted, and busy
+dispatch attempts count; a crash after reservation does not refund the attempt.
+Manual runs share the same budget. Duplicate deliveries cannot consume it twice.
+PostgreSQL retains the budget across process restarts. In-memory storage retains
+it only while its database remains alive.
+
+Updating `maxRuns` changes the lifetime total without resetting `runCount`.
+Raise the total and resume to permit more attempts. Resuming alone cannot exceed
+the limit. Limits must be integers from 1 to 10000 and must be set at creation;
+past attempts on an unlimited schedule cannot be reconstructed safely. Deleting
+a schedule prevents future admission but does not cancel work already admitted.
 
 ## Methods
 

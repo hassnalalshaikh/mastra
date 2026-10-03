@@ -75,6 +75,7 @@ type StreamChunk =
   | StreamPayloadChunk<'tool-call-delta'>
   | StreamPayloadChunk<'tool-call-input-streaming-end'>
   | StreamPayloadChunk<'tool-call'>
+  | StreamPayloadChunk<'tool-execution-start'>
   | StreamPayloadChunk<'tool-result'>
   | StreamPayloadChunk<'tool-error'>
   | StreamPayloadChunk<'tool-output-denied'>
@@ -224,6 +225,8 @@ async function abortDeadline(run: Session['run'], guard: AbortSignal, graceMs: n
 
 type StreamState = {
   threadId?: string;
+  /** Identity of this stream, independent of later session run changes. */
+  runId?: string | null;
   currentMessage: MastraDBMessage;
   lastFinishedMessage?: MastraDBMessage;
   messageStarted: boolean;
@@ -380,9 +383,13 @@ export class SessionRunEngine {
     state.completedToolPrelude = false;
   }
 
-  createStreamState(threadId = this.#session.thread.getId() ?? undefined): StreamState {
+  createStreamState(
+    threadId = this.#session.thread.getId() ?? undefined,
+    runId: string | null = this.#session.run.getRunId(),
+  ): StreamState {
     return {
       threadId,
+      runId,
       currentMessage: this.createEmptyAssistantMessage(threadId),
       messageStarted: false,
       isSuspended: false,
@@ -407,10 +414,16 @@ export class SessionRunEngine {
       toolName: string;
       result: unknown;
       isError: boolean;
+      preliminary?: boolean;
+      runId?: string;
       providerMetadata?: MastraProviderMetadata;
     },
   ): void {
     const { toolCallId, toolName, result, isError, providerMetadata } = outcome;
+    if (outcome.preliminary) {
+      this.#session.emit({ type: 'tool_update', toolCallId, partialResult: result, preliminary: true });
+      return;
+    }
     const toolIndex = state.toolPartById.get(toolCallId);
     const existing = toolIndex !== undefined ? state.currentMessage.content.parts[toolIndex] : undefined;
     const partIndex = toolIndex ?? state.currentMessage.content.parts.length;
@@ -452,6 +465,10 @@ export class SessionRunEngine {
     this.#session.emit({
       type: 'tool_end',
       threadId: state.threadId,
+      runId: outcome.runId ?? state.runId ?? undefined,
+      toolName,
+      messageId: state.currentMessage.id,
+      completedAt: new Date().toISOString(),
       toolCallId,
       result,
       isError,
@@ -520,7 +537,8 @@ export class SessionRunEngine {
     const consume = async (): Promise<void> => {
       for await (const chunk of response.fullStream) {
         if (bailed) return;
-        result = await this.processStreamChunk(state, chunk, requestContext);
+        result = await this.processStreamChunk(state, chunk, requestContext, undefined, () => !bailed);
+        if (bailed) return;
         if (chunk.type === 'error' || chunk.type === 'tripwire') {
           error = true;
         }
@@ -594,7 +612,10 @@ export class SessionRunEngine {
     chunk: StreamChunk,
     requestContext: RequestContext,
     agent: Agent = this.#machinery.getAgent(),
+    isCurrent: () => boolean = () => true,
   ): Promise<{ message: MastraDBMessage; suspended?: boolean } | undefined> {
+    const chunkRunId = 'runId' in chunk ? (chunk.runId as string | undefined) : undefined;
+    state.runId ??= chunkRunId ?? this.#session.run.getRunId();
     if ('runId' in chunk && chunk.runId) {
       this.#session.run.setRunId({ runId: chunk.runId });
     }
@@ -625,6 +646,15 @@ export class SessionRunEngine {
       if (chunk.type === 'text-delta' && folded.part.type === 'text') {
         if (!state.announcedTextSpans.delete(chunk.payload.id) && folded.created) {
           this.emitInitialPart(state, index, { ...folded.part, text: '' });
+        }
+        const textDelta = chunk.payload.text;
+        if (textDelta && state.runId && (!chunkRunId || chunkRunId === state.runId)) {
+          this.#session.emit({
+            type: 'text_delta',
+            runId: state.runId,
+            messageId: state.currentMessage.id,
+            textDelta,
+          });
         }
         this.#session.emit({
           type: 'message_update',
@@ -752,13 +782,39 @@ export class SessionRunEngine {
         break;
       }
 
+      case 'tool-execution-start': {
+        const payload = getPayload(chunk);
+        const invocation = getRecord(payload.args);
+        const toolCallId = getString(invocation?.toolCallId);
+        const toolName = getString(invocation?.toolName);
+        const runId = state.runId ?? getString(payload.runId);
+        if (toolCallId && toolName && runId) {
+          const displayed = this.#session.displayState.get().activeTools.get(toolCallId);
+          this.#session.emit({
+            type: 'tool_execution_start',
+            threadId: state.threadId,
+            runId,
+            toolCallId,
+            toolName,
+            args: displayed?.args ?? {},
+          });
+        }
+        break;
+      }
+
       case 'tool-result': {
         const toolResult = getPayload(chunk);
         this.applyToolOutcome(state, {
           toolCallId: getString(toolResult.toolCallId) ?? '',
+          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
           toolName: getString(toolResult.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'output-available', toolResult.result),
           isError: getBoolean(toolResult.isError, false),
+          // A dispatched background task reports its placeholder with native
+          // `backgroundTask.status: 'running'` metadata; keep it active.
+          preliminary:
+            getString(getRecord(getRecord(getRecord(toolResult.providerMetadata)?.mastra)?.backgroundTask)?.status) ===
+            'running',
           providerMetadata: isProviderMetadata(toolResult.providerMetadata) ? toolResult.providerMetadata : undefined,
         });
         break;
@@ -769,6 +825,7 @@ export class SessionRunEngine {
         // Error instances JSON-serialize to `{}`; keep the message so failure text survives SSE + persistence.
         this.applyToolOutcome(state, {
           toolCallId: getString(toolError.toolCallId) ?? '',
+          runId: 'runId' in chunk ? (chunk.runId ?? undefined) : undefined,
           toolName: getString(toolError.toolName) ?? '',
           result: getDisplayTransform(chunk.metadata, 'error', getErrorFromUnknown(toolError.error).message),
           isError: true,
@@ -862,6 +919,10 @@ export class SessionRunEngine {
           type: 'tool_end',
           threadId: state.threadId,
           toolCallId,
+          runId: state.runId ?? undefined,
+          toolName,
+          messageId: state.currentMessage.id,
+          completedAt: new Date().toISOString(),
           result: reason,
           isError: false,
           denied: true,
@@ -908,8 +969,14 @@ export class SessionRunEngine {
         };
 
         if (policy === 'allow') {
-          await this.#session.approveToolCall({ toolCallId, requestContext, ...binding });
-          break;
+          try {
+            await this.#session.approveToolCall({ toolCallId, requestContext, ...binding });
+            break;
+          } catch (error) {
+            if (!isCurrent()) return;
+            if (getErrorFromUnknown(error).name !== 'ToolDependencyError') throw error;
+            this.#session.emit({ type: 'error', error: getErrorFromUnknown(error) });
+          }
         }
 
         if (policy === 'deny') {
@@ -928,58 +995,68 @@ export class SessionRunEngine {
           }
         }
 
-        const approvalPromise = this.#session.approval.arm({
-          toolName,
-          toolCallId,
-          threadId: binding.threadId,
-          runId: binding.runId,
-        });
-        this.#session.emit({
-          type: 'tool_approval_required',
-          threadId: state.threadId,
-          toolCallId,
-          toolName,
-          args: toolArgs,
-        });
-
-        const approval = await approvalPromise;
-
-        // A gated `session.abort()` releases a parked gate as a decline and
-        // defers the stream/signal teardown to us, so the decline can still be
-        // driven through the (live) agent run and persist an `output-denied`
-        // result. Claim that captured origin to detect it: the session's abort
-        // flag is not a usable proxy for "this run was aborted while parked",
-        // because it is shared across run generations and threads — a successor
-        // run's abort (or one scoped to another thread) would otherwise cancel
-        // this parked gate's continuation.
-        const deferredAbortOrigin = this.#session.takeDeferredAbortOrigin();
-        const deferredAbort = deferredAbortOrigin !== undefined;
-
-        if (!deferredAbort && approval.decision === 'approve') {
-          await this.#session.approveToolCall({
+        while (true) {
+          const approvalPromise = this.#session.approval.arm({
+            toolName,
             toolCallId,
-            requestContext: approval.requestContext ?? requestContext,
-            ...binding,
+            threadId: binding.threadId,
+            runId: binding.runId,
           });
-        } else {
-          await this.#session.declineToolCall({
+          this.#session.emit({
+            type: 'tool_approval_required',
+            threadId: state.threadId,
             toolCallId,
-            requestContext: approval.requestContext ?? requestContext,
-            ...binding,
-            declineContext: deferredAbort
-              ? { reason: ABORTED_BY_USER_REASON, message: ABORTED_BY_USER_REASON }
-              : approval.declineContext,
+            toolName,
+            args: toolArgs,
           });
-        }
 
-        if (deferredAbort) {
-          // The denial chunk the agent emits for this decline can never reach
-          // us: we are blocking the consumer loop that would read it, and the
-          // teardown below ends the loop. Settle the call locally so the
-          // display state shows the denied result instead of a call stuck
-          // mid-flight.
-          this.settleToolCallAsDenied(state, { toolCallId, toolName, args: toolArgs });
-          this.#session.completeDeferredAbort(deferredAbortOrigin);
+          const approval = await approvalPromise;
+
+          // A gated `session.abort()` releases a parked gate as a decline and
+          // defers the stream/signal teardown to us, so the decline can still be
+          // driven through the (live) agent run and persist an `output-denied`
+          // result. Claim that captured origin to detect it: the session's abort
+          // flag is not a usable proxy for "this run was aborted while parked",
+          // because it is shared across run generations and threads — a successor
+          // run's abort (or one scoped to another thread) would otherwise cancel
+          // this parked gate's continuation.
+          const deferredAbortOrigin = this.#session.takeDeferredAbortOrigin();
+          const deferredAbort = deferredAbortOrigin !== undefined;
+
+          try {
+            if (!deferredAbort && approval.decision === 'approve') {
+              await this.#session.approveToolCall({
+                toolCallId,
+                requestContext: approval.requestContext ?? requestContext,
+                ...binding,
+              });
+            } else {
+              await this.#session.declineToolCall({
+                toolCallId,
+                requestContext: approval.requestContext ?? requestContext,
+                ...binding,
+                declineContext: deferredAbort
+                  ? { reason: ABORTED_BY_USER_REASON, message: ABORTED_BY_USER_REASON }
+                  : approval.declineContext,
+              });
+            }
+          } catch (error) {
+            if (!isCurrent()) return;
+            if (getErrorFromUnknown(error).name !== 'ToolDependencyError' || deferredAbort) throw error;
+            this.#session.emit({ type: 'error', error: getErrorFromUnknown(error) });
+            continue;
+          }
+
+          if (deferredAbort) {
+            // The denial chunk the agent emits for this decline can never reach
+            // us: we are blocking the consumer loop that would read it, and the
+            // teardown below ends the loop. Settle the call locally so the
+            // display state shows the denied result instead of a call stuck
+            // mid-flight.
+            this.settleToolCallAsDenied(state, { toolCallId, toolName, args: toolArgs });
+            this.#session.completeDeferredAbort(deferredAbortOrigin);
+          }
+          break;
         }
         break;
       }
@@ -1043,6 +1120,7 @@ export class SessionRunEngine {
           args: suspArgs,
           suspendPayload: suspPayload,
           resumeSchema: suspResumeSchema,
+          waitingFor: getPayload(chunk).waitingFor === 'external' ? 'external' : 'user',
         });
 
         break;
@@ -1633,11 +1711,21 @@ export class SessionRunEngine {
     suspended,
     error,
     aborted,
+    subscription,
   }: {
     suspended?: boolean;
     error?: boolean;
     aborted?: boolean;
+    subscription: AgentThreadSubscription<StreamChunk, true>;
   }): Promise<void> {
+    const operationId = this.#session.run.getOperationId();
+    const threadId = this.#session.thread.getId();
+    const resourceId = this.#session.identity.getResourceId();
+    const isCurrent = () =>
+      this.#session.run.getOperationId() === operationId &&
+      this.#session.thread.getId() === threadId &&
+      this.#session.identity.getResourceId() === resourceId &&
+      (!this.#session.stream.isOpen() || this.#session.stream.isCurrent({ subscription }));
     const reason = error
       ? 'error'
       : suspended
@@ -1645,7 +1733,8 @@ export class SessionRunEngine {
         : aborted || this.#session.run.isAbortRequested()
           ? 'aborted'
           : 'complete';
-    await this.#session.finishAgentRun(reason);
+    await this.#session.finishAgentRun(reason, isCurrent);
+    if (!isCurrent()) return;
     this.#session.run.reset();
   }
 
@@ -1662,17 +1751,19 @@ export class SessionRunEngine {
     }
   }
 
-  private async handleSubscribedStreamError(error: unknown): Promise<void> {
-    if (error instanceof Error && error.name === 'AbortError') {
-      await this.#session.finishAgentRun('aborted');
-    } else {
+  private async handleSubscribedStreamError(
+    error: unknown,
+    subscription: AgentThreadSubscription<StreamChunk, true>,
+  ): Promise<void> {
+    if (!this.#session.stream.isCurrent({ subscription })) return;
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    if (!aborted) {
       const streamError = getErrorFromUnknown(error);
       this.#session.emit({ type: 'error', error: streamError });
       this.retractFailedRunSuspensions({ runId: this.#session.run.getRunId(), reason: streamError.message });
-      await this.#session.finishAgentRun('error');
     }
     this.#session.stream.detach();
-    this.#session.run.reset();
+    await this.finishSubscribedStreamRun({ error: !aborted, aborted, subscription });
   }
 
   async processSubscribedThreadStream(subscription: AgentThreadSubscription<StreamChunk, true>): Promise<void> {
@@ -1698,12 +1789,13 @@ export class SessionRunEngine {
         if (runId && abortedRunId) abortedRunId = undefined;
 
         if (!currentRun) {
-          currentRun = this.createStreamState(threadId);
+          currentRun = this.createStreamState(threadId, runId ?? null);
           this.#session.run.nextOperation();
           this.#session.run.ensureAbortController();
           this.#session.run.setRunId({ runId });
           this.#session.run.setTraceId({ traceId: null });
           requestContext = await this.#machinery.buildRequestContext(subscription.__getCurrentRunRequestContext?.());
+          if (bailed || !this.#session.stream.isCurrent({ subscription })) return;
           this.#session.emit({ type: 'agent_start' });
         }
 
@@ -1712,7 +1804,9 @@ export class SessionRunEngine {
         }
 
         try {
-          const streamResult = await this.processStreamChunk(currentRun, chunk, requestContext, agent);
+          const isCurrent = () => !bailed && this.#session.stream.isCurrent({ subscription });
+          const streamResult = await this.processStreamChunk(currentRun, chunk, requestContext, agent, isCurrent);
+          if (!isCurrent()) return;
           if (
             streamResult ||
             chunk.type === 'finish' ||
@@ -1744,12 +1838,15 @@ export class SessionRunEngine {
                 finishReason: currentRun.terminalFinishReason,
               });
             }
+            // Claim finalization before awaiting end hooks: an abort deadline
+            // must not finalize the same run a second time while a hook is pending.
+            currentRun = undefined;
             await this.finishSubscribedStreamRun({
               suspended,
               error: isError,
               aborted,
+              subscription,
             });
-            currentRun = undefined;
             if (aborted) {
               // The thread subscription remains live across runs. Ignore any
               // trailing chunks from the aborted run while continuing to drain
@@ -1758,8 +1855,9 @@ export class SessionRunEngine {
             }
           }
         } catch (error) {
-          await this.handleSubscribedStreamError(error);
+          if (bailed || !this.#session.stream.isCurrent({ subscription })) return;
           currentRun = undefined;
+          await this.handleSubscribedStreamError(error, subscription);
         }
       }
     };
@@ -1776,22 +1874,26 @@ export class SessionRunEngine {
         bailGuard.abort();
       }
 
-      // Graceful stream close without explicit terminal chunk.
-      if (currentRun && this.#session.stream.isCurrent({ subscription })) {
-        const streamResult = this.finishStreamState(currentRun);
-        await this.finishSubscribedStreamRun({ suspended: streamResult.suspended });
-        currentRun = undefined;
+      const ownsSubscription = this.#session.stream.isCurrent({ subscription });
+      // A closed or hung subscription cannot observe later runs. Detach the
+      // expired consumer before finalization can dispatch a follow-up: that
+      // message must open a fresh subscription, which this consumer must not
+      // detach. A persistent subscription stays attached after an abort and
+      // continues draining later signals.
+      if ((bailed || abortedRunId) && ownsSubscription) {
+        this.#session.stream.detach();
       }
 
-      // A closed or hung subscription cannot observe later runs. Detach it so
-      // the next message creates a fresh consumer. A persistent subscription
-      // stays attached after an abort and continues draining later signals.
-      if ((bailed || abortedRunId) && this.#session.stream.isCurrent({ subscription })) {
-        this.#session.stream.detach();
+      // Graceful stream close or abort deadline without an explicit terminal chunk.
+      if (currentRun && ownsSubscription) {
+        const streamResult = this.finishStreamState(currentRun);
+        currentRun = undefined;
+        await this.finishSubscribedStreamRun({ suspended: streamResult.suspended, subscription });
       }
     } catch (error) {
       if (this.#session.stream.isCurrent({ subscription })) {
-        await this.handleSubscribedStreamError(error);
+        currentRun = undefined;
+        await this.handleSubscribedStreamError(error, subscription);
       }
     }
   }
