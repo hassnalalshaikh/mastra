@@ -678,7 +678,16 @@ export interface Config<
    * (must be idempotent). In multi-instance deploys every replica will race to
    * recover the same runs, since there is no lease/lock yet.
    *
-   * @default { durableAgents: 'off' }
+   * `dynamicWorkflows` controls whether {@link Mastra.restartAllActiveWorkflowRuns}
+   * restarts the active runs of workflows registered from stored definitions
+   * (`addDynamicWorkflow()`, or loaded from the `workflowDefinitions` store at
+   * boot). A stored definition carries no workflow `options`, so it cannot opt
+   * out per workflow with `autoRestartActiveRuns: false`.
+   *
+   * - `'auto'` (default): restart them like any code workflow.
+   * - `'off'`: never restart them at boot; their active runs stay as stored.
+   *
+   * @default { durableAgents: 'off' } (dynamicWorkflows unset behaves as 'auto')
    */
   recovery?: MastraRecoveryConfig;
 
@@ -709,6 +718,11 @@ export interface MastraRecoveryConfig {
    * @default 'off'
    */
   durableAgents?: 'auto' | 'off';
+  /**
+   * Restart active runs of dynamic (stored-definition) workflows on server boot.
+   * @default 'auto'
+   */
+  dynamicWorkflows?: 'auto' | 'off';
 }
 
 export interface WorkersConfigSection {
@@ -1582,6 +1596,9 @@ export class Mastra<
     // `restartAllActiveWorkflowRuns` boot hook.
     this.#recoveryConfig = {
       durableAgents: config?.recovery?.durableAgents ?? 'off',
+      // Present only when configured, so the resolved config stays unchanged
+      // for every app that does not set it (unset behaves as 'auto').
+      ...(config?.recovery?.dynamicWorkflows ? { dynamicWorkflows: config.recovery.dynamicWorkflows } : {}),
     };
 
     this.#editor = config?.editor;
@@ -4188,6 +4205,13 @@ export class Mastra<
       const workflow = this.getWorkflowById(runSnapshot.workflowName);
       if (workflow?.options?.autoRestartActiveRuns === false) {
         this.#logger.debug('Skipping workflow run auto-restart; workflow opts out of generic recovery', {
+          workflow: runSnapshot.workflowName,
+          runId: runSnapshot.runId,
+        });
+        continue;
+      }
+      if (workflow?.origin === 'dynamic' && this.#recoveryConfig.dynamicWorkflows === 'off') {
+        this.#logger.debug('Skipping workflow run auto-restart; dynamic workflow recovery is off', {
           workflow: runSnapshot.workflowName,
           runId: runSnapshot.runId,
         });
