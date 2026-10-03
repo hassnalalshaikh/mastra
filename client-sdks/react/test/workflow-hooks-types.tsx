@@ -23,7 +23,8 @@ export function WorkflowTypeConsumer() {
   const create = useCreateWorkflowRun();
   const cancel = useCancelWorkflowRun();
   const stream = useStreamWorkflow({ debugMode: false });
-  const state: WorkflowStreamResult = stream.streamResult;
+  // 1.7.x starts with no result until the first chunk arrives.
+  const state: WorkflowStreamResult | undefined = stream.streamResult;
   void client.getWorkflow('example');
   void create.mutateAsync(createParams);
   void cancel.mutateAsync(cancelParams);
