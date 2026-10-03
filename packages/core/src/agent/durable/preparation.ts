@@ -427,7 +427,9 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
 
   // Add user messages
   messageList.add(messages, 'input');
-  if (resumeMessageListState) messageList.deserialize(resumeMessageListState);
+  // A saved state that carries only memory identity has no messages to restore;
+  // it still marks this preparation as a rebuild of a saved run.
+  if (Array.isArray(resumeMessageListState?.messages)) messageList.deserialize(resumeMessageListState);
 
   // 6. Establish the memory/thread context BEFORE resolving input processors.
   //
