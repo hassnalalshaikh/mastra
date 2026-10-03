@@ -676,6 +676,7 @@ export function createDurableToolCallStep() {
         type: 'approval' | 'suspension';
         resumeSchema?: string;
         suspendPayload?: unknown;
+        waitingFor?: 'user' | 'external';
         delegatedRunId?: string;
         approvalToolName?: string;
         approvalArgs?: unknown;
@@ -694,7 +695,9 @@ export function createDurableToolCallStep() {
           // (mirrors the regular engine's tool-call-step metadata shape).
           runId,
           ...(opts.delegatedRunId && opts.delegatedRunId !== runId ? { delegatedRunId: opts.delegatedRunId } : {}),
-          ...(opts.type === 'suspension' ? { suspendPayload: opts.suspendPayload } : {}),
+          ...(opts.type === 'suspension'
+            ? { suspendPayload: opts.suspendPayload, waitingFor: opts.waitingFor ?? 'user' }
+            : {}),
           ...(opts.resumeSchema ? { resumeSchema: opts.resumeSchema } : {}),
         };
 
@@ -1241,6 +1244,7 @@ export function createDurableToolCallStep() {
               suspendPayload,
               type: 'suspension',
               resumeSchema: suspendOptions?.resumeSchema,
+              waitingFor: suspendOptions?.waitingFor ?? 'user',
             };
 
             if (pubsub) {
@@ -1255,6 +1259,7 @@ export function createDurableToolCallStep() {
                     suspendPayload,
                     args,
                     resumeSchema: suspendOptions?.resumeSchema,
+                    waitingFor: suspendOptions?.waitingFor ?? 'user',
                   },
                 },
                 {
@@ -1273,6 +1278,7 @@ export function createDurableToolCallStep() {
               type: 'suspension',
               suspendPayload,
               resumeSchema: suspendOptions?.resumeSchema,
+              waitingFor: suspendOptions?.waitingFor ?? 'user',
               delegatedRunId,
             });
 
@@ -1284,6 +1290,7 @@ export function createDurableToolCallStep() {
               {
                 type: 'suspension',
                 toolCallSuspended: suspendPayload,
+                waitingFor: suspendOptions?.waitingFor ?? 'user',
                 toolCallId,
                 toolName,
                 resumeLabel: suspendOptions?.resumeLabel,

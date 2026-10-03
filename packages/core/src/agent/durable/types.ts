@@ -598,6 +598,7 @@ export interface AgentSuspendedEventData {
   args?: Record<string, unknown>;
   suspendPayload?: unknown;
   resumeSchema?: string;
+  waitingFor?: 'user' | 'external';
   type: 'approval' | 'suspension';
 }
 

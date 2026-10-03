@@ -35,6 +35,7 @@ import type { ToolOptions } from '../../utils';
 import { isZodObject, safeExtendZodObject } from '../../utils/zod-utils';
 
 import type { SuspendOptions } from '../../workflows';
+import { getSuspensionWaitingFor } from '../../workflows/step';
 import { markBuilderValidatedInput } from '../builder-validation-context';
 import { createToolObserve } from '../observe';
 import { ToolStream } from '../stream';
@@ -719,6 +720,7 @@ export class CoreToolBuilder extends MastraBase {
             abortSignal: execOptions.abortSignal,
             background: execOptions.background,
             suspend: (args: any, suspendOptions?: SuspendOptions) => {
+              getSuspensionWaitingFor(suspendOptions);
               suspendData = args;
               const newSuspendOptions = {
                 ...(suspendOptions ?? {}),

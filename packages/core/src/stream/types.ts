@@ -831,6 +831,8 @@ interface ToolCallSuspendedPayload {
   suspendPayload: any;
   args: Record<string, any>;
   resumeSchema: string;
+  /** Omitted by older producers; defaults to 'user'. */
+  waitingFor?: 'user' | 'external';
 }
 
 interface ToolCallResumedPayload {
