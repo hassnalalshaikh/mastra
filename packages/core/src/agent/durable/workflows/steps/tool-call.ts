@@ -29,6 +29,7 @@ import {
 } from '../../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../../tools/provider-tool-utils';
 import { ToolStream } from '../../../../tools/stream';
+import { executionStartHook } from '../../../../tools/tool-execution-events';
 import { executeToolWithPolicy } from '../../../../tools/tool-policy-execution';
 import { getToolTitle } from '../../../../tools/tool-title';
 import { resolveToolOutputValidationSchema, validateToolOutput } from '../../../../tools/validation';
@@ -1113,6 +1114,15 @@ export function createDurableToolCallStep() {
         : undefined;
 
       const toolOptions = {
+        ...executionStartHook(async () => {
+          if (pubsub)
+            await emitChunkEvent(pubsub, runId, {
+              type: 'tool-execution-start',
+              runId,
+              from: ChunkFrom.AGENT,
+              payload: { runId, args: { toolCallId, toolName } },
+            });
+        }),
         toolCallId,
         messages: [],
         getMessages: messageList ? () => messageList.get.all.db() : undefined,

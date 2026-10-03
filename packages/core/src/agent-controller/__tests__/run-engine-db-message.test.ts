@@ -458,3 +458,100 @@ describe('SessionRunEngine compact message lifecycle', () => {
     expect(events.filter(event => event.type === 'message_end')).toContainEqual({ type: 'message_end', id: 'msg-1' });
   });
 });
+
+// 1.74 port: createStreamState takes (threadId, runId), and a dispatched background
+// task reports its placeholder with native `backgroundTask.status: 'running'` metadata.
+const requestContext = () => new RequestContext();
+
+describe('truthful native tool lifecycle', () => {
+  it('preparation stays distinct from execution and the terminal outcome keeps run identity', async () => {
+    const { engine, session, events } = createHarness();
+    const state = engine.createStreamState(undefined, 'run-exact');
+    const ctx = requestContext();
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tool-call', payload: { toolCallId: 'task', toolName: 'work', args: { visible: true } } }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('running');
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'tool-execution-start',
+        payload: { runId: 'run-exact', args: { toolCallId: 'task', toolName: 'work', args: { visible: true } } },
+      }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('executing');
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tool-result', payload: { toolCallId: 'task', toolName: 'work', result: 'done' } }),
+      ctx,
+    );
+    expect(session.displayState.get().activeTools.get('task')?.status).toBe('completed');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_end',
+        runId: 'run-exact',
+        toolCallId: 'task',
+        toolName: 'work',
+        messageId: state.currentMessage.id,
+        completedAt: expect.any(String),
+        isError: false,
+      }),
+    );
+  });
+
+  it('cancelled active work has one failed outcome, never a successful completion', async () => {
+    const { session, events } = createHarness();
+    session.emit({ type: 'tool_execution_start', runId: 'run-cancel', toolCallId: 'task', toolName: 'work', args: {} });
+    await session.finishAgentRun('aborted');
+    await session.finishAgentRun('aborted');
+    const outcomes = events.filter(event => event.type === 'tool_end');
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ toolCallId: 'task', isError: true, cancelled: true });
+  });
+});
+
+it('a background dispatch stays active and announces only its real final result', async () => {
+  const { engine, session, events } = createHarness();
+  const state = engine.createStreamState(undefined, 'background-run');
+  const ctx = requestContext();
+  await engine.processStreamChunk(
+    state,
+    chunk({ type: 'tool-call', payload: { toolCallId: 'bg', toolName: 'work', args: {} } }),
+    ctx,
+  );
+  await engine.processStreamChunk(
+    state,
+    chunk({
+      type: 'tool-execution-start',
+      payload: { runId: 'background-run', args: { toolCallId: 'bg', toolName: 'work' } },
+    }),
+    ctx,
+  );
+  await engine.processStreamChunk(
+    state,
+    chunk({
+      type: 'tool-result',
+      payload: {
+        toolCallId: 'bg',
+        toolName: 'work',
+        result: 'Dispatched',
+        providerMetadata: { mastra: { backgroundTask: { taskId: 'bg-task', status: 'running' } } },
+      },
+    }),
+    ctx,
+  );
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(0);
+  await session.finishAgentRun('complete');
+  session.emit({ type: 'agent_start' });
+  expect(session.displayState.get().activeTools.get('bg')).toMatchObject({ status: 'executing', background: true });
+  await engine.processStreamChunk(
+    state,
+    chunk({ type: 'tool-result', payload: { toolCallId: 'bg', toolName: 'work', result: 'Actual result' } }),
+    ctx,
+  );
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(1);
+  expect(session.displayState.get().activeTools.get('bg')).toMatchObject({ status: 'completed', background: false });
+});

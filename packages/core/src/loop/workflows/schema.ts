@@ -173,6 +173,7 @@ export const toolCallInputSchema = z.object({
 });
 
 export const toolCallOutputSchema = toolCallInputSchema.extend({
+  isError: z.boolean().optional(),
   result: z.any().optional(),
   error: z.any().optional(),
   // Set when execution was interrupted by request abort (not a tool error); no result/error

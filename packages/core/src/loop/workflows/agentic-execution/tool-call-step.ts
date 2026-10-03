@@ -16,10 +16,12 @@ import {
   withToolPayloadTransformProviderMetadata,
 } from '../../../tools/payload-transform';
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
-import { executeToolWithPolicy } from '../../../tools/tool-policy-execution';
+import { executionStartHook } from '../../../tools/tool-execution-events';
+import { executeToolWithPolicy, isToolPolicyRejection } from '../../../tools/tool-policy-execution';
 import { getToolTitle } from '../../../tools/tool-title';
+
 import type { MastraToolInvocationOptions } from '../../../tools/types';
-import { resolveToolOutputValidationSchema, validateToolOutput } from '../../../tools/validation';
+import { isValidationError, resolveToolOutputValidationSchema, validateToolOutput } from '../../../tools/validation';
 import { ensureSerializable } from '../../../utils';
 import type { SuspendOptions } from '../../../workflows/step';
 import { createStep } from '../../../workflows/workflow';
@@ -797,6 +799,16 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
             : resumeData;
 
         const toolOptions: MastraToolInvocationOptions = {
+          ...executionStartHook(async () => {
+            const chunk = {
+              type: 'tool-execution-start' as const,
+              runId,
+              from: ChunkFrom.AGENT,
+              payload: { runId, args: { toolCallId: inputData.toolCallId, toolName: inputData.toolName } },
+            };
+            safeEnqueue(controller, chunk);
+            await options?.onChunk?.(chunk);
+          }),
           abortSignal,
           toolCallId: inputData.toolCallId,
           // Agent tools receive the exact processor-adjusted prompt visible to the parent model.
@@ -1422,7 +1434,12 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
           return { error: serializeToolError(outcome.error), ...inputData };
         }
 
-        return { result: outcome.result, ...inputData, ...(approvalGrant ?? {}) };
+        return {
+          result: outcome.result,
+          ...inputData,
+          isError: isToolPolicyRejection(outcome.rawResult) || isValidationError(outcome.rawResult),
+          ...(approvalGrant ?? {}),
+        };
       } catch (error) {
         // Re-throw FGA authorization errors instead of swallowing them
         if (error instanceof Error && error.name === 'FGADeniedError') {
