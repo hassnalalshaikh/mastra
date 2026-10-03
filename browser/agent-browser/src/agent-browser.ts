@@ -6,6 +6,7 @@ import {
   resolveLaunchViewport,
 } from '@mastra/core/browser';
 import type {
+  BrowserAgentAction,
   BrowserState,
   BrowserTabState,
   BrowserToolError,
@@ -16,12 +17,16 @@ import type {
   MouseEventParams,
   KeyboardEventParams,
   ThreadSession,
+  BrowserViewerCommand,
+  BrowserViewerPreferences,
 } from '@mastra/core/browser';
 import type { Tool } from '@mastra/core/tools';
 
 import { BrowserManager } from 'agent-browser';
 import type { BrowserLaunchOptions } from 'agent-browser';
 import type { Page, Locator } from 'playwright-core';
+import { BrowserActivityObserver } from './activity-observer';
+import { SavedBrowserTabs } from './saved-tabs';
 import type {
   GotoInput,
   SnapshotInput,
@@ -38,11 +43,13 @@ import type {
   EvaluateInput,
   ScreenshotInput,
 } from './schemas';
+import { describeOmittedElements, fitSnapshotToBudget } from './snapshot-budget';
 import { AgentBrowserThreadManager } from './thread-manager';
 import type { CreateAgentBrowserThreadManager } from './thread-manager';
 import { createAgentBrowserTools } from './tools';
 import type { BrowserConfig } from './types';
 import { getBrowserPid } from './utils';
+import { ViewerPreferences } from './viewer-preferences';
 
 /** AgentBrowser accepts an optional thread-manager factory (see {@link CreateAgentBrowserThreadManager}). */
 export type AgentBrowserConfig = BrowserConfig & {
@@ -70,6 +77,10 @@ export class AgentBrowser extends MastraBrowser {
   /** Thread manager - narrowed type from base class */
   declare protected threadManager: AgentBrowserThreadManager;
   private browserConfig: BrowserConfig;
+  private activityObserver?: BrowserActivityObserver;
+  private readonly savedTabs?: SavedBrowserTabs;
+  private readonly viewerPreferences = new WeakMap<BrowserManager, ViewerPreferences>();
+  private pendingViewerPreferences?: BrowserViewerPreferences;
 
   constructor(config: AgentBrowserConfig = {}) {
     super(config);
@@ -82,6 +93,14 @@ export class AgentBrowser extends MastraBrowser {
     // Default to 'shared' when cdpUrl is provided (connecting to existing browser)
     // Default to 'thread' otherwise (launching new browsers per thread)
     const effectiveScope = config.cdpUrl ? (config.scope ?? 'shared') : (config.scope ?? 'thread');
+    if ((config.observeUserActivity || config.restoreTabsOnLaunch || config.savedTabs) && effectiveScope !== 'shared') {
+      throw new Error('Remote activity and saved-tab restoration require shared scope');
+    }
+    if (config.savedTabs) this.savedTabs = new SavedBrowserTabs(config.savedTabs);
+    if (config.idleTimeoutMs !== undefined) {
+      if (!config.observeUserActivity) throw new Error('Idle closure requires trusted browser input observation');
+      this.configureIdleTimeout(config.idleTimeoutMs);
+    }
 
     // Initialize thread manager (optional factory for extensions like Firecrawl per-thread sessions)
     const threadManagerConfig = {
@@ -167,6 +186,7 @@ export class AgentBrowser extends MastraBrowser {
   // ---------------------------------------------------------------------------
 
   protected override async doLaunch(): Promise<void> {
+    if (this.savedTabs) this.lastBrowserState = await this.savedTabs.load();
     this.pendingCloseReasons.clear();
     this.activeUrlChangeSources.clear();
 
@@ -205,6 +225,7 @@ export class AgentBrowser extends MastraBrowser {
     }
 
     await this.sharedManager.launch(launchOptions);
+    await this.configureViewer(this.pendingViewerPreferences ?? this.browserConfig.viewerPreferences);
 
     // Register the shared manager with ThreadManager
     this.threadManager.setSharedManager(this.sharedManager);
@@ -213,6 +234,26 @@ export class AgentBrowser extends MastraBrowser {
     // A resolved `cdpUrl` means we connected to an existing (remote/container)
     // browser we do not own — don't capture its PID (issue #23588).
     this.setupCloseListenerForSharedScope(this.sharedManager, Boolean(launchOptions.cdpUrl));
+    if ((this.browserConfig.restoreTabsOnLaunch || this.savedTabs) && this.lastBrowserState?.tabs.length) {
+      await this.threadManager.restoreBrowserState(
+        this.sharedManager,
+        this.lastBrowserState,
+        true,
+        page => this.viewerPreferences.get(this.sharedManager!)?.apply(page) ?? Promise.resolve(),
+      );
+    }
+    if (this.browserConfig.observeUserActivity) {
+      const context = this.sharedManager.getContext();
+      if (!context) throw new Error('Browser input observation requires a live context');
+      this.activityObserver = new BrowserActivityObserver(
+        context,
+        () => this.recordActivity(),
+        // Unobserved input only looks idle, so the idle close still ends billing; a page-change
+        // race must never close a working browser.
+        error => this.logger.warn('Browser activity observation missed a document', { error }),
+      );
+      await this.activityObserver.start();
+    }
   }
 
   /**
@@ -277,6 +318,16 @@ export class AgentBrowser extends MastraBrowser {
   }
 
   protected override async doClose(): Promise<void> {
+    let saveError: unknown;
+    if (this.savedTabs && this.lastBrowserState) {
+      try {
+        await this.savedTabs.save(this.lastBrowserState);
+      } catch (error) {
+        saveError = error;
+      }
+    }
+    await this.activityObserver?.stop();
+    this.activityObserver = undefined;
     // Ensure all PID lookups have resolved before closing, so killProcessGroup
     // (called by the base class after doClose) has the correct PID.
     await Promise.allSettled([...this.pidLookups]);
@@ -292,6 +343,7 @@ export class AgentBrowser extends MastraBrowser {
       await this.sharedManager.close();
     }
     this.sharedManager = null;
+    if (saveError) throw saveError;
   }
 
   override async closeThreadSession(threadId: string): Promise<void> {
@@ -351,7 +403,15 @@ export class AgentBrowser extends MastraBrowser {
   getTools(): Record<string, Tool<any, any>> {
     const tools = createAgentBrowserTools(this);
     if (this.browserConfig.recording) {
-      Object.assign(tools, createBrowserRecordingTools(this, this.browserConfig.recording));
+      const recordingTools: Record<string, Tool<any, any>> = createBrowserRecordingTools(
+        this,
+        this.browserConfig.recording,
+      );
+      for (const tool of Object.values(recordingTools)) {
+        const execute = tool.execute;
+        if (execute) tool.execute = (input, context) => this.runBrowserOperation(() => execute(input, context));
+      }
+      Object.assign(tools, recordingTools);
     }
 
     const exclude = this.browserConfig.excludeTools;
@@ -413,10 +473,90 @@ export class AgentBrowser extends MastraBrowser {
     const threadId = explicitThreadId ?? this.getCurrentThread();
     // For thread scope, always use threadManager.getPageForThread
     if (scope === 'thread') {
-      return this.threadManager.getPageForThread(threadId);
+      const page = await this.threadManager.getPageForThread(threadId);
+      const manager = this.threadManager.getExistingManagerForThread(threadId ?? DEFAULT_THREAD_ID);
+      if (manager) {
+        if (!this.viewerPreferences.has(manager))
+          await this.configureViewer(this.browserConfig.viewerPreferences, threadId);
+        await this.viewerPreferences.get(manager)?.apply(page);
+      }
+      return page;
     }
     if (!this.sharedManager) throw new Error('Browser not launched');
-    return this.sharedManager.getPage();
+    const page = this.sharedManager.getPage();
+    await this.viewerPreferences.get(this.sharedManager)?.apply(page);
+    return page;
+  }
+
+  /** Store preferences without launching; apply them to every existing page when connected. */
+  override getViewerViewport(threadId?: string) {
+    const manager = this.threadManager.getExistingManagerForThread(
+      threadId ?? this.getCurrentThread() ?? DEFAULT_THREAD_ID,
+    );
+    if (!manager || !manager.isLaunched()) return undefined;
+    const preferences = this.viewerPreferences.get(manager)?.get(manager.getPage());
+    return preferences ? { width: preferences.width, height: preferences.height } : undefined;
+  }
+
+  async configureViewer(preferences?: BrowserViewerPreferences, threadId?: string): Promise<void> {
+    if (!preferences) return;
+    this.pendingViewerPreferences = preferences;
+    const manager =
+      this.getScope() === 'shared'
+        ? this.sharedManager
+        : this.threadManager.getExistingManagerForThread(threadId ?? this.getCurrentThread() ?? DEFAULT_THREAD_ID);
+    const context = manager?.getContext();
+    if (!manager || !context) return;
+    let settings = this.viewerPreferences.get(manager);
+    if (!settings) {
+      settings = new ViewerPreferences(context);
+      this.viewerPreferences.set(manager, settings);
+    }
+    await settings.set(preferences);
+  }
+
+  override async executeViewerCommand(command: BrowserViewerCommand, threadId?: string): Promise<void> {
+    if (!this.isBrowserRunning(threadId)) throw new Error('Browser is not running');
+    if (command.type === 'preferences') {
+      await this.configureViewer(command.preferences, threadId);
+      return;
+    }
+    await this.runBrowserOperation(async () => {
+      const manager = await this.getManagerForThread(threadId);
+      if (command.type === 'mouse') return this.injectMouseEvent(command.event, threadId);
+      if (command.type === 'keyboard') return this.injectKeyboardEvent(command.event, threadId);
+      if (command.type === 'switch-tab') await manager.switchTo(command.index);
+      else if (command.type === 'close-tab') await manager.closeTab(command.index);
+      else if (command.type === 'new-tab') await manager.newTab();
+      const page = await this.getPage(threadId);
+      switch (command.type) {
+        case 'navigate': {
+          const url = new URL(command.url);
+          if (url.protocol !== 'https:' && url.protocol !== 'http:' && command.url !== 'about:blank') {
+            throw new Error('Unsupported navigation URL');
+          }
+          await page.goto(url.href, { waitUntil: 'commit' });
+          break;
+        }
+        case 'back':
+          await page.goBack({ waitUntil: 'commit' });
+          break;
+        case 'forward':
+          await page.goForward({ waitUntil: 'commit' });
+          break;
+        case 'reload':
+          await page.reload({ waitUntil: 'commit' });
+          break;
+        case 'text':
+          await page.keyboard.insertText(command.text);
+          break;
+      }
+      this.markActiveUrlChangeSource('user', page.url(), threadId);
+      this.updateSessionBrowserState(threadId);
+      if (command.type === 'switch-tab' || command.type === 'close-tab' || command.type === 'new-tab') {
+        await this.reconnectScreencastForThread(threadId, 'viewer tab command');
+      }
+    });
   }
 
   /**
@@ -540,6 +680,51 @@ export class AgentBrowser extends MastraBrowser {
     return manager.getLocatorFromRef(ref);
   }
 
+  /**
+   * Tell live viewers where the agent is about to act. Only when someone is
+   * watching; it brings the element into view first (as the action itself
+   * would) and never fails or delays the action beyond a short bound.
+   */
+  private async markAgentAction(kind: BrowserAgentAction['kind'], locator: Locator, threadId?: string) {
+    if (!this.hasAgentActionListeners()) return;
+    try {
+      await locator.scrollIntoViewIfNeeded({ timeout: 1000 });
+      const box = await locator.boundingBox({ timeout: 1000 });
+      if (box && box.width > 0 && box.height > 0) this.notifyAgentAction({ kind, box }, threadId);
+    } catch {
+      // A missing box only means no cursor; the action reports its own errors.
+    }
+  }
+
+  /** Tell live viewers the agent is acting on the whole page (open, back, tabs, page scroll). */
+  private markPageAction(kind: BrowserAgentAction['kind'], page: Page | (() => Page), threadId?: string) {
+    if (!this.hasAgentActionListeners()) return;
+    try {
+      const size = (typeof page === 'function' ? page() : page).viewportSize();
+      if (size && size.width > 0 && size.height > 0)
+        this.notifyAgentAction({ kind, box: { x: 0, y: 0, width: size.width, height: size.height } }, threadId);
+    } catch {
+      // No page size only means no mark; the action reports its own errors.
+    }
+  }
+
+  /** A key press acts on the focused element; with nothing focused it acts on the page. */
+  private async markKeyAction(page: Page, threadId?: string) {
+    if (!this.hasAgentActionListeners()) return;
+    try {
+      const box = await page.evaluate(() => {
+        const element = (globalThis as any).document?.activeElement;
+        if (!element || element === (globalThis as any).document.body) return null;
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      });
+      if (box && box.width > 0 && box.height > 0) return this.notifyAgentAction({ kind: 'press', box }, threadId);
+    } catch {
+      // No box only means the page-level mark below.
+    }
+    this.markPageAction('press', page, threadId);
+  }
+
   private async getScrollInfo(threadId?: string): Promise<{
     scrollY: number;
     scrollHeight: number;
@@ -631,18 +816,20 @@ export class AgentBrowser extends MastraBrowser {
    * Navigate to a URL (simple form). Used internally for restoring state on relaunch.
    */
   override async navigateTo(url: string): Promise<void> {
-    if (!this.isBrowserRunning()) {
-      return;
-    }
-    try {
-      const page = await this.getPage();
-      await page.goto(url, {
-        timeout: this.defaultTimeout,
-        waitUntil: 'domcontentloaded',
-      });
-    } catch {
-      // Silently ignore navigation errors during restore
-    }
+    return this.runBrowserOperation(async () => {
+      if (!this.isBrowserRunning()) {
+        return;
+      }
+      try {
+        const page = await this.getPage();
+        await page.goto(url, {
+          timeout: this.defaultTimeout,
+          waitUntil: 'domcontentloaded',
+        });
+      } catch {
+        // Silently ignore navigation errors during restore
+      }
+    });
   }
 
   /**
@@ -654,7 +841,16 @@ export class AgentBrowser extends MastraBrowser {
     }
     try {
       const manager = await this.getManagerForThread(threadId);
-      return this.getBrowserStateForManager(manager, threadId);
+      const state = this.getBrowserStateForManager(manager, threadId);
+      if (!state) return null;
+      const pages = manager.getPages();
+      state.tabs = await Promise.all(
+        state.tabs.map(async (tab, index) => ({
+          ...tab,
+          title: (await pages[index]?.title().catch(() => '')) ?? '',
+        })),
+      );
+      return state;
     } catch {
       return null;
     }
@@ -755,25 +951,28 @@ export class AgentBrowser extends MastraBrowser {
     input: GotoInput,
     threadId?: string,
   ): Promise<{ success: true; url: string; title: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
 
-      await page.goto(input.url, {
-        timeout: input.timeout ?? this.defaultTimeout,
-        waitUntil: input.waitUntil ?? 'domcontentloaded',
-      });
-      const url = page.url();
-      this.markActiveUrlChangeSource('agent', url, threadId);
+        this.markPageAction('navigate', page, threadId);
+        await page.goto(input.url, {
+          timeout: input.timeout ?? this.defaultTimeout,
+          waitUntil: input.waitUntil ?? 'domcontentloaded',
+        });
+        const url = page.url();
+        this.markActiveUrlChangeSource('agent', url, threadId);
 
-      return {
-        success: true,
-        url,
-        title: await page.title(),
-        hint: 'Take a snapshot to see interactive elements and get refs.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Goto');
-    }
+        return {
+          success: true,
+          url,
+          title: await page.title(),
+          hint: 'Take a snapshot to see interactive elements and get refs.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Goto');
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -790,52 +989,68 @@ export class AgentBrowser extends MastraBrowser {
         url: string;
         title: string;
         elementCount: number;
+        shownElementCount?: number;
+        matches?: string[];
         scroll: string;
         hint?: string;
       }
     | BrowserToolError
   > {
-    try {
-      const manager = await this.getManagerForThread(threadId);
-      const page = await this.getPage(threadId);
-      const rawSnapshot = await manager.getSnapshot({
-        interactive: input.interactiveOnly ?? true,
-        compact: true,
-      });
+    return this.runBrowserOperation(async () => {
+      try {
+        const manager = await this.getManagerForThread(threadId);
+        const page = await this.getPage(threadId);
+        const rawSnapshot = await manager.getSnapshot({
+          interactive: input.interactiveOnly ?? true,
+          compact: true,
+        });
 
-      // Transform tree refs from [ref=e1] format to @e1 format for consistency
-      const snapshot = (rawSnapshot.tree ?? '').replace(/\[ref=(\w+)\]/g, '@$1');
+        // Transform tree refs from [ref=e1] format to @e1 format for consistency
+        const fullSnapshot = (rawSnapshot.tree ?? '').replace(/\[ref=(\w+)\]/g, '@$1');
+        const fitted = fitSnapshotToBudget(fullSnapshot, {
+          maxChars: this.browserConfig.snapshotMaxChars,
+          find: input.find,
+          showAll: input.showAll,
+        });
+        const snapshot = fitted.snapshot;
 
-      // Get scroll position info
-      const scrollInfo = await this.getScrollInfo(threadId);
-      let scrollText: string;
-      if (scrollInfo.atTop && !scrollInfo.atBottom) {
-        scrollText = 'TOP - more content below';
-      } else if (scrollInfo.atBottom) {
-        scrollText = 'BOTTOM of page';
-      } else {
-        scrollText = `${scrollInfo.percentDown}% down`;
+        // Get scroll position info
+        const scrollInfo = await this.getScrollInfo(threadId);
+        let scrollText: string;
+        if (scrollInfo.atTop && !scrollInfo.atBottom) {
+          scrollText = 'TOP - more content below';
+        } else if (scrollInfo.atBottom) {
+          scrollText = 'BOTTOM of page';
+        } else {
+          scrollText = `${scrollInfo.percentDown}% down`;
+        }
+
+        // Count refs on the whole page; a fitted snapshot may list fewer
+        const refs = fullSnapshot.match(/@e\d+/g) || [];
+        const elementCount = new Set(refs).size;
+        const shownElementCount = new Set(snapshot.match(/@e\d+/g) || []).size;
+
+        let hint: string | undefined;
+        if (fitted.matches?.length === 0) hint = `No element contains "${input.find}". Try other words.`;
+        else if (fitted.omitted) hint = describeOmittedElements(fitted.omitted);
+        else if (elementCount === 0)
+          hint = 'No interactive elements found. Try scrolling or setting interactiveOnly:false.';
+
+        return {
+          success: true,
+          snapshot,
+          url: page.url(),
+          title: await page.title(),
+          elementCount,
+          ...(shownElementCount !== elementCount ? { shownElementCount } : {}),
+          ...(fitted.matches ? { matches: fitted.matches } : {}),
+          scroll: scrollText,
+          hint,
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Snapshot');
       }
-
-      // Count refs
-      const refs = snapshot.match(/@e\d+/g) || [];
-      const elementCount = new Set(refs).size;
-
-      return {
-        success: true,
-        snapshot,
-        url: page.url(),
-        title: await page.title(),
-        elementCount,
-        scroll: scrollText,
-        hint:
-          elementCount === 0
-            ? 'No interactive elements found. Try scrolling or setting interactiveOnly:false.'
-            : undefined,
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Snapshot');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -846,22 +1061,24 @@ export class AgentBrowser extends MastraBrowser {
     input: ScreenshotInput,
     threadId?: string,
   ): Promise<{ base64: string; url: string; title: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const buffer = await page.screenshot({
-        fullPage: input.fullPage ?? false,
-        type: 'png',
-      });
-      const base64 = Buffer.from(buffer).toString('base64');
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const buffer = await page.screenshot({
+          fullPage: input.fullPage ?? false,
+          type: 'png',
+        });
+        const base64 = Buffer.from(buffer).toString('base64');
 
-      return {
-        base64,
-        url: page.url(),
-        title: await page.title(),
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Screenshot');
-    }
+        return {
+          base64,
+          url: page.url(),
+          title: await page.title(),
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Screenshot');
+      }
+    });
   }
 
   /**
@@ -889,49 +1106,52 @@ export class AgentBrowser extends MastraBrowser {
     input: ClickInput,
     threadId?: string,
   ): Promise<{ success: true; url: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const locator = await this.requireLocator(input.ref, threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const locator = await this.requireLocator(input.ref, threadId);
 
-      if (!locator) {
-        return this.createError(
-          'stale_ref',
-          `Ref ${input.ref} not found. The page has changed.`,
-          'Take a new snapshot to see the current page state and get fresh refs.',
-        );
+        if (!locator) {
+          return this.createError(
+            'stale_ref',
+            `Ref ${input.ref} not found. The page has changed.`,
+            'Take a new snapshot to see the current page state and get fresh refs.',
+          );
+        }
+
+        const timeout = input.timeout ?? this.defaultTimeout;
+
+        await this.markAgentAction('click', locator, threadId);
+        const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
+
+        await locator.click({
+          button: input.button ?? 'left',
+          clickCount: input.clickCount ?? 1,
+          modifiers: input.modifiers,
+          timeout,
+        });
+
+        await navigation;
+
+        return {
+          success: true,
+          url: page.url(),
+          hint: 'Take a new snapshot to see updated page state and get fresh refs.',
+        };
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+
+        if (errorMsg.includes('intercepts pointer events')) {
+          return this.createError(
+            'element_blocked',
+            `Element ${input.ref} is blocked by another element.`,
+            'Take a new snapshot to see what is blocking. Dismiss any modals or scroll the element into view.',
+          );
+        }
+
+        return this.createErrorFromException(error, 'Click');
       }
-
-      const timeout = input.timeout ?? this.defaultTimeout;
-
-      const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
-
-      await locator.click({
-        button: input.button ?? 'left',
-        clickCount: input.clickCount ?? 1,
-        modifiers: input.modifiers,
-        timeout,
-      });
-
-      await navigation;
-
-      return {
-        success: true,
-        url: page.url(),
-        hint: 'Take a new snapshot to see updated page state and get fresh refs.',
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-
-      if (errorMsg.includes('intercepts pointer events')) {
-        return this.createError(
-          'element_blocked',
-          `Element ${input.ref} is blocked by another element.`,
-          'Take a new snapshot to see what is blocking. Dismiss any modals or scroll the element into view.',
-        );
-      }
-
-      return this.createErrorFromException(error, 'Click');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -942,59 +1162,62 @@ export class AgentBrowser extends MastraBrowser {
     input: TypeInput,
     threadId?: string,
   ): Promise<{ success: true; value: string; url: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const locator = await this.requireLocator(input.ref, threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const locator = await this.requireLocator(input.ref, threadId);
 
-      if (!locator) {
-        return this.createError(
-          'stale_ref',
-          `Ref ${input.ref} not found. The page has changed.`,
-          'Take a new snapshot to see the current page state and get fresh refs.',
-        );
-      }
-
-      if (input.clear) {
-        await locator.fill('', { timeout: this.defaultTimeout });
-      }
-
-      if (input.delay) {
-        await locator.focus();
-        for (const char of input.text) {
-          await page.keyboard.press(char);
-          await new Promise(r => setTimeout(r, input.delay));
+        if (!locator) {
+          return this.createError(
+            'stale_ref',
+            `Ref ${input.ref} not found. The page has changed.`,
+            'Take a new snapshot to see the current page state and get fresh refs.',
+          );
         }
-      } else {
-        await locator.fill(input.text, { timeout: this.defaultTimeout });
+
+        await this.markAgentAction('type', locator, threadId);
+        if (input.clear) {
+          await locator.fill('', { timeout: this.defaultTimeout });
+        }
+
+        if (input.delay) {
+          await locator.focus();
+          for (const char of input.text) {
+            await page.keyboard.press(char);
+            await new Promise(r => setTimeout(r, input.delay));
+          }
+        } else {
+          await locator.fill(input.text, { timeout: this.defaultTimeout });
+        }
+
+        // Get the actual value in the field
+        const value = await locator.inputValue({ timeout: 1000 }).catch(() => input.text);
+
+        return {
+          success: true,
+          value,
+          url: page.url(),
+          hint: 'Take a new snapshot if you need to interact with more elements.',
+        };
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+
+        if (
+          errorMsg.includes('is not an <input>') ||
+          errorMsg.includes('not an input') ||
+          errorMsg.includes('Cannot type') ||
+          errorMsg.includes('not focusable')
+        ) {
+          return this.createError(
+            'not_focusable',
+            `Element ${input.ref} is not a text input field.`,
+            'Take a new snapshot and look for elements with role "textbox" or "searchbox".',
+          );
+        }
+
+        return this.createErrorFromException(error, 'Type');
       }
-
-      // Get the actual value in the field
-      const value = await locator.inputValue({ timeout: 1000 }).catch(() => input.text);
-
-      return {
-        success: true,
-        value,
-        url: page.url(),
-        hint: 'Take a new snapshot if you need to interact with more elements.',
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-
-      if (
-        errorMsg.includes('is not an <input>') ||
-        errorMsg.includes('not an input') ||
-        errorMsg.includes('Cannot type') ||
-        errorMsg.includes('not focusable')
-      ) {
-        return this.createError(
-          'not_focusable',
-          `Element ${input.ref} is not a text input field.`,
-          'Take a new snapshot and look for elements with role "textbox" or "searchbox".',
-        );
-      }
-
-      return this.createErrorFromException(error, 'Type');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1005,23 +1228,26 @@ export class AgentBrowser extends MastraBrowser {
     input: PressInput,
     threadId?: string,
   ): Promise<{ success: true; url: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const timeout = input.timeout ?? this.defaultTimeout;
-      const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const timeout = input.timeout ?? this.defaultTimeout;
+        const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
 
-      await page.keyboard.press(input.key);
+        await this.markKeyAction(page, threadId);
+        await page.keyboard.press(input.key);
 
-      await navigation;
+        await navigation;
 
-      return {
-        success: true,
-        url: page.url(),
-        hint: 'Take a new snapshot if the page may have changed.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Press');
-    }
+        return {
+          success: true,
+          url: page.url(),
+          hint: 'Take a new snapshot if the page may have changed.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Press');
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1032,39 +1258,42 @@ export class AgentBrowser extends MastraBrowser {
     input: SelectInput,
     threadId?: string,
   ): Promise<{ success: true; selected: string[]; url: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const locator = await this.requireLocator(input.ref, threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const locator = await this.requireLocator(input.ref, threadId);
 
-      if (!locator) {
-        return this.createError(
-          'stale_ref',
-          `Ref ${input.ref} not found. The page has changed.`,
-          'Take a new snapshot to get fresh refs.',
-        );
+        if (!locator) {
+          return this.createError(
+            'stale_ref',
+            `Ref ${input.ref} not found. The page has changed.`,
+            'Take a new snapshot to get fresh refs.',
+          );
+        }
+
+        const selectValue: { value?: string; label?: string; index?: number } = {};
+        if (input.value) selectValue.value = input.value;
+        if (input.label) selectValue.label = input.label;
+        if (input.index !== undefined) selectValue.index = input.index;
+
+        const timeout = input.timeout ?? this.defaultTimeout;
+        const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
+
+        await this.markAgentAction('select', locator, threadId);
+        const selected = await locator.selectOption(selectValue, { timeout });
+
+        await navigation;
+
+        return {
+          success: true,
+          selected,
+          url: page.url(),
+          hint: 'Selection complete. Take a snapshot if you need to continue.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Select');
       }
-
-      const selectValue: { value?: string; label?: string; index?: number } = {};
-      if (input.value) selectValue.value = input.value;
-      if (input.label) selectValue.label = input.label;
-      if (input.index !== undefined) selectValue.index = input.index;
-
-      const timeout = input.timeout ?? this.defaultTimeout;
-      const navigation = this.startNavigationWait(page, input.waitUntil, timeout);
-
-      const selected = await locator.selectOption(selectValue, { timeout });
-
-      await navigation;
-
-      return {
-        success: true,
-        selected,
-        url: page.url(),
-        hint: 'Selection complete. Take a snapshot if you need to continue.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Select');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1075,64 +1304,68 @@ export class AgentBrowser extends MastraBrowser {
     input: ScrollInput,
     threadId?: string,
   ): Promise<{ success: true; position: { x: number; y: number }; scroll: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
 
-      if (input.ref) {
-        const locator = await this.requireLocator(input.ref, threadId);
-        if (locator) {
-          await locator.scrollIntoViewIfNeeded({ timeout: this.defaultTimeout });
+        if (input.ref) {
+          const locator = await this.requireLocator(input.ref, threadId);
+          if (locator) {
+            await locator.scrollIntoViewIfNeeded({ timeout: this.defaultTimeout });
+            await this.markAgentAction('scroll', locator, threadId);
+          }
+        } else {
+          this.markPageAction('scroll', page, threadId);
+          const direction = input.direction;
+          const amount = input.amount ?? 300;
+
+          let deltaX = 0;
+          let deltaY = 0;
+
+          switch (direction) {
+            case 'up':
+              deltaY = -amount;
+              break;
+            case 'down':
+              deltaY = amount;
+              break;
+            case 'left':
+              deltaX = -amount;
+              break;
+            case 'right':
+              deltaX = amount;
+              break;
+          }
+
+          await page.evaluate(
+            ({ x, y }: { x: number; y: number }) => {
+              (globalThis as any).scrollBy(x, y);
+            },
+            { x: deltaX, y: deltaY },
+          );
         }
-      } else {
-        const direction = input.direction;
-        const amount = input.amount ?? 300;
 
-        let deltaX = 0;
-        let deltaY = 0;
-
-        switch (direction) {
-          case 'up':
-            deltaY = -amount;
-            break;
-          case 'down':
-            deltaY = amount;
-            break;
-          case 'left':
-            deltaX = -amount;
-            break;
-          case 'right':
-            deltaX = amount;
-            break;
+        // Get new scroll position
+        const scrollInfo = await this.getScrollInfo(threadId);
+        let scrollText: string;
+        if (scrollInfo.atTop && !scrollInfo.atBottom) {
+          scrollText = 'TOP - more content below';
+        } else if (scrollInfo.atBottom) {
+          scrollText = 'BOTTOM of page';
+        } else {
+          scrollText = `${scrollInfo.percentDown}% down`;
         }
 
-        await page.evaluate(
-          ({ x, y }: { x: number; y: number }) => {
-            (globalThis as any).scrollBy(x, y);
-          },
-          { x: deltaX, y: deltaY },
-        );
+        return {
+          success: true,
+          position: { x: 0, y: scrollInfo.scrollY },
+          scroll: scrollText,
+          hint: 'Take a new snapshot to see elements in the new viewport.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Scroll');
       }
-
-      // Get new scroll position
-      const scrollInfo = await this.getScrollInfo(threadId);
-      let scrollText: string;
-      if (scrollInfo.atTop && !scrollInfo.atBottom) {
-        scrollText = 'TOP - more content below';
-      } else if (scrollInfo.atBottom) {
-        scrollText = 'BOTTOM of page';
-      } else {
-        scrollText = `${scrollInfo.percentDown}% down`;
-      }
-
-      return {
-        success: true,
-        position: { x: 0, y: scrollInfo.scrollY },
-        scroll: scrollText,
-        hint: 'Take a new snapshot to see elements in the new viewport.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Scroll');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1143,28 +1376,31 @@ export class AgentBrowser extends MastraBrowser {
     input: HoverInput,
     threadId?: string,
   ): Promise<{ success: true; url: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const locator = await this.requireLocator(input.ref, threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const locator = await this.requireLocator(input.ref, threadId);
 
-      if (!locator) {
-        return this.createError(
-          'stale_ref',
-          `Ref ${input.ref} not found. The page has changed.`,
-          'Take a new snapshot to get fresh refs.',
-        );
+        if (!locator) {
+          return this.createError(
+            'stale_ref',
+            `Ref ${input.ref} not found. The page has changed.`,
+            'Take a new snapshot to get fresh refs.',
+          );
+        }
+
+        await this.markAgentAction('hover', locator, threadId);
+        await locator.hover({ timeout: this.defaultTimeout });
+
+        return {
+          success: true,
+          url: page.url(),
+          hint: 'Take a new snapshot to see any hover-triggered elements (dropdowns, tooltips).',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Hover');
       }
-
-      await locator.hover({ timeout: this.defaultTimeout });
-
-      return {
-        success: true,
-        url: page.url(),
-        hint: 'Take a new snapshot to see any hover-triggered elements (dropdowns, tooltips).',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Hover');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1174,21 +1410,24 @@ export class AgentBrowser extends MastraBrowser {
   async back(
     threadId?: string,
   ): Promise<{ success: true; url: string; title: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      await page.goBack({ timeout: this.defaultTimeout });
-      const url = page.url();
-      this.markActiveUrlChangeSource('agent', url, threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        this.markPageAction('navigate', page, threadId);
+        await page.goBack({ timeout: this.defaultTimeout });
+        const url = page.url();
+        this.markActiveUrlChangeSource('agent', url, threadId);
 
-      return {
-        success: true,
-        url,
-        title: await page.title(),
-        hint: 'Take a new snapshot to see the previous page.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Back');
-    }
+        return {
+          success: true,
+          url,
+          title: await page.title(),
+          hint: 'Take a new snapshot to see the previous page.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Back');
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1202,62 +1441,64 @@ export class AgentBrowser extends MastraBrowser {
     | { success: true; action: 'accept' | 'dismiss'; dialogType: string; message: string; hint: string }
     | BrowserToolError
   > {
-    try {
-      const page = await this.getPage(threadId);
-      const locator = await this.requireLocator(input.triggerRef, threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const locator = await this.requireLocator(input.triggerRef, threadId);
 
-      if (!locator) {
-        return this.createError(
-          'stale_ref',
-          `Trigger ref ${input.triggerRef} not found.`,
-          'Take a new snapshot to get fresh refs.',
-        );
-      }
-
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          page.off('dialog', dialogHandler);
-          reject(
-            new Error(`No dialog appeared after clicking ${input.triggerRef}. The element may not trigger a dialog.`),
+        if (!locator) {
+          return this.createError(
+            'stale_ref',
+            `Trigger ref ${input.triggerRef} not found.`,
+            'Take a new snapshot to get fresh refs.',
           );
-        }, this.defaultTimeout);
+        }
 
-        const dialogHandler = async (dialog: any) => {
-          clearTimeout(timeout);
-          try {
-            const dialogType = dialog.type();
-            const message = dialog.message();
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            page.off('dialog', dialogHandler);
+            reject(
+              new Error(`No dialog appeared after clicking ${input.triggerRef}. The element may not trigger a dialog.`),
+            );
+          }, this.defaultTimeout);
 
-            if (input.action === 'accept') {
-              await dialog.accept(input.text);
-            } else {
-              await dialog.dismiss();
+          const dialogHandler = async (dialog: any) => {
+            clearTimeout(timeout);
+            try {
+              const dialogType = dialog.type();
+              const message = dialog.message();
+
+              if (input.action === 'accept') {
+                await dialog.accept(input.text);
+              } else {
+                await dialog.dismiss();
+              }
+              resolve({
+                success: true,
+                action: input.action,
+                dialogType,
+                message,
+                hint: 'Dialog handled. Take a snapshot to continue.',
+              });
+            } catch (e) {
+              reject(e);
             }
-            resolve({
-              success: true,
-              action: input.action,
-              dialogType,
-              message,
-              hint: 'Dialog handled. Take a snapshot to continue.',
-            });
-          } catch (e) {
+          };
+
+          // Set up listener first, then click
+          page.once('dialog', dialogHandler);
+
+          // Click the trigger element (don't await - dialog blocks execution)
+          locator.click({ timeout: this.defaultTimeout }).catch((e: Error) => {
+            clearTimeout(timeout);
+            page.off('dialog', dialogHandler);
             reject(e);
-          }
-        };
-
-        // Set up listener first, then click
-        page.once('dialog', dialogHandler);
-
-        // Click the trigger element (don't await - dialog blocks execution)
-        locator.click({ timeout: this.defaultTimeout }).catch((e: Error) => {
-          clearTimeout(timeout);
-          page.off('dialog', dialogHandler);
-          reject(e);
+          });
         });
-      });
-    } catch (error) {
-      return this.createErrorFromException(error, 'Dialog');
-    }
+      } catch (error) {
+        return this.createErrorFromException(error, 'Dialog');
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1265,33 +1506,39 @@ export class AgentBrowser extends MastraBrowser {
   // ---------------------------------------------------------------------------
 
   async wait(input: WaitInput, threadId?: string): Promise<{ success: true; hint: string } | BrowserToolError> {
-    try {
-      const timeout = input.timeout ?? this.defaultTimeout;
+    return this.runBrowserOperation(async () => {
+      try {
+        const timeout = input.timeout ?? this.defaultTimeout;
 
-      if (input.ref) {
-        const locator = await this.requireLocator(input.ref, threadId);
-        if (!locator) {
-          return this.createError('stale_ref', `Ref ${input.ref} not found.`, 'Take a new snapshot to get fresh refs.');
+        if (input.ref) {
+          const locator = await this.requireLocator(input.ref, threadId);
+          if (!locator) {
+            return this.createError(
+              'stale_ref',
+              `Ref ${input.ref} not found.`,
+              'Take a new snapshot to get fresh refs.',
+            );
+          }
+
+          const state = input.state ?? 'visible';
+          await locator.waitFor({ state, timeout });
+
+          return {
+            success: true,
+            hint: `Element is now ${state}. Take a snapshot to continue.`,
+          };
+        } else {
+          const page = await this.getPage(threadId);
+          await page.waitForTimeout(timeout);
+          return {
+            success: true,
+            hint: 'Wait complete. Take a snapshot to see current state.',
+          };
         }
-
-        const state = input.state ?? 'visible';
-        await locator.waitFor({ state, timeout });
-
-        return {
-          success: true,
-          hint: `Element is now ${state}. Take a snapshot to continue.`,
-        };
-      } else {
-        const page = await this.getPage(threadId);
-        await page.waitForTimeout(timeout);
-        return {
-          success: true,
-          hint: 'Wait complete. Take a snapshot to see current state.',
-        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Wait');
       }
-    } catch (error) {
-      return this.createErrorFromException(error, 'Wait');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1313,119 +1560,124 @@ export class AgentBrowser extends MastraBrowser {
       }
     | BrowserToolError
   > {
-    try {
-      const browser = await this.getManagerForThread(threadId);
-      if (!browser) {
-        return this.createError(
-          'browser_closed',
-          'Browser not launched',
-          'Call a navigation tool first to launch the browser.',
-        );
-      }
-
-      switch (input.action) {
-        case 'list': {
-          if (!browser.listTabs) {
-            return this.createError(
-              'browser_error',
-              'Tab management not supported',
-              'This browser provider does not support tab management.',
-            );
-          }
-          const tabsList = await browser.listTabs();
-          return {
-            success: true,
-            tabs: tabsList,
-            hint: 'Use browser_tabs with action:"switch" and index to change tabs.',
-          };
-        }
-
-        case 'new': {
-          if (!browser.newTab) {
-            return this.createError(
-              'browser_error',
-              'Tab management not supported',
-              'This browser provider does not support tab management.',
-            );
-          }
-          const result = await browser.newTab();
-          // If URL provided, navigate to it after creating the tab
-          if (input.url) {
-            const page = await this.getPage(threadId);
-            await page.goto(input.url);
-            this.markActiveUrlChangeSource('agent', page.url(), threadId);
-          }
-          // Save state after new tab
-          this.updateSessionBrowserState(threadId);
-          return {
-            success: true,
-            ...result,
-            hint: 'New tab opened. Take a snapshot to see its content.',
-          };
-        }
-
-        case 'switch': {
-          if (!browser.switchTo) {
-            return this.createError(
-              'browser_error',
-              'Tab management not supported',
-              'This browser provider does not support tab management.',
-            );
-          }
-          await browser.switchTo(input.index!);
-          // Reconnect screencast to show the new active tab
-          await this.reconnectScreencastForThread(threadId, 'tab switch');
-          const page = browser.getPage();
-          const pageUrl = page.url();
-          this.markActiveUrlChangeSource('agent', pageUrl, threadId);
-          // Emit URL directly after switch using the same threadId
-          const streamKey = this.getStreamKey(threadId);
-          const stream = this.activeScreencastStreams.get(streamKey);
-          if (pageUrl && stream?.isActive()) {
-            stream.emitUrl(pageUrl);
-          }
-          // Save state after switch (captures activeIndex change)
-          this.updateSessionBrowserState(threadId);
-          return {
-            success: true,
-            index: input.index,
-            url: pageUrl,
-            title: await page.title(),
-            hint: 'Tab switched. Take a snapshot to see its content.',
-          };
-        }
-
-        case 'close': {
-          if (!browser.closeTab) {
-            return this.createError(
-              'browser_error',
-              'Tab management not supported',
-              'This browser provider does not support tab management.',
-            );
-          }
-          await browser.closeTab(input.index);
-          // Reconnect screencast - it may now be pointing to a different tab
-          await this.reconnectScreencastForThread(threadId, 'tab close');
-          // Save state AFTER close (remaining tabs)
-          this.updateSessionBrowserState(threadId);
-          const tabsList = (await browser.listTabs?.()) ?? [];
-          return {
-            success: true,
-            remaining: tabsList.length,
-            hint: tabsList.length > 0 ? 'Tab closed. Take a snapshot to see current tab.' : 'All tabs closed.',
-          };
-        }
-
-        default:
+    return this.runBrowserOperation(async () => {
+      try {
+        const browser = await this.getManagerForThread(threadId);
+        if (!browser) {
           return this.createError(
-            'browser_error',
-            `Unknown tabs action: ${(input as any).action}`,
-            'Use "list", "new", "switch", or "close".',
+            'browser_closed',
+            'Browser not launched',
+            'Call a navigation tool first to launch the browser.',
           );
+        }
+
+        switch (input.action) {
+          case 'list': {
+            if (!browser.listTabs) {
+              return this.createError(
+                'browser_error',
+                'Tab management not supported',
+                'This browser provider does not support tab management.',
+              );
+            }
+            const tabsList = await browser.listTabs();
+            return {
+              success: true,
+              tabs: tabsList,
+              hint: 'Use browser_tabs with action:"switch" and index to change tabs.',
+            };
+          }
+
+          case 'new': {
+            if (!browser.newTab) {
+              return this.createError(
+                'browser_error',
+                'Tab management not supported',
+                'This browser provider does not support tab management.',
+              );
+            }
+            this.markPageAction('tab', () => browser.getPage(), threadId);
+            const result = await browser.newTab();
+            // If URL provided, navigate to it after creating the tab
+            if (input.url) {
+              const page = await this.getPage(threadId);
+              await page.goto(input.url);
+              this.markActiveUrlChangeSource('agent', page.url(), threadId);
+            }
+            // Save state after new tab
+            this.updateSessionBrowserState(threadId);
+            return {
+              success: true,
+              ...result,
+              hint: 'New tab opened. Take a snapshot to see its content.',
+            };
+          }
+
+          case 'switch': {
+            if (!browser.switchTo) {
+              return this.createError(
+                'browser_error',
+                'Tab management not supported',
+                'This browser provider does not support tab management.',
+              );
+            }
+            this.markPageAction('tab', () => browser.getPage(), threadId);
+            await browser.switchTo(input.index!);
+            // Reconnect screencast to show the new active tab
+            await this.reconnectScreencastForThread(threadId, 'tab switch');
+            const page = browser.getPage();
+            const pageUrl = page.url();
+            this.markActiveUrlChangeSource('agent', pageUrl, threadId);
+            // Emit URL directly after switch using the same threadId
+            const streamKey = this.getStreamKey(threadId);
+            const stream = this.activeScreencastStreams.get(streamKey);
+            if (pageUrl && stream?.isActive()) {
+              stream.emitUrl(pageUrl);
+            }
+            // Save state after switch (captures activeIndex change)
+            this.updateSessionBrowserState(threadId);
+            return {
+              success: true,
+              index: input.index,
+              url: pageUrl,
+              title: await page.title(),
+              hint: 'Tab switched. Take a snapshot to see its content.',
+            };
+          }
+
+          case 'close': {
+            if (!browser.closeTab) {
+              return this.createError(
+                'browser_error',
+                'Tab management not supported',
+                'This browser provider does not support tab management.',
+              );
+            }
+            this.markPageAction('tab', () => browser.getPage(), threadId);
+            await browser.closeTab(input.index);
+            // Reconnect screencast - it may now be pointing to a different tab
+            await this.reconnectScreencastForThread(threadId, 'tab close');
+            // Save state AFTER close (remaining tabs)
+            this.updateSessionBrowserState(threadId);
+            const tabsList = (await browser.listTabs?.()) ?? [];
+            return {
+              success: true,
+              remaining: tabsList.length,
+              hint: tabsList.length > 0 ? 'Tab closed. Take a snapshot to see current tab.' : 'All tabs closed.',
+            };
+          }
+
+          default:
+            return this.createError(
+              'browser_error',
+              `Unknown tabs action: ${(input as any).action}`,
+              'Use "list", "new", "switch", or "close".',
+            );
+        }
+      } catch (error) {
+        return this.createErrorFromException(error, 'Tabs');
       }
-    } catch (error) {
-      return this.createErrorFromException(error, 'Tabs');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1436,59 +1688,62 @@ export class AgentBrowser extends MastraBrowser {
     input: DragInput,
     threadId?: string,
   ): Promise<{ success: true; url: string; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
 
-      // Resolve source locator (prefer ref, fallback to selector)
-      let sourceLocator: Awaited<ReturnType<typeof this.requireLocator>> | null = null;
-      if (input.sourceRef) {
-        sourceLocator = await this.requireLocator(input.sourceRef, threadId);
-      } else if (input.sourceSelector) {
-        sourceLocator = page.locator(input.sourceSelector);
+        // Resolve source locator (prefer ref, fallback to selector)
+        let sourceLocator: Awaited<ReturnType<typeof this.requireLocator>> | null = null;
+        if (input.sourceRef) {
+          sourceLocator = await this.requireLocator(input.sourceRef, threadId);
+        } else if (input.sourceSelector) {
+          sourceLocator = page.locator(input.sourceSelector);
+        }
+
+        if (!sourceLocator) {
+          return this.createError(
+            'stale_ref',
+            input.sourceRef
+              ? `Source ref ${input.sourceRef} not found.`
+              : 'No source element specified. Provide sourceRef or sourceSelector.',
+            input.sourceRef
+              ? 'Take a new snapshot to get fresh refs, or use sourceSelector for elements not in the accessibility tree.'
+              : undefined,
+          );
+        }
+
+        // Resolve target locator (prefer ref, fallback to selector)
+        let targetLocator: Awaited<ReturnType<typeof this.requireLocator>> | null = null;
+        if (input.targetRef) {
+          targetLocator = await this.requireLocator(input.targetRef, threadId);
+        } else if (input.targetSelector) {
+          targetLocator = page.locator(input.targetSelector);
+        }
+
+        if (!targetLocator) {
+          return this.createError(
+            'stale_ref',
+            input.targetRef
+              ? `Target ref ${input.targetRef} not found.`
+              : 'No target element specified. Provide targetRef or targetSelector.',
+            input.targetRef
+              ? 'Take a new snapshot to get fresh refs, or use targetSelector for elements not in the accessibility tree.'
+              : undefined,
+          );
+        }
+
+        await this.markAgentAction('drag', sourceLocator, threadId);
+        await sourceLocator.dragTo(targetLocator, { timeout: this.defaultTimeout });
+
+        return {
+          success: true,
+          url: page.url(),
+          hint: 'Drag complete. Take a snapshot to see the result.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Drag');
       }
-
-      if (!sourceLocator) {
-        return this.createError(
-          'stale_ref',
-          input.sourceRef
-            ? `Source ref ${input.sourceRef} not found.`
-            : 'No source element specified. Provide sourceRef or sourceSelector.',
-          input.sourceRef
-            ? 'Take a new snapshot to get fresh refs, or use sourceSelector for elements not in the accessibility tree.'
-            : undefined,
-        );
-      }
-
-      // Resolve target locator (prefer ref, fallback to selector)
-      let targetLocator: Awaited<ReturnType<typeof this.requireLocator>> | null = null;
-      if (input.targetRef) {
-        targetLocator = await this.requireLocator(input.targetRef, threadId);
-      } else if (input.targetSelector) {
-        targetLocator = page.locator(input.targetSelector);
-      }
-
-      if (!targetLocator) {
-        return this.createError(
-          'stale_ref',
-          input.targetRef
-            ? `Target ref ${input.targetRef} not found.`
-            : 'No target element specified. Provide targetRef or targetSelector.',
-          input.targetRef
-            ? 'Take a new snapshot to get fresh refs, or use targetSelector for elements not in the accessibility tree.'
-            : undefined,
-        );
-      }
-
-      await sourceLocator.dragTo(targetLocator, { timeout: this.defaultTimeout });
-
-      return {
-        success: true,
-        url: page.url(),
-        hint: 'Drag complete. Take a snapshot to see the result.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Drag');
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1499,18 +1754,20 @@ export class AgentBrowser extends MastraBrowser {
     input: EvaluateInput,
     threadId?: string,
   ): Promise<{ success: true; result: unknown; hint: string } | BrowserToolError> {
-    try {
-      const page = await this.getPage(threadId);
-      const result = await page.evaluate(input.script);
+    return this.runBrowserOperation(async () => {
+      try {
+        const page = await this.getPage(threadId);
+        const result = await page.evaluate(input.script);
 
-      return {
-        success: true,
-        result,
-        hint: 'JavaScript executed. Take a snapshot if the page may have changed.',
-      };
-    } catch (error) {
-      return this.createErrorFromException(error, 'Evaluate');
-    }
+        return {
+          success: true,
+          result,
+          hint: 'JavaScript executed. Take a snapshot if the page may have changed.',
+        };
+      } catch (error) {
+        return this.createErrorFromException(error, 'Evaluate');
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1561,10 +1818,14 @@ export class AgentBrowser extends MastraBrowser {
         if (!currentPage) {
           throw new Error('No active page available');
         }
+        await this.viewerPreferences.get(browserManager)?.apply(currentPage);
+        await currentPage.bringToFront();
         const cdpSession = await currentPage.context().newCDPSession(currentPage);
         return cdpSession as unknown as CdpSessionLike;
       },
       isBrowserRunning: () => browserManager.isLaunched(),
+      captureFrame: async options =>
+        this.viewerPreferences.get(browserManager)?.capture(browserManager.getPage(), options),
     };
 
     const stream = new ScreencastStreamImpl(provider, _options);
@@ -1589,6 +1850,7 @@ export class AgentBrowser extends MastraBrowser {
 
       // Track page close handlers so we can clean them up
       const pageCloseHandlers = new Map<Page, () => void>();
+      const pageLoadHandlers = new Map<Page, () => void>();
 
       // Track framenavigated handlers for URL updates
       const frameNavigatedHandlers = new Map<
@@ -1608,11 +1870,18 @@ export class AgentBrowser extends MastraBrowser {
           }
         };
         page.on('framenavigated', onFrameNavigated);
+        const onLoaded = () => {
+          stream.emitUrl(page.url());
+        };
+        page.on('domcontentloaded', onLoaded);
+        pageLoadHandlers.set(page, onLoaded);
         frameNavigatedHandlers.set(page, onFrameNavigated);
 
         // Close listener
         const onClose = () => {
           pageCloseHandlers.delete(page);
+          page.off('domcontentloaded', onLoaded);
+          pageLoadHandlers.delete(page);
           // Clean up framenavigated handler
           const navHandler = frameNavigatedHandlers.get(page);
           if (navHandler) {
@@ -1672,6 +1941,8 @@ export class AgentBrowser extends MastraBrowser {
           page.off('close', handler);
         }
         pageCloseHandlers.clear();
+        for (const [page, handler] of pageLoadHandlers) page.off('domcontentloaded', handler);
+        pageLoadHandlers.clear();
         // Remove framenavigated handlers from all pages
         for (const [page, handler] of frameNavigatedHandlers) {
           page.off('framenavigated', handler);
@@ -1691,28 +1962,32 @@ export class AgentBrowser extends MastraBrowser {
   // ---------------------------------------------------------------------------
 
   override async injectMouseEvent(event: MouseEventParams, threadId?: string): Promise<void> {
-    const effectiveThreadId = threadId ?? this.getCurrentThread();
-    const manager = await this.getManagerForThread(effectiveThreadId);
-    await manager.injectMouseEvent(event);
+    return this.runBrowserOperation(async () => {
+      const effectiveThreadId = threadId ?? this.getCurrentThread();
+      const manager = await this.getManagerForThread(effectiveThreadId);
+      await manager.injectMouseEvent(event);
+    });
   }
 
   override async injectKeyboardEvent(event: KeyboardEventParams, threadId?: string): Promise<void> {
-    // Get the appropriate manager based on scope
-    // Use passed threadId (from input handler) or fall back to current thread
-    const effectiveThreadId = threadId ?? this.getCurrentThread();
-    const manager = await this.getManagerForThread(effectiveThreadId);
+    return this.runBrowserOperation(async () => {
+      // Get the appropriate manager based on scope
+      // Use passed threadId (from input handler) or fall back to current thread
+      const effectiveThreadId = threadId ?? this.getCurrentThread();
+      const manager = await this.getManagerForThread(effectiveThreadId);
 
-    // Use CDP directly to include windowsVirtualKeyCode
-    // The agent-browser package's injectKeyboardEvent doesn't pass this field,
-    // which breaks non-printable keys like Enter, Backspace, and arrows
-    const cdp = await manager.getCDPSession();
-    await cdp.send('Input.dispatchKeyEvent', {
-      type: event.type,
-      key: event.key,
-      code: event.code,
-      text: event.text,
-      modifiers: event.modifiers ?? 0,
-      windowsVirtualKeyCode: event.windowsVirtualKeyCode,
+      // Use CDP directly to include windowsVirtualKeyCode
+      // The agent-browser package's injectKeyboardEvent doesn't pass this field,
+      // which breaks non-printable keys like Enter, Backspace, and arrows
+      const cdp = await manager.getCDPSession();
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: event.type,
+        key: event.key,
+        code: event.code,
+        text: event.text,
+        modifiers: event.modifiers ?? 0,
+        windowsVirtualKeyCode: event.windowsVirtualKeyCode,
+      });
     });
   }
 }

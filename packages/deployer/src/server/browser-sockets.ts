@@ -32,6 +32,7 @@ export async function setupBrowserSockets<E extends Env, S extends Schema, B ext
   const { injectWebSocket, upgradeWebSocket, wss } = createNodeWebSocket({ app });
   // Answer the Session socket with its protocol, never with the offered bearer.
   const previous = wss.options.handleProtocols;
+  // ws ships no types and the deployer resolves no @types/ws, so type the documented ws callback here.
   wss.options.handleProtocols = (protocols: Set<string>, request: IncomingMessage) =>
     protocols.has(BROWSER_SOCKET_PROTOCOL) ? BROWSER_SOCKET_PROTOCOL : previous ? previous(protocols, request) : false;
   const registry = new ViewerRegistry();

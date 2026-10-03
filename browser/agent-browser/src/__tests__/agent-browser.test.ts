@@ -10,6 +10,7 @@ const { mockPage, mockLocator, mockContext, mockManager } = vi.hoisted(() => {
   };
 
   const mockPage = {
+    bringToFront: vi.fn().mockResolvedValue(undefined),
     url: vi.fn().mockReturnValue('https://example.com'),
     title: vi.fn().mockResolvedValue('Example'),
     goto: vi.fn(),
@@ -83,6 +84,7 @@ const { mockPage, mockLocator, mockContext, mockManager } = vi.hoisted(() => {
     screenshot: vi.fn().mockResolvedValue(Buffer.from('fake-png')),
     dragTo: vi.fn(),
     waitFor: vi.fn(),
+    boundingBox: vi.fn(),
   };
 
   const mockManager = {
@@ -776,6 +778,98 @@ describe('AgentBrowser', () => {
     it('launches browser only once for concurrent ensureReady calls', async () => {
       await Promise.all([browser.ensureReady(), browser.ensureReady()]);
       expect(mockManager.launch).toHaveBeenCalledOnce();
+    });
+  });
+  describe('agent actions for live viewers', () => {
+    const box = { x: 10, y: 20, width: 100, height: 30 };
+    beforeEach(async () => {
+      mockLocator.boundingBox.mockResolvedValue(box);
+      // Earlier suites leave failing click implementations behind (clearAllMocks keeps them).
+      mockLocator.click.mockReset();
+      mockLocator.fill.mockReset();
+      await browser.ensureReady();
+      await browser.snapshot({});
+    });
+
+    it('measures nothing while nobody watches', async () => {
+      await browser.click({ ref: '@e1' });
+      expect(mockLocator.boundingBox).not.toHaveBeenCalled();
+      expect(mockLocator.scrollIntoViewIfNeeded).not.toHaveBeenCalled();
+    });
+
+    it('reports where a click and a typed field land, before acting', async () => {
+      const seen: unknown[] = [];
+      const clicksBefore: number[] = [];
+      const stop = browser.onAgentAction(action => {
+        seen.push(action);
+        clicksBefore.push(mockLocator.click.mock.calls.length);
+      });
+      await browser.click({ ref: '@e1' });
+      await browser.type({ ref: '@e2', text: 'coffee grinder' });
+      expect(seen).toEqual([
+        { seq: 1, kind: 'click', box },
+        { seq: 2, kind: 'type', box },
+      ]);
+      // The click is reported before it happens.
+      expect(clicksBefore).toEqual([0, 1]);
+      expect(mockLocator.scrollIntoViewIfNeeded).toHaveBeenCalled();
+      stop();
+      await browser.click({ ref: '@e1' });
+      expect(seen).toHaveLength(2);
+    });
+
+    it('never fails or skips the action when the element cannot be measured', async () => {
+      const listener = vi.fn();
+      browser.onAgentAction(listener);
+      mockLocator.boundingBox.mockRejectedValueOnce(new Error('detached'));
+      const result = await browser.click({ ref: '@e1' });
+      expect(result).toMatchObject({ success: true });
+      expect(mockLocator.click).toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('marks page actions on the whole viewport: open, back, page scroll, tabs', async () => {
+      const seen: Array<{ kind: string; box: unknown }> = [];
+      const gotoCallsBefore: number[] = [];
+      const stop = browser.onAgentAction(action => {
+        seen.push({ kind: action.kind, box: action.box });
+        gotoCallsBefore.push(mockPage.goto.mock.calls.length);
+      });
+      const viewport = { x: 0, y: 0, width: 1280, height: 720 };
+      await browser.goto({ url: 'https://example.com/next' });
+      await browser.back();
+      await browser.scroll({ direction: 'down' });
+      await browser.tabs({ action: 'switch', index: 0 });
+      expect(seen).toEqual([
+        { kind: 'navigate', box: viewport },
+        { kind: 'navigate', box: viewport },
+        { kind: 'scroll', box: viewport },
+        { kind: 'tab', box: viewport },
+      ]);
+      // The page open is marked before the page changes.
+      expect(gotoCallsBefore[0]).toBe(0);
+      stop();
+    });
+
+    it('marks an element scroll and a key press on the focused element', async () => {
+      const seen: Array<{ kind: string; box: unknown }> = [];
+      browser.onAgentAction(action => seen.push({ kind: action.kind, box: action.box }));
+      await browser.scroll({ ref: '@e1', direction: 'down' });
+      mockPage.evaluate.mockResolvedValueOnce({ x: 5, y: 6, width: 70, height: 20 });
+      await browser.press({ key: 'Enter' });
+      mockPage.evaluate.mockResolvedValueOnce(null);
+      await browser.press({ key: 'PageDown' });
+      expect(seen).toEqual([
+        { kind: 'scroll', box },
+        { kind: 'press', box: { x: 5, y: 6, width: 70, height: 20 } },
+        { kind: 'press', box: { x: 0, y: 0, width: 1280, height: 720 } },
+      ]);
+    });
+
+    it('measures nothing for page actions while nobody watches', async () => {
+      mockPage.evaluate.mockClear();
+      await browser.press({ key: 'Enter' });
+      expect(mockPage.evaluate).not.toHaveBeenCalled();
     });
   });
 });
