@@ -64,6 +64,8 @@ export const scheduleRunSummarySchema = z.object({
  * from workflow schedules by the presence of `agentId`.
  */
 export const agentScheduleSchema = z.object({
+  maxRuns: z.number().int().min(1).max(10000).optional(),
+  runCount: z.number().int().nonnegative().optional(),
   id: z.string(),
   agentId: z.string(),
   /** Mirror of the workflow-schedule discriminator — always absent on agent schedules. */
@@ -183,6 +185,7 @@ export const scheduleIdPathParams = z.object({
  * instead of silently matching the agent branch of the union.
  */
 const createAgentScheduleBodySchema = z.strictObject({
+  maxRuns: z.number().int().min(1).max(10000).optional(),
   /** Optional stable id; normalized to `agent_<slug>`. A random id is generated when omitted. */
   id: z.string().optional(),
   agentId: z.string().min(1),
@@ -235,6 +238,7 @@ export const createScheduleBodySchema = z.union([createAgentScheduleBodySchema, 
  * metadata (not identity) and may be updated.
  */
 export const updateScheduleBodySchema = z.object({
+  maxRuns: z.number().int().min(1).max(10000).optional(),
   cron: z.string().optional(),
   timezone: z.string().optional(),
   status: settableScheduleStatusSchema.optional(),

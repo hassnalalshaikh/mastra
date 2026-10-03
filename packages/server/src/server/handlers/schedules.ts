@@ -167,6 +167,7 @@ export const CREATE_SCHEDULE_ROUTE = createRoute({
     }
     return await mastra.schedules.create({
       agentId: agentBody.agentId,
+      ...(agentBody.maxRuns !== undefined ? { maxRuns: agentBody.maxRuns } : {}),
       cron: agentBody.cron,
       prompt: agentBody.prompt,
       ...(agentBody.id ? { id: agentBody.id } : {}),
@@ -200,6 +201,7 @@ export const UPDATE_SCHEDULE_ROUTE = createRoute({
   handler: async ({ mastra, scheduleId, ...body }) => {
     await loadSchedule(mastra, scheduleId);
     return await mastra.schedules.update(scheduleId, {
+      ...(body.maxRuns !== undefined ? { maxRuns: body.maxRuns } : {}),
       ...(body.cron !== undefined ? { cron: body.cron } : {}),
       ...(body.timezone !== undefined ? { timezone: body.timezone } : {}),
       ...(body.status !== undefined ? { status: body.status } : {}),
