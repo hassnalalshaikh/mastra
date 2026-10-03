@@ -789,7 +789,12 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
             );
             if (currentActiveTools)
               currentActiveTools = currentActiveTools.filter((name: string) => !!currentTools?.[name]);
-            if (registryEntry) registryEntry.tools = currentTools as any;
+            if (registryEntry) {
+              // The policy decision is per step: keep the full set for later steps,
+              // so a tool whose skill becomes ready can return (same as #22933).
+              registryEntry.baseTools ??= tools;
+              registryEntry.tools = currentTools as any;
+            }
 
             // ── Signal echo & pre-run drain ───────────────────────────────
             // Mirror the non-durable llm-execution-step:
