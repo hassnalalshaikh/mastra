@@ -358,6 +358,25 @@ function pruneResultMirror(result: Record<string, any>): Record<string, any> {
  */
 const RUNNING_HISTORY_FIELDS = ['messageListState', 'accumulatedSteps'] as const;
 
+// These native steps carry the iteration's trace and tool descriptions. Older
+// completed copies have no reader: current execution uses its input, and
+// recovery retains context.input and the active continuation below.
+const DURABLE_METADATA_STEPS = new Set([
+  ...DURABLE_ITERATION_STEPS,
+  'map-to-llm-input',
+  'durable-llm-execution',
+  'map-final-output',
+]);
+
+function stripHistoricalDurableMetadata<T>(value: T): T {
+  if (!isPlainObject(value)) return value;
+  const pruned: Record<string, any> = { ...value };
+  delete pruned.agentSpanData;
+  delete pruned.toolsMetadata;
+  if (isPlainObject(pruned.llmOutput)) pruned.llmOutput = stripHistoricalDurableMetadata(pruned.llmOutput);
+  return pruned as T;
+}
+
 function stripRunningHistoryFields<T>(value: T): T {
   if (!isPlainObject(value)) return value;
 
@@ -506,6 +525,14 @@ function pruneRunningHistory(
     if (!restartReads.payloads.has(key)) pruned.payload = stripRunningHistoryFields(pruned.payload);
     if ('output' in pruned && !restartReads.outputs.has(key)) pruned.output = stripRunningHistoryFields(pruned.output);
     if ('prevOutput' in pruned) pruned.prevOutput = stripRunningHistoryFields(pruned.prevOutput);
+    if (DURABLE_METADATA_STEPS.has(key)) {
+      // 1.74 restart reads mark the completed continuation (#25114); keep what restart reads.
+      for (const side of ['payload', 'output', 'prevOutput'] as const) {
+        if (side === 'payload' && restartReads.payloads.has(key)) continue;
+        if (side === 'output' && restartReads.outputs.has(key)) continue;
+        if (side in pruned) pruned[side] = stripHistoricalDurableMetadata(pruned[side]);
+      }
+    }
     context[key] = pruned as any;
   }
 }
