@@ -832,6 +832,8 @@ export class Mastra<
   #storageExplicit = false;
   #storageFallbackWarningPending = false;
   #recoveryConfig: MastraRecoveryConfig = { durableAgents: 'off' };
+  #durableAgentRecoveries = new Set<Promise<unknown>>();
+  #shutdownStarted = false;
   #scorers?: TScorers;
   #classifiers?: TClassifiers;
   #tools?: TTools;
@@ -4129,6 +4131,11 @@ export class Mastra<
     return this.#recoveryConfig;
   }
 
+  /** Whether shutdown has closed admission for new durable-agent recovery. */
+  get isShuttingDown(): boolean {
+    return this.#shutdownStarted;
+  }
+
   /**
    * Re-drive every orphaned RUNNING durable-agent run across every registered
    * `DurableAgent`. Delegates to `DurableAgent.recoverActiveRuns()` on each
@@ -4146,6 +4153,29 @@ export class Mastra<
    * counts.
    */
   public async recoverAllDurableAgents(): Promise<{
+    agents: number;
+    recovered: number;
+    succeeded: number;
+    failed: number;
+  }> {
+    if (this.#shutdownStarted) {
+      throw new MastraError({
+        id: 'MASTRA_DURABLE_RECOVERY_SHUTDOWN',
+        domain: ErrorDomain.AGENT,
+        category: ErrorCategory.USER,
+        text: 'Cannot recover durable agents after Mastra shutdown has started.',
+      });
+    }
+    const recovery = this.#recoverAllDurableAgents();
+    this.#durableAgentRecoveries.add(recovery);
+    try {
+      return await recovery;
+    } finally {
+      this.#durableAgentRecoveries.delete(recovery);
+    }
+  }
+
+  async #recoverAllDurableAgents(): Promise<{
     agents: number;
     recovered: number;
     succeeded: number;
@@ -4176,6 +4206,7 @@ export class Mastra<
     let failed = 0;
 
     for (const agent of durableAgents) {
+      if (this.#shutdownStarted) break;
       try {
         const result = await agent.recoverActiveRuns();
         recovered += result.recovered.length;
@@ -7375,6 +7406,8 @@ export class Mastra<
    * window are abandoned with a warning.
    */
   async shutdown(options?: { drainTimeout?: number }): Promise<void> {
+    // Close durable-agent recovery admission before any awaited teardown.
+    this.#shutdownStarted = true;
     const drainTimeout = assertDrainTimeout(options?.drainTimeout ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS, 'shutdown');
 
     // `drainTimeout` is a single deadline shared by every drain in this method
@@ -7432,6 +7465,35 @@ export class Mastra<
 
     // SchedulerWorker is stopped as part of stopWorkers().
     await this.stopWorkers({ drainTimeout: Math.max(0, deadline - Date.now()) });
+
+    // Discovery can still be reading storage before a run enters the registry.
+    // Admission is closed; keep storage open until these reads settle, within
+    // the same shared shutdown deadline.
+    if (this.#durableAgentRecoveries.size > 0) {
+      await this.#awaitBounded(
+        Promise.allSettled(this.#durableAgentRecoveries),
+        Math.max(0, deadline - Date.now()),
+        `${this.#durableAgentRecoveries.size} durable-agent recovery discovery call(s)`,
+      );
+    }
+
+    // A recovery admitted before shutdown started can register its execution
+    // after the drain above. Keep storage open until it settles too.
+    const lateDurableExecutions = getActiveDurableAgentWorkflowExecutions(this).filter(run => !awaited.has(run));
+    if (lateDurableExecutions.length > 0) {
+      const durableExecutionResults = await this.#awaitBounded(
+        Promise.allSettled(lateDurableExecutions),
+        Math.max(0, deadline - Date.now()),
+        `${lateDurableExecutions.length} recovered durable agent run(s)`,
+      );
+      durableExecutionResults?.forEach(result => {
+        if (result.status === 'rejected') {
+          this.#logger?.error('Durable agent execution failed during shutdown', {
+            error: result.reason,
+          });
+        }
+      });
+    }
 
     // Stop — don't destroy — registered workspaces. Remote sandboxes
     // suspend/pause and stay resumable across process restarts, and

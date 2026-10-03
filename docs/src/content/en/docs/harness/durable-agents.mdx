@@ -327,6 +327,8 @@ export const mastra = new Mastra({
 
 On startup, this discovers every registered durable agent with runs stuck in `running` status and re-drives them from the last persisted snapshot.
 
+`Mastra.shutdown()` closes recovery admission before teardown. Pending discovery can finish reading storage, but cannot start another recovered turn. Runs refused during shutdown keep their saved snapshots for the next process. Already-running turns retain the normal shutdown drain behavior within the shared `drainTimeout`.
+
 ### Manual recovery
 
 If you need finer control, such as gating recovery behind a leader election or running it on a schedule, call the methods directly:

@@ -913,6 +913,7 @@ export class DurableAgent<
     options,
     scheduleAutoCleanup,
     recoveryLease,
+    assertAdmission,
   }: {
     runId: string;
     workflowInput: DurableAgenticWorkflowInput;
@@ -924,6 +925,7 @@ export class DurableAgent<
     options?: DurableAgentRecoverOptions<TOutput>;
     scheduleAutoCleanup: () => void;
     recoveryLease: RecoveryLease;
+    assertAdmission: () => void;
   }): Promise<{
     stream: DurableStreamAdapterResult<TOutput>;
     threadRegistration?: AgentThreadRunRegistration;
@@ -932,6 +934,7 @@ export class DurableAgent<
     let streamOutput: MastraModelOutput<TOutput> | undefined;
     let threadRegistration: AgentThreadRunRegistration | undefined;
     try {
+      assertAdmission();
       recoveryLease.assertOwned();
       registryEntry.messageList = messageList;
       this.#runRegistry.registerWithMessageList(runId, registryEntry, messageList, { threadId, resourceId });
@@ -939,6 +942,7 @@ export class DurableAgent<
 
       // Persistent backends may retain chunks from the pre-crash segment.
       const recoverOffset = await this.#getPubsubOffset(runId);
+      assertAdmission();
       recoveryLease.assertOwned();
       const stream = createDurableAgentStream<TOutput>({
         pubsub: this.pubsub,
@@ -972,6 +976,7 @@ export class DurableAgent<
       streamCleanup = stream.cleanup;
       streamOutput = stream.output;
       await this.#raceRecoveryLease(stream.ready, recoveryLease);
+      assertAdmission();
       recoveryLease.assertOwned();
 
       const recoverStreamOptions: AgentExecutionOptions<TOutput> = {
@@ -995,9 +1000,13 @@ export class DurableAgent<
         {
           strict: true,
           continuation: 'across-suspension',
-          validate: () => recoveryLease.assertOwned(),
+          validate: () => {
+            assertAdmission();
+            recoveryLease.assertOwned();
+          },
         },
       );
+      assertAdmission();
       recoveryLease.assertOwned();
       return { stream, threadRegistration };
     } catch (error) {
@@ -1018,7 +1027,9 @@ export class DurableAgent<
       if (globalRunRegistry.get(runId) === registryEntry) {
         globalRunRegistry.delete(runId);
       }
-      await this.#reportRecoveryFailure(runId, recoveryLease.getLossError() ?? error);
+      if (!(error instanceof MastraError && error.id === 'DURABLE_AGENT_RECOVER_SHUTDOWN')) {
+        await this.#reportRecoveryFailure(runId, recoveryLease.getLossError() ?? error);
+      }
       await recoveryLease.release();
       throw error;
     }
@@ -2888,7 +2899,21 @@ export class DurableAgent<
       });
     }
 
+    const assertAdmission = () => {
+      if (this.#mastra?.isShuttingDown) {
+        throw new MastraError({
+          id: 'DURABLE_AGENT_RECOVER_SHUTDOWN',
+          domain: ErrorDomain.AGENT,
+          category: ErrorCategory.USER,
+          text: 'Cannot recover a durable agent after Mastra shutdown has started.',
+          details: { agentName: this.name, runId },
+        });
+      }
+    };
+    assertAdmission();
+
     const workflowsStore = await this.#mastra.getStorage()?.getStore('workflows');
+    assertAdmission();
     if (!workflowsStore) {
       throw new MastraError({
         id: 'DURABLE_AGENT_RECOVER_NO_STORAGE',
@@ -2939,6 +2964,7 @@ export class DurableAgent<
         }
       }
     }
+    assertAdmission();
 
     // 2. Claim recovery ownership before resolving any live dependencies so a
     //    concurrent caller cannot finish first and leave this attempt using a
@@ -2960,6 +2986,7 @@ export class DurableAgent<
     let recoveryState: RehydratedRecoveryState;
     let finishPublishedBeforeCrash: boolean;
     try {
+      assertAdmission();
       // The lease RPC itself may have waited while an earlier owner completed.
       // Re-read after acquisition and recover from that authoritative snapshot,
       // never from the pre-claim copy.
@@ -2977,6 +3004,7 @@ export class DurableAgent<
       finishPublishedBeforeCrash =
         this.resolveWorkflowEngine() === 'default' &&
         loaded.snapshot.context?.[MAP_FINAL_OUTPUT_STEP_ID]?.status === 'success';
+      assertAdmission();
       recoveryLease.assertOwned();
       recoveryState = await this.#rehydrateRecoveryState({
         runId,
@@ -3029,9 +3057,11 @@ export class DurableAgent<
 
     let workflow: ReturnType<DurableAgent<TAgentId, TTools, TOutput>['getWorkflow']>;
     try {
+      assertAdmission();
       workflow = this.getWorkflow();
       recoveryLease.assertOwned();
     } catch (error) {
+      cleanupOwnedRegistryState();
       await recoveryLease.release();
       throw error;
     }
@@ -3049,6 +3079,7 @@ export class DurableAgent<
       options,
       scheduleAutoCleanup,
       recoveryLease,
+      assertAdmission,
     });
     const { output, cleanup: createdStreamCleanup, ready } = stream;
     streamCleanup = createdStreamCleanup;
@@ -3062,12 +3093,14 @@ export class DurableAgent<
     //     the raw rejection so they can classify the run as failed.
     const workflowExecution = this.#raceRecoveryLease(ready, recoveryLease)
       .then(async () => {
+        assertAdmission();
         recoveryLease.assertOwned();
         await this.ensureEngineWorkersStarted();
         const run = await this.#raceRecoveryLease(
           workflow.createRun({ runId, resourceId, pubsub: recoveryPubsub }),
           recoveryLease,
         );
+        assertAdmission();
         recoveryLease.assertOwned();
         const result = await this.#raceRecoveryLease(
           run.restart({
@@ -3096,6 +3129,12 @@ export class DurableAgent<
         }
       })
       .catch(async error => {
+        if (error instanceof MastraError && error.id === 'DURABLE_AGENT_RECOVER_SHUTDOWN') {
+          // Refused during shutdown: keep the saved snapshot for the next process.
+          await threadRegistration?.rollback();
+          performCleanup();
+          throw error;
+        }
         const leaseLossError = recoveryLease.getLossError();
         if (leaseLossError) {
           await threadRegistration?.rollback({ releaseLease: false });
@@ -3670,6 +3709,7 @@ export class DurableAgent<
     let failed = 0;
 
     for (const targetRunId of targetRunIds) {
+      if (this.#mastra?.isShuttingDown) break;
       let runError: Error | undefined;
       try {
         // Delegate to the single-run streamable recover path so each run
@@ -3698,6 +3738,7 @@ export class DurableAgent<
         recovered.push({ runId: targetRunId, status: 'success' });
         succeeded++;
       } catch (error) {
+        if (error instanceof MastraError && error.id === 'DURABLE_AGENT_RECOVER_SHUTDOWN') break;
         const err = runError ?? (error instanceof Error ? error : new Error(String(error)));
         recovered.push({ runId: targetRunId, status: 'failed', error: err });
         failed++;
