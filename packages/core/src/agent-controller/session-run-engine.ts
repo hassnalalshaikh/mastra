@@ -224,6 +224,8 @@ async function abortDeadline(run: Session['run'], guard: AbortSignal, graceMs: n
 
 type StreamState = {
   threadId?: string;
+  /** Identity of this stream, independent of later session run changes. */
+  runId?: string | null;
   currentMessage: MastraDBMessage;
   lastFinishedMessage?: MastraDBMessage;
   messageStarted: boolean;
@@ -380,9 +382,13 @@ export class SessionRunEngine {
     state.completedToolPrelude = false;
   }
 
-  createStreamState(threadId = this.#session.thread.getId() ?? undefined): StreamState {
+  createStreamState(
+    threadId = this.#session.thread.getId() ?? undefined,
+    runId: string | null = this.#session.run.getRunId(),
+  ): StreamState {
     return {
       threadId,
+      runId,
       currentMessage: this.createEmptyAssistantMessage(threadId),
       messageStarted: false,
       isSuspended: false,
@@ -595,6 +601,8 @@ export class SessionRunEngine {
     requestContext: RequestContext,
     agent: Agent = this.#machinery.getAgent(),
   ): Promise<{ message: MastraDBMessage; suspended?: boolean } | undefined> {
+    const chunkRunId = 'runId' in chunk ? (chunk.runId as string | undefined) : undefined;
+    state.runId ??= chunkRunId ?? this.#session.run.getRunId();
     if ('runId' in chunk && chunk.runId) {
       this.#session.run.setRunId({ runId: chunk.runId });
     }
@@ -625,6 +633,15 @@ export class SessionRunEngine {
       if (chunk.type === 'text-delta' && folded.part.type === 'text') {
         if (!state.announcedTextSpans.delete(chunk.payload.id) && folded.created) {
           this.emitInitialPart(state, index, { ...folded.part, text: '' });
+        }
+        const textDelta = chunk.payload.text;
+        if (textDelta && state.runId && (!chunkRunId || chunkRunId === state.runId)) {
+          this.#session.emit({
+            type: 'text_delta',
+            runId: state.runId,
+            messageId: state.currentMessage.id,
+            textDelta,
+          });
         }
         this.#session.emit({
           type: 'message_update',
@@ -1712,7 +1729,7 @@ export class SessionRunEngine {
         if (runId && abortedRunId) abortedRunId = undefined;
 
         if (!currentRun) {
-          currentRun = this.createStreamState(threadId);
+          currentRun = this.createStreamState(threadId, runId ?? null);
           this.#session.run.nextOperation();
           this.#session.run.ensureAbortController();
           this.#session.run.setRunId({ runId });
