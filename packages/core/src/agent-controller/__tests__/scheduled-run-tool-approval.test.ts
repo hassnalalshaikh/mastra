@@ -20,13 +20,14 @@ describe.each([
   { durable: true, existingSession: false },
   { durable: true, existingSession: true },
 ])('scheduled approval durable=$durable existingSession=$existingSession', ({ durable, existingSession }) => {
-  it.each(['approve', 'decline', 'automatic'] as const)(
+  it.each(['approve', 'decline', 'automatic', 'saved-deny'] as const)(
     'preserves %s across two tool calls',
     async decision => {
       const storage = new InMemoryStore({ id: 'schedule-approval' });
       const memory = new Memory({ storage });
       let effects = 0;
       let modelCalls = 0;
+      let beforeFirstResponse: (() => Promise<void>) | undefined;
       const usage = {
         inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
         outputTokens: { total: 1, text: 1, reasoning: 0 },
@@ -34,6 +35,7 @@ describe.each([
       const model = new MockLanguageModelV3({
         doStream: async () => {
           modelCalls++;
+          if (modelCalls === 1) await beforeFirstResponse?.();
           return {
             stream: simulateReadableStream({
               chunks:
@@ -100,13 +102,18 @@ describe.each([
       try {
         await controller.init();
         const thread = await memory.createThread({ resourceId: 'approval-user', title: 'Approval test' });
-        if (existingSession) {
+        if (existingSession || decision === 'saved-deny') {
           const session = await controller.createSession({
             resourceId: 'approval-user',
             threadId: thread.id,
             ownerId: controller.id,
+            scope: `thread:${thread.id}`,
           });
           await session.state.set({ yolo: true });
+          if (decision === 'saved-deny') {
+            await session.permissions.setForTool({ toolName: 'proof_action', policy: 'deny' });
+            beforeFirstResponse = () => session.permissions.setForTool({ toolName: 'proof_action', policy: 'allow' });
+          }
         }
         const schedule = await mastra.schedules.create({
           agentId: agent.id,
@@ -117,13 +124,19 @@ describe.each([
           cron: '0 9 * * *',
           timezone: 'Asia/Riyadh',
           status: 'paused',
-          ifIdle: { behavior: 'wake', streamOptions: decision === 'automatic' ? {} : { toolApprovalPolicy: 'manual' } },
+          ifIdle: {
+            behavior: 'wake',
+            streamOptions: {
+              toolApprovalPolicy: decision === 'automatic' || decision === 'saved-deny' ? 'auto' : 'manual',
+              controllerTarget: { controllerId: controller.id, scope: `thread:${thread.id}` },
+            },
+          },
         });
         await mastra.startWorkers();
         await mastra.schedules.run(schedule.id);
-        if (decision === 'automatic') {
-          await expect.poll(() => effects, { timeout: 10000 }).toBe(2);
+        if (decision === 'automatic' || decision === 'saved-deny') {
           await expect.poll(() => modelCalls, { timeout: 10000 }).toBe(3);
+          expect(effects).toBe(decision === 'saved-deny' ? 0 : 2);
           return;
         }
         await expect.poll(() => modelCalls, { timeout: 10000 }).toBe(1);
@@ -139,6 +152,7 @@ describe.each([
           resourceId: 'approval-user',
           threadId: thread.id,
           ownerId: controller.id,
+          scope: `thread:${thread.id}`,
         });
         for (let step = 1; step <= 2; step++) {
           const toolCallId = `scheduled-action-${step}`;
@@ -195,6 +209,7 @@ describe('manual run approval precedence', () => {
     if (kind === 'tool') await session.permissions.setForTool({ toolName: 'action', policy: 'deny' });
     else await session.permissions.setForCategory({ category: 'execute', policy: 'deny' });
     expect(session.resolveToolApproval('action', undefined, 'manual')).toBe('deny');
+    expect(session.resolveToolApproval('action', undefined, 'auto')).toBe('deny');
   });
 
   it('leaves legacy yolo and per-tool precedence unchanged without a run policy', async () => {
