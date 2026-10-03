@@ -6,6 +6,7 @@ import type { MastraLanguageModel } from '../../llm/model/shared.types';
 import type { IMastraLogger } from '../../logger';
 import type { Mastra } from '../../mastra';
 import type { MastraMemory } from '../../memory/memory';
+import { MemoryRunState } from '../../memory/run-state';
 import type { MemoryConfig, MemoryConfig as _MemoryConfig, StorageThreadType } from '../../memory/types';
 import { EntityType, SpanType, createObservabilityContext, getOrCreateSpan } from '../../observability';
 import type {
@@ -473,7 +474,22 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
         saveThread: true,
       }));
     threadExists = true;
-    requestContext.set('MastraMemory', { thread: threadObject, resourceId, memoryConfig });
+    // Match regular Agent preparation: memory processors share reads within
+    // this preparation only. The accessor is omitted from JSON snapshots and
+    // every later preparation constructs a fresh state after ownership checks.
+    const memoryRunState = new MemoryRunState({
+      memory,
+      threadId,
+      resourceId,
+      thread: threadObject,
+      ownershipValidated: true,
+    });
+    requestContext.set('MastraMemory', {
+      thread: threadObject,
+      resourceId,
+      memoryConfig,
+      runState: () => memoryRunState,
+    });
   } else {
     // This run has no complete per-request memory context. Clear any
     // MastraMemory inherited from a caller-provided requestContext (e.g. a
