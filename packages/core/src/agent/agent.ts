@@ -378,6 +378,7 @@ type ProcessorLoadedToolsProvider = {
     requestContext: RequestContext;
     tools?: Record<string, unknown>;
     getMessages?: () => Promise<MastraDBMessage[]>;
+    includeMetaTools?: boolean;
   }) => Record<string, ToolToConvert> | Promise<Record<string, ToolToConvert>>;
 };
 
@@ -4598,7 +4599,12 @@ export class Agent<
         return;
       }
 
-      const loadedTools = await toolProvider.getLoadedToolsForRequestContext({ requestContext, tools, getMessages });
+      const loadedTools = await toolProvider.getLoadedToolsForRequestContext({
+        requestContext,
+        tools,
+        getMessages,
+        includeMetaTools: true,
+      });
       if (!loadedTools || Object.keys(loadedTools).length === 0) {
         return;
       }
