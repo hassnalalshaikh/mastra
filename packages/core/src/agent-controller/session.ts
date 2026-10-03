@@ -3929,7 +3929,9 @@ export class Session<TState = unknown> {
 
     // A restored Session has no live run identity: stop the thread's active
     // native run through the agent that owns the thread stream.
-    if (restoredStop && threadId) {
+    // Durable owners already cancel the captured saved scope above. A second
+    // thread abort would bypass discovery failures and race its finalization.
+    if (restoredStop && threadId && !isDurableAgentLike(this.machinery.getAgent())) {
       this.machinery.getAgent().abortThreadStream({ threadId, resourceId: this.identity.getResourceId() });
     }
     this.stream.abort({ localOnly: this.#localOnlyAbort });
