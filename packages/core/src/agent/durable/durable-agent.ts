@@ -26,6 +26,7 @@ import type { AgentExecutionOptions } from '../agent.types';
 import { beginGoalActivity, stopGoalActivity } from '../goal';
 import { MessageList } from '../message-list';
 import type { MastraDBMessage, MessageListInput } from '../message-list';
+import type { SerializedMessageListState } from '../message-list/state';
 import { SaveQueueManager } from '../save-queue';
 import { AgentThreadLeaseConflictError, agentThreadStreamRuntime } from '../thread-stream-runtime';
 import type { AgentThreadRunRegistration } from '../thread-stream-runtime';
@@ -2774,19 +2775,23 @@ export class DurableAgent<
           }
         : options?.memory;
 
-      await this.prepare([], {
-        ...(options as AgentExecutionOptions<TOutput>),
-        runId,
-        requestContext: options?.requestContext ?? snapshotRequestContext,
-        memory,
-        // Restore the original run's flag from the persisted snapshot so a
-        // cross-process resume still returns scoringData; caller override wins.
-        returnScorerData: options?.returnScorerData ?? workflowInput.options?.returnScorerData,
-        // Restore the original run's modelSettings so the rebuilt registry
-        // entry re-arms the run-level timeout budget (#21724); caller
-        // override wins.
-        modelSettings: options?.modelSettings ?? (workflowInput.options?.modelSettings as any),
-      });
+      await this.#prepareForExecution(
+        [],
+        {
+          ...(options as AgentExecutionOptions<TOutput>),
+          runId,
+          requestContext: options?.requestContext ?? snapshotRequestContext,
+          memory,
+          // Restore the original run's flag from the persisted snapshot so a
+          // cross-process resume still returns scoringData; caller override wins.
+          returnScorerData: options?.returnScorerData ?? workflowInput.options?.returnScorerData,
+          // Restore the original run's modelSettings so the rebuilt registry
+          // entry re-arms the run-level timeout budget (#21724); caller
+          // override wins.
+          modelSettings: options?.modelSettings ?? (workflowInput.options?.modelSettings as any),
+        },
+        workflowInput.messageListState,
+      );
       entry = this.#runRegistry.get(runId);
     }
     if (!entry) {
@@ -4481,10 +4486,19 @@ export class DurableAgent<
    * Prepare for durable execution without starting it.
    */
   async prepare(messages: MessageListInput, options?: AgentExecutionOptions<TOutput>) {
+    return this.#prepareForExecution(messages, options);
+  }
+
+  async #prepareForExecution(
+    messages: MessageListInput,
+    options?: AgentExecutionOptions<TOutput>,
+    resumeMessageListState?: SerializedMessageListState,
+  ) {
     const preparation = await prepareForDurableExecution<TOutput>({
       agent: this.#wrappedAgent as Agent<string, any, TOutput>,
       messages,
       options,
+      resumeMessageListState,
       // Forward the caller-provided runId (mirrors stream()). Without this,
       // prepareForDurableExecution mints a fresh id, so prepare() registers a
       // different run than requested and a follow-up resume(runId) — e.g. when
