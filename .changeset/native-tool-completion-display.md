@@ -1,6 +1,5 @@
 ---
-'@mastra/core': patch
-'@mastra/server': patch
+"@mastra/core": patch
 ---
 
-Show each completed tool result at its completion position in AgentController Session live events and display reads, on the 1.74 id-addressed message wire. The transcript commit stamps the completion once from the part's own clock; published tool outcomes carry the committed record and source message id, so live rows and stored rows share one id and time. Question and plan responses (user wait kind, `ask_user`, `submit_plan`) stay at their question position. Provider-executed calls stay in their row. Recent completion sources are indexed in native thread state so a bounded history window still shows a completion whose call predates it. Stored model history is unchanged.
+Keep tool progress tied to admitted execution, and show each completed tool result at its completion position in Session live events and history. Preserve original model memory and source-message identity. Keep preliminary background results active, report exact terminal outcomes, and index recent completion source IDs through native thread state for bounded history reads. Explicit history requests above 1,024 rows use the existing full-history read path.

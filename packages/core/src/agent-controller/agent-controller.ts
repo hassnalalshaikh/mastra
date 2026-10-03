@@ -1618,8 +1618,13 @@ export class AgentController<TState = {}> {
     }
 
     const firstPage = (page ?? 0) === 0;
-    const include =
-      firstPage && limit <= TOOL_COMPLETION_INDEX_LIMIT ? await this.queryRecentCompletionSources(threadId) : [];
+    if (firstPage && limit > TOOL_COMPLETION_INDEX_LIMIT) {
+      // Wider than the completion index covers: project the full history, keep the newest rows.
+      const all = await this.queryThreadDisplayMessages({ threadId, resourceId });
+      return { ...all, messages: all.messages.slice(-limit) };
+    }
+
+    const include = firstPage ? await this.queryRecentCompletionSources(threadId) : [];
     const result = await this.queryThreadMessages({
       threadId,
       resourceId,
