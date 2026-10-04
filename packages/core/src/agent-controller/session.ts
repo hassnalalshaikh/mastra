@@ -4749,6 +4749,8 @@ export class Session<TState = unknown> {
     input:
       | AgentSignalInput
       | {
+          /** The message id; the saved user message and its stream events carry it. */
+          id?: string;
           content: AgentSignalContents;
           ifActive?: { behavior?: AgentSignalActiveBehavior; attributes?: AgentSignalAttributes };
           ifIdle?: { behavior?: AgentSignalIdleBehavior; attributes?: AgentSignalAttributes };
@@ -4832,6 +4834,7 @@ export class Session<TState = unknown> {
     const submitted = createSignal(
       'content' in input
         ? {
+            ...(input.id ? { id: input.id } : {}),
             type: 'user',
             tagName: 'user',
             contents: input.content,
@@ -5199,6 +5202,7 @@ export class Session<TState = unknown> {
    * the response and emits events.
    */
   async sendMessage({
+    id,
     content,
     files,
     tracingContext,
@@ -5206,6 +5210,8 @@ export class Session<TState = unknown> {
     requestContext: requestContextInput,
     untilIdle,
   }: {
+    /** The message id; the saved user message and its stream events carry it. */
+    id?: string;
     content: string;
     files?: Array<{ data: string; mediaType: string; filename?: string }>;
     tracingContext?: TracingContext;
@@ -5216,6 +5222,7 @@ export class Session<TState = unknown> {
     const wasActive = this.stream.isActive();
     const signal = this.sendSignal(
       {
+        ...(id ? { id } : {}),
         content: this.createMessageInput({ content, files }),
         tracingContext,
         tracingOptions,
@@ -5270,16 +5277,19 @@ export class Session<TState = unknown> {
 
   /** Abort the current run and send steering input without clearing queued follow-ups. */
   async steer({
+    id,
     content,
     files,
     requestContext,
   }: {
+    /** The message id; the saved user message and its stream events carry it. */
+    id?: string;
     content: string;
     files?: Array<{ data: string; mediaType: string; filename?: string }>;
     requestContext?: RequestContext;
   }): Promise<void> {
     this.abort();
-    await this.sendMessage({ content, files, requestContext });
+    await this.sendMessage({ id, content, files, requestContext });
   }
 
   ensureFollowUpBinding(agent: Agent, resourceId: string, threadId: string) {
@@ -5338,7 +5348,15 @@ export class Session<TState = unknown> {
 
   /** List and remove this Session's queued follow-ups (id and text, in send order). */
   readonly followUps = {
-    list: (): QueuedFollowUpItem[] => [...this.#queuedFollowUps].map(([id, item]) => ({ id, content: item.content })),
+    list: (): QueuedFollowUpItem[] =>
+      [...this.#queuedFollowUps].map(([id, item]) => ({
+        id,
+        content: item.content,
+        files: (item.files ?? []).map(file => ({
+          mediaType: file.mediaType,
+          ...(file.filename ? { filename: file.filename } : {}),
+        })),
+      })),
     remove: (id: string): boolean => this.removeFollowUp({ id }),
     count: (): number => this.#queuedFollowUpCount,
     isEmpty: (): boolean => this.#queuedFollowUpCount === 0,
@@ -5404,20 +5422,31 @@ export class Session<TState = unknown> {
     });
     if (cancelledSignalIds.length === 0) return { ok: false, reason: 'not_queued' };
     this.#dropFollowUp(id);
-    return { ok: true, delivery: this.steer({ content: item.content, files: item.files, requestContext }) };
+    return { ok: true, delivery: this.steer({ id, content: item.content, files: item.files, requestContext }) };
   }
 
   /** Queue a follow-up through the Agent runtime, or send it immediately while idle. */
   async followUp({
+    id: requestedId,
     content,
     files,
     requestContext,
   }: {
+    /**
+     * The follow-up id (generated when absent). It is the id listed in
+     * `displayState.queuedFollowUpItems`, and the user message the follow-up
+     * becomes carries the same id, so a UI follows one message by id from the
+     * queue into the transcript.
+     */
+    id?: string;
     content: string;
     files?: Array<{ data: string; mediaType: string; filename?: string }>;
     requestContext?: RequestContext;
   }): Promise<void> {
-    if (!this.run.isRunning()) return this.sendMessage({ content, files, requestContext });
+    if (requestedId !== undefined && (!requestedId.trim() || this.#queuedFollowUps.has(requestedId))) {
+      throw new Error(`Follow-up id ${JSON.stringify(requestedId)} is empty or already queued`);
+    }
+    if (!this.run.isRunning()) return this.sendMessage({ id: requestedId, content, files, requestContext });
     const threadId = this.thread.getId();
     if (!threadId) return;
     const resourceId = this.identity.getResourceId();
@@ -5435,12 +5464,14 @@ export class Session<TState = unknown> {
       // Once submitted, the Agent owns this work independently of the Session.
       this.#preparingFollowUps.delete(operation);
       // Registered before queueing so the runtime's queue report already lists it.
-      const id = `follow-up-${++this.#followUpSequence}-${Math.random().toString(36).slice(2, 8)}`;
+      const id = requestedId ?? `follow-up-${++this.#followUpSequence}-${Math.random().toString(36).slice(2, 8)}`;
       this.#queuedFollowUps.set(id, { content, files, agent, resourceId, threadId });
       let queued: ReturnType<Agent['queueMessage']>;
       try {
         queued = agent.queueMessage(
           {
+            // The queued message is saved and streamed under the follow-up id.
+            id,
             contents: this.createMessageInput({ content, files }),
             providerOptions: withMessageAuthor(undefined, readMessageAuthor(requestContext)),
           },

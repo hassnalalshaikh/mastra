@@ -22945,8 +22945,10 @@ export type PostAgentControllerControllerIdSessionsResourceIdMessages_Body = {
     | undefined;
 };
 
-export type PostAgentControllerControllerIdSessionsResourceIdMessages_Response =
-  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
+export type PostAgentControllerControllerIdSessionsResourceIdMessages_Response = {
+  ok: boolean;
+  messageId?: string | undefined;
+};
 
 export type PostAgentControllerControllerIdSessionsResourceIdMessages_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdMessages_PathParams extends never
@@ -23035,7 +23037,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdSteer_Body =
   PostAgentControllerControllerIdSessionsResourceIdMessages_Body;
 
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_Response =
-  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
+  PostAgentControllerControllerIdSessionsResourceIdMessages_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdSteer_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdSteer_PathParams extends never
@@ -23075,7 +23077,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Body =
   PostAgentControllerControllerIdSessionsResourceIdMessages_Body;
 
 export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Response =
-  PostAgentControllerControllerIdSessionsResourceIdBrowserCommands_Response;
+  PostAgentControllerControllerIdSessionsResourceIdMessages_Response;
 
 export type PostAgentControllerControllerIdSessionsResourceIdFollowUp_Request = Simplify<
   (PostAgentControllerControllerIdSessionsResourceIdFollowUp_PathParams extends never

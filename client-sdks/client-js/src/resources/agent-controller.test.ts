@@ -250,6 +250,16 @@ describe('AgentController Resource', () => {
     expect((global.fetch as any).mock.calls).toHaveLength(1);
   });
 
+  it('returns the message id the server gave a send, a steer and a follow-up', async () => {
+    const session = client.getAgentController('code').session('user-1');
+    mockJson({ ok: true, messageId: 'm-send' });
+    await expect(session.sendMessage('hi')).resolves.toEqual({ ok: true, messageId: 'm-send' });
+    mockJson({ ok: true, messageId: 'm-steer' });
+    await expect(session.steer('now')).resolves.toEqual({ ok: true, messageId: 'm-steer' });
+    mockJson({ ok: true, messageId: 'm-follow' });
+    await expect(session.followUp('later')).resolves.toEqual({ ok: true, messageId: 'm-follow' });
+  });
+
   it('steers with a queued follow-up by id in one POST and returns the ack', async () => {
     mockJson({ ok: true });
     await expect(client.getAgentController('code').session('user-1').steerFollowUp('follow-up-7/abc')).resolves.toEqual(
