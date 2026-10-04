@@ -4654,7 +4654,7 @@ export class AgentThreadStreamRuntime {
     }
     const matches = (pending: PendingIdleSignal<any>) =>
       pending.agent === agent && pending.queueOwnerId === target.queueOwnerId;
-    const cancelledSignalIds = this.#cancelIdleSignals(state, key, matches);
+    const cancelledSignalIds = this.#cancelIdleSignals(state, key, matches, !target.waitingOnly);
     if (cancelledSignalIds.length > 0) this.#notifyThreadEvents(state);
     return { cancelledSignalIds };
   }
@@ -4663,6 +4663,7 @@ export class AgentThreadStreamRuntime {
     state: AgentThreadRuntimeState,
     key: string,
     matches: (pending: PendingIdleSignal<any>) => boolean,
+    includeStarting = true,
   ): string[] {
     const cancelledSignalIds: string[] = [];
     const queue = state.pendingIdleSignalsByThread.get(key);
@@ -4678,7 +4679,7 @@ export class AgentThreadStreamRuntime {
     }
 
     const draining = state.drainingIdleSignalsByThread.get(key);
-    if (draining && matches(draining) && !draining.cancelled) {
+    if (includeStarting && draining && matches(draining) && !draining.cancelled) {
       draining.cancelled = true;
       cancelledSignalIds.push(draining.signal.id);
       this.#markIdleMessageCancelled(state, key, draining);
