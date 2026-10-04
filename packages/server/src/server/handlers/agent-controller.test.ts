@@ -30,6 +30,7 @@ import {
   STEER_AGENT_CONTROLLER_SESSION_ROUTE,
   FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
   REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
+  STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
   AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE,
   AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE,
 } from './agent-controller';
@@ -544,6 +545,101 @@ describe('agent-controller routes', () => {
       } as any);
 
       expect(res).toEqual({ ok: false, reason: 'not_queued' });
+    });
+
+    it('steers with one queued follow-up by id in one call and acks before the turn ends', async () => {
+      const session = await getRouteSession('user-steer-follow-up');
+      let settle!: () => void;
+      const delivery = new Promise<void>(resolve => (settle = resolve));
+      const spy = vi.spyOn(session, 'steerFollowUp').mockReturnValue({ ok: true, delivery });
+      const steer = vi.spyOn(session, 'steer');
+      const removeFollowUp = vi.spyOn(session, 'removeFollowUp');
+      const requestContext = makeRequestContext();
+
+      const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-steer-follow-up',
+        followUpId: 'follow-up-9-steer',
+        requestContext,
+      } as any);
+
+      expect(res).toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith({ id: 'follow-up-9-steer', requestContext });
+      expect(spy).toHaveBeenCalledTimes(1);
+      // One native command: the route never removes and re-sends on its own.
+      expect(removeFollowUp).not.toHaveBeenCalled();
+      expect(steer).not.toHaveBeenCalled();
+      expect(STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.responseSchema!.safeParse(res).success).toBe(true);
+      settle();
+    });
+
+    it('answers not_queued and steers nothing when the follow-up is no longer waiting', async () => {
+      const session = await getRouteSession('user-steer-drained-follow-up');
+      vi.spyOn(session, 'steerFollowUp').mockReturnValue({ ok: false, reason: 'not_queued' });
+      const abort = vi.spyOn(session, 'abort');
+
+      const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-steer-drained-follow-up',
+        followUpId: 'follow-up-10-drained',
+      } as any);
+
+      expect(res).toEqual({ ok: false, reason: 'not_queued' });
+      expect(abort).not.toHaveBeenCalled();
+      expect(STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.responseSchema!.safeParse(res).success).toBe(true);
+    });
+
+    it('answers not_queued for a steer by an id the real session never queued', async () => {
+      const session = await getRouteSession('user-steer-unknown-follow-up');
+      const abort = vi.spyOn(session, 'abort');
+
+      const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-steer-unknown-follow-up',
+        followUpId: 'follow-up-never-queued',
+      } as any);
+
+      expect(res).toEqual({ ok: false, reason: 'not_queued' });
+      expect(abort).not.toHaveBeenCalled();
+    });
+
+    it('still acks, logs, and emits an error event when the steered follow-up fails to deliver', async () => {
+      const session = await getRouteSession('user-steer-follow-up-fails');
+      const failure = new Error('signal failed before stream started');
+      const delivery = Promise.reject(failure);
+      vi.spyOn(session, 'steerFollowUp').mockReturnValue({ ok: true, delivery });
+      const errorLog = vi.spyOn(mastra.getLogger(), 'error').mockImplementation(() => {});
+      const events: any[] = [];
+      const unsubscribe = session.subscribe(event => {
+        if (event.type === 'error') events.push(event);
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+          mastra,
+          controllerId: 'code',
+          resourceId: 'user-steer-follow-up-fails',
+          followUpId: 'follow-up-11-fails',
+        } as any);
+        expect(res).toEqual({ ok: true });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(unhandled).toEqual([]);
+        expect(errorLog).toHaveBeenCalledWith(
+          expect.stringContaining('steerFollowUp'),
+          expect.objectContaining({ operation: 'steerFollowUp', error: failure }),
+        );
+        expect(events).toEqual([expect.objectContaining({ type: 'error', error: failure })]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+        unsubscribe();
+        errorLog.mockRestore();
+      }
     });
 
     it('forwards requestContext to session.respondToToolApproval', async () => {

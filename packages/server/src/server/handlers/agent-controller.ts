@@ -275,6 +275,7 @@ const listThreadsQuerySchema = z.object({
     .optional(),
 });
 const followUpBodySchema = sendMessageBodySchema;
+const steerFollowUpBodySchema = z.object({ requestContext: bodyRequestContextSchema });
 
 const sendNotificationBodySchema = z.object({
   source: z.string(),
@@ -1626,6 +1627,39 @@ export const REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
       return { ok: true };
     } catch (error) {
       return handleError(error, 'error removing controller follow-up');
+    }
+  },
+});
+
+export const STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
+  method: 'POST',
+  path: '/agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId/steer',
+  responseType: 'json' as const,
+  pathParamSchema: followUpPathParams,
+  queryParamSchema: sessionScopeQuerySchema,
+  bodySchema: steerFollowUpBodySchema,
+  responseSchema: followUpRemoveAckResponseSchema,
+  summary: 'Steer with a queued follow-up message',
+  description:
+    'Steers the current run with one queued follow-up, by the id listed in displayState.queuedFollowUpItems, in one step: the follow-up leaves the queue and becomes the steering message with its files. Answers { ok: true } as soon as it is taken (the reply streams over SSE); a follow-up that is no longer waiting answers { ok: false, reason: "not_queued" } and nothing is aborted or sent.',
+  tags: ['AgentController'],
+  requiresAuth: true,
+  requiresPermission: 'agent-controller:execute',
+  handler: async ({ mastra, controllerId, resourceId, followUpId, sessionScope, sessionThreadId, requestContext }) => {
+    try {
+      const controller = getAgentControllerOrThrow(mastra, controllerId);
+      const session = await getSession(
+        controller,
+        resourceId,
+        { scope: sessionScope, sessionThreadId },
+        requestContext,
+      );
+      const result = session.steerFollowUp({ id: followUpId, requestContext });
+      if (!result.ok) return { ok: false, reason: result.reason };
+      ackBackgroundSessionWork({ work: result.delivery, session, mastra, operation: 'steerFollowUp' });
+      return { ok: true };
+    } catch (error) {
+      return handleError(error, 'error steering with controller follow-up');
     }
   },
 });

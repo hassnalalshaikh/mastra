@@ -324,7 +324,7 @@ export type AgentThreadEventListener = (event: AgentThreadEvent) => void;
 
 export type CancelQueuedAgentMessagesOptions =
   /** Cancel selected pending input across all Agents sharing this runtime and thread. */
-  | { resourceId?: string; threadId: string; signalIds: string[]; queueOwnerId?: never }
+  | { resourceId?: string; threadId: string; signalIds: string[]; queueOwnerId?: never; waitingOnly?: never }
   /** Cancel only the calling Agent's queued messages in this owner group. */
   | {
       resourceId: string;

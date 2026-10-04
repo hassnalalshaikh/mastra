@@ -894,6 +894,30 @@ export class AgentControllerSession extends BaseResource {
     );
   }
 
+  /**
+   * Steer the current run with one queued follow-up, by the id listed in
+   * `displayState.queuedFollowUpItems`, in one call: the server takes it off
+   * the queue and sends it as the steering message (files included). A
+   * follow-up that is no longer waiting answers `{ ok: false, reason: 'not_queued' }`
+   * and nothing is aborted or sent. The reply streams over the session stream.
+   */
+  async steerFollowUp(
+    followUpId: string,
+    options?: AgentControllerRequestOptions,
+  ): Promise<AgentControllerFollowUpRemoveAck> {
+    const requestContext = parseClientRequestContext(options?.requestContext);
+    return this.request<AgentControllerFollowUpRemoveAck>(
+      this.url(`${this.base()}/follow-up/${encodeURIComponent(followUpId)}/steer`),
+      {
+        method: 'POST',
+        body: requestContext ? { requestContext } : {},
+        // Not idempotent: a replay after a lost response would answer not_queued
+        // and misreport a steer that already happened as refused.
+        retries: 0,
+      },
+    );
+  }
+
   /** Get the observational memory record for this session's thread. */
   async getOMRecord(): Promise<RouteResponse<'GET /agent-controller/:controllerId/sessions/:resourceId/om'>['record']> {
     const body = await this.request<RouteResponse<'GET /agent-controller/:controllerId/sessions/:resourceId/om'>>(
