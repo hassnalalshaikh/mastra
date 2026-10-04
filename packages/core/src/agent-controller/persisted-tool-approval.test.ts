@@ -103,7 +103,20 @@ function backend() {
   const suspendedRuns = async (session: Awaited<ReturnType<typeof boot>>) =>
     (await session.machinery.getAgent().listSuspendedRuns({ threadId: ids.threadId, resourceId: ids.resourceId })).runs;
 
-  return { parkThenRestart, suspendedRuns, executed };
+  /** Park the approval on a live gate of the same session (no restart). */
+  const parkLive = async () => {
+    const session = await boot();
+    const events: AgentControllerEvent[] = [];
+    session.subscribe(event => events.push(event));
+    void session.sendMessage({ content: 'use the tool' }).catch(() => {});
+    await vi.waitFor(() => expect(events.some(event => event.type === 'tool_approval_required')).toBe(true), {
+      timeout: 10_000,
+    });
+    expect(session.approval.isArmed({ toolCallId: 'call-1' })).toBe(true);
+    return session;
+  };
+
+  return { parkThenRestart, parkLive, suspendedRuns, executed };
 }
 
 afterEach(() => {
@@ -140,5 +153,36 @@ describe('Session.respondToPersistedToolApproval', () => {
     ).rejects.toThrow('No suspended run is waiting on tool call call-unknown');
     expect(await env.suspendedRuns(session)).toHaveLength(1);
     expect(env.executed).toEqual([]);
+  }, 30_000);
+});
+
+// Khayalek live-app proof 2026-10-04: two tabs approved the same card 0.3 s
+// apart; the second answer fell through to the stored-run path (its snapshot
+// still listed the call) and was acknowledged too.
+describe('a second answer to the same approval', () => {
+  it('is not offered to the stored run once the live gate was answered', async () => {
+    const env = backend();
+    const session = await env.parkLive();
+    const listSuspendedRuns = session.machinery.getAgent().listSuspendedRuns.bind(session.machinery.getAgent());
+    const stale = await listSuspendedRuns({ threadId: ids.threadId, resourceId: ids.resourceId });
+    expect(stale.runs.some(run => run.toolCalls.some(call => call.toolCallId === 'call-1'))).toBe(true);
+    // The stored snapshot is read before the resumed run persists.
+    vi.spyOn(session.machinery.getAgent(), 'listSuspendedRuns').mockResolvedValue(stale);
+
+    expect(session.respondToToolApproval({ toolCallId: 'call-1', decision: 'approve' })).toEqual({ accepted: true });
+    expect(await session.hasPersistedToolApproval('call-1')).toBe(false);
+    expect(session.respondToToolApproval({ toolCallId: 'call-1', decision: 'approve' })).toMatchObject({ accepted: false });
+
+    await vi.waitFor(() => expect(env.executed).toEqual(['lookup']));
+  }, 30_000);
+
+  it('is not offered to the stored run again after a restored approval was answered', async () => {
+    const env = backend();
+    const session = await env.parkThenRestart();
+
+    await session.respondToPersistedToolApproval({ toolCallId: 'call-1', approved: true });
+
+    expect(await session.hasPersistedToolApproval('call-1')).toBe(false);
+    await vi.waitFor(() => expect(env.executed).toEqual(['lookup']));
   }, 30_000);
 });
