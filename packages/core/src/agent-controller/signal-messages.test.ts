@@ -1140,7 +1140,8 @@ describe('AgentController signal messages', () => {
     await session.followUp({ content: 'queued follow-up' });
 
     expect(queueMessage).toHaveBeenCalledWith(
-      { contents: 'queued follow-up' },
+      // The queued message is saved and streamed under the follow-up id.
+      { id: expect.stringMatching(/^follow-up-/), contents: 'queued follow-up' },
       expect.objectContaining({
         resourceId: thread.resourceId,
         threadId: thread.id,
@@ -2328,7 +2329,11 @@ describe('AgentController message author', () => {
     await session.followUp({ content: 'queued follow-up', requestContext });
 
     expect(queueMessage).toHaveBeenCalledWith(
-      { contents: 'queued follow-up', providerOptions: { mastra: { author } } },
+      {
+        id: expect.stringMatching(/^follow-up-/),
+        contents: 'queued follow-up',
+        providerOptions: { mastra: { author } },
+      },
       expect.anything(),
     );
   });
