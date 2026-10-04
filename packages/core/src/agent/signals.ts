@@ -39,6 +39,8 @@ export type AgentStateSignalInput = {
 export type AgentMessageInput =
   | AgentSignalContents
   | {
+      /** The message id. The saved message and its stream events carry it. */
+      id?: string;
       contents: AgentSignalContents;
       attributes?: AgentSignalAttributes;
       metadata?: Record<string, unknown>;
@@ -685,6 +687,8 @@ export function createMessageSignal(
   return createSignal({
     ...message,
     ...options,
+    // A message that names its own id keeps it (the caller follows it by id).
+    ...('id' in message && message.id ? { id: message.id } : {}),
     type: 'user',
     tagName: 'user',
   });

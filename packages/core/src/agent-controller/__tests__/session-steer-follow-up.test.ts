@@ -4,6 +4,7 @@ import { Agent } from '../../agent';
 import { EventEmitterPubSub } from '../../events/event-emitter';
 import { InMemoryStore } from '../../storage/mock';
 import { AgentController } from '../agent-controller';
+import type { AgentControllerEvent } from '../types';
 
 /** In-process PubSub whose lease handoff can be held, to catch a queued run while it is starting. */
 class HeldLeasePubSub extends EventEmitterPubSub {
@@ -200,6 +201,74 @@ describe('Session.steerFollowUp', () => {
       await first;
       expect(aborted).toEqual([]);
       expect(prompts).toHaveLength(1);
+    } finally {
+      await controller.destroy();
+    }
+  }, 15_000);
+});
+
+describe('follow-up identity by id (no text matching needed)', () => {
+  it('lists each follow-up with its id and file names, and the message it becomes carries the same id', async () => {
+    const { controller, session, prompts, finish, first } = await startSession('follow-up-identity');
+    const started: string[] = [];
+    session.subscribe((event: AgentControllerEvent) => {
+      if (event.type === 'message_start' && event.message.role !== 'assistant') started.push(event.message.id);
+    });
+    try {
+      await session.followUp({
+        id: 'chosen-follow-up-id',
+        content: 'Look at this',
+        files: [{ data: Buffer.from('x').toString('base64'), mediaType: 'application/pdf', filename: 'report.pdf' }],
+      });
+      await session.followUp({ content: 'Look at this' });
+      const items = session.displayState.get().queuedFollowUpItems;
+      expect(items[0]).toEqual({
+        id: 'chosen-follow-up-id',
+        content: 'Look at this',
+        files: [{ mediaType: 'application/pdf', filename: 'report.pdf' }],
+      });
+      // Same text, its own id, and no files: told apart by id and files, never by text.
+      expect(items[1]).toMatchObject({ content: 'Look at this', files: [] });
+      expect(items[1]!.id).not.toBe('chosen-follow-up-id');
+      expect(JSON.stringify(items)).not.toContain(Buffer.from('x').toString('base64'));
+      // A second follow-up with a queued id is refused.
+      await expect(session.followUp({ id: 'chosen-follow-up-id', content: 'again' })).rejects.toThrow('already queued');
+
+      finish(0);
+      await first;
+      await vi.waitFor(() => expect(started).toContain('chosen-follow-up-id'));
+      finish(1);
+      await vi.waitFor(() => expect(started).toContain(items[1]!.id));
+      finish(2);
+      await vi.waitFor(() => expect(session.displayState.get().isRunning).toBe(false));
+      expect(prompts).toHaveLength(3);
+    } finally {
+      await controller.destroy();
+    }
+  }, 15_000);
+
+  it('steers with a queued follow-up under its own id, and a plain send keeps the id it is given', async () => {
+    const { controller, session, prompts, finish } = await startSession('follow-up-identity-steer');
+    const started: string[] = [];
+    session.subscribe((event: AgentControllerEvent) => {
+      if (event.type === 'message_start' && event.message.role !== 'assistant') started.push(event.message.id);
+    });
+    try {
+      await session.followUp({ id: 'steer-me', content: 'Now this' });
+      const result = session.steerFollowUp({ id: 'steer-me' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      void result.delivery.catch(() => {});
+      await vi.waitFor(() => expect(started).toContain('steer-me'));
+      finish(1);
+      await result.delivery;
+      await vi.waitFor(() => expect(session.displayState.get().isRunning).toBe(false));
+      const sent = session.sendMessage({ id: 'plain-send-id', content: 'Plain' });
+      void sent.catch(() => {});
+      await vi.waitFor(() => expect(started).toContain('plain-send-id'));
+      finish(2);
+      await sent;
+      expect(prompts).toHaveLength(3);
     } finally {
       await controller.destroy();
     }

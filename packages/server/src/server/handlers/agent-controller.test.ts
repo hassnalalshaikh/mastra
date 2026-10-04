@@ -236,7 +236,34 @@ describe('agent-controller routes', () => {
         resourceId: 'user-1',
         message: 'hello',
       } as any);
-      expect(res).toEqual({ ok: true });
+      expect(res).toEqual({ ok: true, messageId: expect.any(String) });
+    });
+
+    // The server names the message; the saved message and its events carry that id.
+    it('passes the id it gives the message to the session and returns it in the ack', async () => {
+      const controller = mastra.getAgentController('code')!;
+      await controller.init();
+      const session = await controller.createSession({
+        resourceId: 'user-message-id',
+        id: 'user-message-id',
+        ownerId: controller.id,
+      });
+      const spy = vi.spyOn(session, 'sendMessage').mockResolvedValue(undefined);
+      const res = (await SEND_AGENT_CONTROLLER_MESSAGE_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-message-id',
+        message: 'hello',
+      } as any)) as { ok: boolean; messageId: string };
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: res.messageId }));
+      expect(SEND_AGENT_CONTROLLER_MESSAGE_ROUTE.responseSchema!.safeParse(res).success).toBe(true);
+      const again = (await SEND_AGENT_CONTROLLER_MESSAGE_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-message-id',
+        message: 'hello',
+      } as any)) as { messageId: string };
+      expect(again.messageId).not.toBe(res.messageId);
     });
   });
 
@@ -288,7 +315,7 @@ describe('agent-controller routes', () => {
             resourceId: `user-bg-${name}`,
             message: 'hello',
           } as any);
-          expect(res).toEqual({ ok: true });
+          expect(res).toMatchObject({ ok: true });
 
           // Let the rejection settle and any unhandled-rejection fire.
           await new Promise(resolve => setTimeout(resolve, 0));
@@ -340,7 +367,7 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'hello', requestContext });
+      expect(spy).toHaveBeenCalledWith({ id: expect.any(String), content: 'hello', requestContext });
     });
 
     it('forwards requestContext to session.thread.switch', async () => {
@@ -427,7 +454,12 @@ describe('agent-controller routes', () => {
         files,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'see attached', files, requestContext: undefined });
+      expect(spy).toHaveBeenCalledWith({
+        id: expect.any(String),
+        content: 'see attached',
+        files,
+        requestContext: undefined,
+      });
     });
 
     it('rejects oversized file attachments in the body schema', () => {
@@ -459,9 +491,9 @@ describe('agent-controller routes', () => {
       } as any);
 
       expect(spy).toHaveBeenCalledWith({
+        id: expect.any(String),
         content: 'change course',
         files: undefined,
-        followUpId: undefined,
         requestContext,
       });
     });
@@ -479,7 +511,12 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({ content: 'and another thing', files: undefined, requestContext });
+      expect(spy).toHaveBeenCalledWith({
+        id: expect.any(String),
+        content: 'and another thing',
+        files: undefined,
+        requestContext,
+      });
     });
 
     // 1.74 port of the fork's attached steer/follow-up case: 1.74 acknowledges these
@@ -499,7 +536,7 @@ describe('agent-controller routes', () => {
       const spy = vi.spyOn(session, method).mockResolvedValue(undefined);
       await expect(
         route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
-      ).resolves.toEqual({ ok: true });
+      ).resolves.toEqual({ ok: true, messageId: expect.any(String) });
       expect(spy).toHaveBeenCalledWith(expect.objectContaining({ content: '', files }));
     });
 

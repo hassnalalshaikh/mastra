@@ -746,8 +746,11 @@ export interface AgentControllerDisplayState {
  */
 /** One queued follow-up as a UI sees it: a stable id and the message text. */
 export interface QueuedFollowUpItem {
+  /** The follow-up id. When it runs, its user message carries the same id. */
   id: string;
   content: string;
+  /** The follow-up's files, by type and name (never their data). */
+  files?: readonly { mediaType: string; filename?: string }[];
 }
 
 /**

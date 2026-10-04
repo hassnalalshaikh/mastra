@@ -19,6 +19,16 @@ export interface AgentControllerCommandAck {
  * was still queued and is now removed; `not_queued` means it was already handed
  * to a run (or was never queued), so nothing changed.
  */
+/**
+ * The ack of sendMessage/steer/followUp. `messageId` is the id the server gave
+ * the message: its saved user message, stream events and (for a follow-up)
+ * its queue row carry it. Older servers answer `{ ok: true }` only.
+ */
+export interface AgentControllerMessageAck {
+  ok: boolean;
+  messageId?: string;
+}
+
 export interface AgentControllerFollowUpRemoveAck {
   ok: boolean;
   /** Set when `ok` is false. */
@@ -649,10 +659,10 @@ export class AgentControllerSession extends BaseResource {
   async sendMessage(
     message: string | { content: string; files?: AgentControllerMessageFile[] },
     options?: AgentControllerRequestOptions,
-  ): Promise<void> {
+  ): Promise<AgentControllerMessageAck> {
     const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
     const requestContext = parseClientRequestContext(options?.requestContext);
-    await this.request(this.url(`${this.base()}/messages`), {
+    return this.request<AgentControllerMessageAck>(this.url(`${this.base()}/messages`), {
       method: 'POST',
       body: {
         message: content,
@@ -710,10 +720,10 @@ export class AgentControllerSession extends BaseResource {
   async steer(
     message: string | { content: string; files?: AgentControllerMessageFile[] },
     options?: AgentControllerRequestOptions,
-  ): Promise<void> {
+  ): Promise<AgentControllerMessageAck> {
     const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
     const requestContext = parseClientRequestContext(options?.requestContext);
-    await this.request(this.url(`${this.base()}/steer`), {
+    return this.request<AgentControllerMessageAck>(this.url(`${this.base()}/steer`), {
       method: 'POST',
       body: {
         message: content,
@@ -868,10 +878,10 @@ export class AgentControllerSession extends BaseResource {
   async followUp(
     message: string | { content: string; files?: AgentControllerMessageFile[] },
     options?: AgentControllerRequestOptions,
-  ): Promise<void> {
+  ): Promise<AgentControllerMessageAck> {
     const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
     const requestContext = parseClientRequestContext(options?.requestContext);
-    await this.request(this.url(`${this.base()}/follow-up`), {
+    return this.request<AgentControllerMessageAck>(this.url(`${this.base()}/follow-up`), {
       method: 'POST',
       body: { message: content, ...(files?.length ? { files } : {}), ...(requestContext ? { requestContext } : {}) },
     });

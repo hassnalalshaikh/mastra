@@ -303,6 +303,19 @@ const ackResponseSchema = z.object({
 });
 
 /**
+ * The messages/steer/follow-up ack also names the id the server gave the
+ * message: the saved user message, its stream events and (for a follow-up)
+ * its queue row all carry it, so a client follows that one message by id.
+ */
+const messageAckResponseSchema = z.object({
+  ok: z.boolean(),
+  messageId: z.string().optional(),
+});
+
+/** A fresh server-chosen message id (clients never choose message ids). */
+const newMessageId = (): string => globalThis.crypto.randomUUID();
+
+/**
  * `ok` is true only when the follow-up was still queued and was removed. A
  * follow-up already handed to a run (or never queued by this session) answers
  * `{ ok: false, reason: 'not_queued' }`, so a client never acts on a removal
@@ -667,7 +680,7 @@ export const SEND_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
   pathParamSchema: sessionPathParams,
   queryParamSchema: sessionScopeQuerySchema,
   bodySchema: sendMessageBodySchema,
-  responseSchema: ackResponseSchema,
+  responseSchema: messageAckResponseSchema,
   summary: 'Send a message to a controller session',
   description: 'Sends a user message to the session. The reply streams as events on the session\u2019s SSE stream.',
   tags: ['AgentController', 'Streaming'],
@@ -694,13 +707,14 @@ export const SEND_AGENT_CONTROLLER_MESSAGE_ROUTE = createRoute({
       // Forward the server middleware's requestContext so identity injected in
       // `server.middleware` reaches dynamic instructions and tools (same as the
       // plain agent message route).
+      const messageId = newMessageId();
       ackBackgroundSessionWork({
-        work: session.sendMessage({ content: message, files, requestContext }),
+        work: session.sendMessage({ id: messageId, content: message, files, requestContext }),
         session,
         mastra,
         operation: 'sendMessage',
       });
-      return { ok: true };
+      return { ok: true, messageId };
     } catch (error) {
       return handleError(error, 'error sending controller message');
     }
@@ -870,7 +884,7 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   pathParamSchema: sessionPathParams,
   queryParamSchema: sessionScopeQuerySchema,
   bodySchema: steerBodySchema,
-  responseSchema: ackResponseSchema,
+  responseSchema: messageAckResponseSchema,
   summary: 'Steer the in-flight run',
   description: 'Injects a message into the running turn (interjection) without starting a new run.',
   tags: ['AgentController'],
@@ -894,13 +908,14 @@ export const STEER_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
+      const messageId = newMessageId();
       ackBackgroundSessionWork({
-        work: session.steer({ content: message, files, requestContext }),
+        work: session.steer({ id: messageId, content: message, files, requestContext }),
         session,
         mastra,
         operation: 'steer',
       });
-      return { ok: true };
+      return { ok: true, messageId };
     } catch (error) {
       return handleError(error, 'error steering controller session');
     }
@@ -1563,7 +1578,7 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
   pathParamSchema: sessionPathParams,
   queryParamSchema: sessionScopeQuerySchema,
   bodySchema: followUpBodySchema,
-  responseSchema: ackResponseSchema,
+  responseSchema: messageAckResponseSchema,
   summary: 'Queue a follow-up message',
   description:
     'Queues a follow-up message. If the session is idle it sends immediately; if a run is active it queues for after completion.',
@@ -1588,13 +1603,14 @@ export const FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
         { scope: sessionScope, sessionThreadId },
         requestContext,
       );
+      const messageId = newMessageId();
       ackBackgroundSessionWork({
-        work: session.followUp({ content: message, files, requestContext }),
+        work: session.followUp({ id: messageId, content: message, files, requestContext }),
         session,
         mastra,
         operation: 'followUp',
       });
-      return { ok: true };
+      return { ok: true, messageId };
     } catch (error) {
       return handleError(error, 'error queuing controller follow-up');
     }
