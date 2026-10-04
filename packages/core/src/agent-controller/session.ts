@@ -4503,6 +4503,11 @@ export class Session<TState = unknown> {
         if (category) this.grantCategory(category, threadId);
       },
     });
+    // The parked run now holds this decision. Its saved suspended snapshot still
+    // lists the call until the resumed run persists, so remember the answer: a
+    // second response (another tab, a double click) must not fall through to the
+    // stored-run path and be acknowledged a second time.
+    if (result.accepted) this.#rememberAnsweredToolApproval(toolCallId);
     // The gate is gone; drop its display-state entry so the UI stops rendering it.
     this.displayState.clearPendingApprovals([toolCallId]);
     // Clearing the entry is a direct mutation that bypasses the reducer. Publish
@@ -4542,6 +4547,9 @@ export class Session<TState = unknown> {
    * `toolCallId`. Lets callers reject stale answers before scheduling the resume.
    */
   async hasPersistedToolApproval(toolCallId: string): Promise<boolean> {
+    // Already answered in this process: the stored run may not have persisted its
+    // resume yet, but the decision is taken and must not be applied twice.
+    if (this.#answeredToolApprovals.has(toolCallId)) return false;
     const threadId = this.thread.getId();
     if (!threadId) return false;
     const resourceId = this.identity.getResourceId();
@@ -4575,6 +4583,7 @@ export class Session<TState = unknown> {
     // This answer goes to the stored run directly, so a prompt restored for the
     // same saved approval is no longer pending.
     this.forgetRestoredApprovals({ toolCallId });
+    this.#rememberAnsweredToolApproval(toolCallId);
     const identity = { toolCallId, requestContext, runId: run.runId, threadId, resourceId };
     if (approved) await this.approveToolCall(identity);
     else await this.declineToolCall(identity);
@@ -5497,6 +5506,21 @@ export class Session<TState = unknown> {
 
   /** Tool call ids whose response has been claimed and is still being applied. */
   #claimedToolResponses = new Set<string>();
+  /**
+   * Tool calls whose approval this session already answered (live gate or stored
+   * run), newest last and bounded. Tool call ids are unique, so a remembered id
+   * is never answered again here; a new process starts empty and answers a
+   * restored approval through its stored run as before.
+   */
+  #answeredToolApprovals = new Set<string>();
+  #rememberAnsweredToolApproval(toolCallId: string): void {
+    this.#answeredToolApprovals.delete(toolCallId);
+    this.#answeredToolApprovals.add(toolCallId);
+    if (this.#answeredToolApprovals.size > 256) {
+      const oldest = this.#answeredToolApprovals.values().next().value;
+      if (oldest !== undefined) this.#answeredToolApprovals.delete(oldest);
+    }
+  }
 
   /**
    * Claim the right to answer `toolCallId` so concurrent requests cannot both be
