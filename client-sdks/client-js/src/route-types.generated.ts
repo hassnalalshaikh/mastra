@@ -23141,6 +23141,51 @@ export interface DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFoll
 }
 
 // ============================================================================
+// Route: POST /agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId/steer
+// ============================================================================
+export type PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_PathParams =
+  DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_PathParams;
+
+export type PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_QueryParams =
+  PostAgentControllerControllerIdSessionsResourceIdThreads_QueryParams;
+
+export type PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Body = {
+  requestContext?:
+    | {
+        [key: string]: unknown;
+      }
+    | undefined;
+};
+
+export type PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Response =
+  DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_Response;
+
+export type PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Request = Simplify<
+  (PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_PathParams extends never
+    ? {}
+    : { params: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_PathParams }) &
+    (PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_QueryParams extends never
+      ? {}
+      : {} extends PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_QueryParams
+        ? { query?: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_QueryParams }
+        : { query: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_QueryParams }) &
+    (PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Body extends never
+      ? {}
+      : {} extends PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Body
+        ? { body?: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Body }
+        : { body: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Body })
+>;
+
+export interface PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_RouteContract {
+  pathParams: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_PathParams;
+  queryParams: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_QueryParams;
+  body: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Body;
+  request: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Request;
+  response: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_Response;
+  responseType: 'json';
+}
+
+// ============================================================================
 // Route: POST /agent-controller/:controllerId/sessions/:resourceId/abort
 // ============================================================================
 export type PostAgentControllerControllerIdSessionsResourceIdAbort_PathParams =
@@ -24336,6 +24381,7 @@ export interface RouteTypes {
   'POST /agent-controller/:controllerId/sessions/:resourceId/steer': PostAgentControllerControllerIdSessionsResourceIdSteer_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/follow-up': PostAgentControllerControllerIdSessionsResourceIdFollowUp_RouteContract;
   'DELETE /agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId': DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_RouteContract;
+  'POST /agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId/steer': PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/abort': PostAgentControllerControllerIdSessionsResourceIdAbort_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/tool-approval': PostAgentControllerControllerIdSessionsResourceIdToolApproval_RouteContract;
   'POST /agent-controller/:controllerId/sessions/:resourceId/tool-suspension': PostAgentControllerControllerIdSessionsResourceIdToolSuspension_RouteContract;
@@ -24455,6 +24501,9 @@ export interface Client {
   };
   '/agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId': {
     DELETE: DeleteAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpId_RouteContract;
+  };
+  '/agent-controller/:controllerId/sessions/:resourceId/follow-up/:followUpId/steer': {
+    POST: PostAgentControllerControllerIdSessionsResourceIdFollowUpFollowUpIdSteer_RouteContract;
   };
   '/agent-controller/:controllerId/sessions/:resourceId/goal': {
     DELETE: DeleteAgentControllerControllerIdSessionsResourceIdGoal_RouteContract;
