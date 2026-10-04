@@ -211,6 +211,18 @@ const [next] = session.displayState.get().queuedFollowUpItems
 if (next) session.removeFollowUp({ id: next.id })
 ```
 
+#### `steerFollowUp({ id, requestContext? })`
+
+Steer the current run with one queued follow-up, by the `id` a UI read from `displayState.queuedFollowUpItems`. In one step the follow-up leaves the queue and becomes the steering message (with its files), so it can neither run twice nor be lost between a remove and a steer. Returns `{ ok: true, delivery }`, where `delivery` settles like `steer()` above. A follow-up that is no longer waiting (its run is already starting or already ran, or this session never queued it) returns `{ ok: false, reason: 'not_queued' }`; nothing is aborted and nothing is sent.
+
+```typescript
+const [next] = session.displayState.get().queuedFollowUpItems
+if (next) {
+  const result = session.steerFollowUp({ id: next.id })
+  if (result.ok) await result.delivery
+}
+```
+
 #### `getCurrentRunId()`
 
 Return the active stream run identifier, the tracked run identifier, or `null` while idle.

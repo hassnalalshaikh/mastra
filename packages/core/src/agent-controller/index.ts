@@ -52,6 +52,7 @@ export type {
   OMStatus,
   PermissionPolicy,
   PermissionRules,
+  SteerFollowUpResult,
   ToolCategory,
   BuiltinToolId,
   TokenUsage,
