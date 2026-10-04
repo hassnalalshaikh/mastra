@@ -61,6 +61,7 @@ import type {
   TokenUsage,
   ToolCategory,
   QueuedFollowUpItem,
+  SteerFollowUpResult,
 } from './types';
 
 export const SUSPENDED_RUN_AGENT_KEY = createRunScopeKey<Agent>('agent-controller.suspendedRunAgent');
@@ -4207,7 +4208,14 @@ export class Session<TState = unknown> {
     }
     for (const runApprovals of approvalsByRun.values()) {
       if (runApprovals.length !== 1) continue;
-      this.#restoreSavedApproval({ approval: runApprovals[0]!, threadId, subscription, agent, operationId, resourceId });
+      this.#restoreSavedApproval({
+        approval: runApprovals[0]!,
+        threadId,
+        subscription,
+        agent,
+        operationId,
+        resourceId,
+      });
     }
   }
 
@@ -5472,7 +5480,13 @@ export class Session<TState = unknown> {
    */
   readonly #queuedFollowUps = new Map<
     string,
-    { content: string; agent: Agent; resourceId: string; threadId: string }
+    {
+      content: string;
+      files?: Array<{ data: string; mediaType: string; filename?: string }>;
+      agent: Agent;
+      resourceId: string;
+      threadId: string;
+    }
   >();
   #queuedFollowUpCount = 0;
   /** Owner ids in the runtime's last queue report, or undefined when it did not name them. */
@@ -5525,6 +5539,31 @@ export class Session<TState = unknown> {
     return cancelledSignalIds.length > 0;
   }
 
+  /**
+   * Steer with one queued follow-up, by the id a UI read from
+   * `displayState.queuedFollowUpItems`, in one step: the follow-up leaves the
+   * queue and becomes the steering message (with its files), so it can neither
+   * run twice nor be lost between a remove and a steer.
+   *
+   * A follow-up that is no longer waiting (its run is already starting, it was
+   * already handed to a run, or this Session never queued it) answers
+   * `{ ok: false, reason: 'not_queued' }`: nothing is aborted and nothing is sent.
+   * Otherwise `delivery` settles like `steer()`.
+   */
+  steerFollowUp({ id, requestContext }: { id: string; requestContext?: RequestContext }): SteerFollowUpResult {
+    const item = this.#queuedFollowUps.get(id);
+    if (!item) return { ok: false, reason: 'not_queued' };
+    const { cancelledSignalIds } = item.agent.cancelQueuedMessages({
+      resourceId: item.resourceId,
+      threadId: item.threadId,
+      queueOwnerId: id,
+      waitingOnly: true,
+    });
+    if (cancelledSignalIds.length === 0) return { ok: false, reason: 'not_queued' };
+    this.#dropFollowUp(id);
+    return { ok: true, delivery: this.steer({ content: item.content, files: item.files, requestContext }) };
+  }
+
   /** Queue a follow-up through the Agent runtime, or send it immediately while idle. */
   async followUp({
     content,
@@ -5554,7 +5593,7 @@ export class Session<TState = unknown> {
       this.#preparingFollowUps.delete(operation);
       // Registered before queueing so the runtime's queue report already lists it.
       const id = `follow-up-${++this.#followUpSequence}-${Math.random().toString(36).slice(2, 8)}`;
-      this.#queuedFollowUps.set(id, { content, agent, resourceId, threadId });
+      this.#queuedFollowUps.set(id, { content, files, agent, resourceId, threadId });
       let queued: ReturnType<Agent['queueMessage']>;
       try {
         queued = agent.queueMessage(

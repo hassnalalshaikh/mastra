@@ -750,6 +750,13 @@ export interface QueuedFollowUpItem {
   content: string;
 }
 
+/**
+ * The answer to `session.steerFollowUp({ id })`. `not_queued`: the follow-up is
+ * no longer waiting (its run is starting or already ran), so nothing was aborted
+ * or sent. `delivery` settles like `session.steer()`.
+ */
+export type SteerFollowUpResult = { ok: true; delivery: Promise<void> } | { ok: false; reason: 'not_queued' };
+
 export function defaultDisplayState(): AgentControllerDisplayState {
   return {
     isRunning: false,
