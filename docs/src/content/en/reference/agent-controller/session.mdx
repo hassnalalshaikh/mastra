@@ -806,6 +806,8 @@ const waiting = session.followUps.list()
 // [{ id: 'follow-up-1-k3j9x2', content: 'Then propose a fix.' }]
 ```
 
+Each item also lists its `files` by `mediaType` and `filename` (never their data). The follow-up `id` is also the id of the user message it becomes: when it runs (from the queue, or through `steerFollowUp()`), its `message_start` event and saved message carry the same `id`, so a UI follows one message by id from the queue into the transcript without matching text. `sendMessage()`, `steer()` and `followUp()` accept an optional `id` for the same purpose; the server routes choose it and return it as `messageId` in their ack.
+
 ### `session.followUps.remove(id)`
 
 Remove one queued follow-up by id without touching the rest of the queue. Returns whether it was still queued. Same as [`session.removeFollowUp()`](#messages-and-run-control).
