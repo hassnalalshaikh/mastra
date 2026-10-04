@@ -250,6 +250,36 @@ describe('AgentController Resource', () => {
     expect((global.fetch as any).mock.calls).toHaveLength(1);
   });
 
+  it('steers with a queued follow-up by id in one POST and returns the ack', async () => {
+    mockJson({ ok: true });
+    await expect(client.getAgentController('code').session('user-1').steerFollowUp('follow-up-7/abc')).resolves.toEqual(
+      { ok: true },
+    );
+    const [url, init] = lastCall();
+    expect(url).toBe(
+      'http://localhost:4111/api/agent-controller/code/sessions/user-1/follow-up/follow-up-7%2Fabc/steer',
+    );
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({});
+
+    mockJson({ ok: false, reason: 'not_queued' });
+    await expect(client.getAgentController('code').session('user-1').steerFollowUp('drained-1')).resolves.toEqual({
+      ok: false,
+      reason: 'not_queued',
+    });
+
+    mockJson({ ok: true });
+    const requestContext = { userId: 'u-42' };
+    await client.getAgentController('code').session('user-1').steerFollowUp('queued-2', { requestContext });
+    expect(JSON.parse(lastCall()[1].body as string)).toEqual({ requestContext });
+  });
+
+  it('does not replay a follow-up steer after a failed response', async () => {
+    (global.fetch as any).mockResolvedValue(new Response('boom', { status: 500, statusText: 'Internal Server Error' }));
+    await expect(client.getAgentController('code').session('user-1').steerFollowUp('queued-1')).rejects.toThrow();
+    expect((global.fetch as any).mock.calls).toHaveLength(1);
+  });
+
   it('reads session state', async () => {
     mockJson({ controllerId: 'code', resourceId: 'user-1', threadId: 't-1', modeId: 'build', modelId: 'm' });
     const state = await client.getAgentController('code').session('user-1').state();
