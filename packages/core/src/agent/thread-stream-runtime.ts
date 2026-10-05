@@ -2484,6 +2484,15 @@ export class AgentThreadStreamRuntime {
     try {
       if (!runId) return false;
       if (state.preparedRunsById.has(runId)) return this.abortRun(runId, resolvedPubSub);
+      const record = state.threadRunsById.get(runId);
+      if (record && state.threadKeysByRunId.get(runId) === key && !this.#isParkedRun(state, runId)) {
+        // Durable runs own their controller outside the thread runtime, so stop
+        // them through their owner, like a remote abort request does. This is
+        // the only way to reach a run that the caller did not start itself,
+        // such as one the follow-up queue started.
+        record.agent.abortRunStream(runId);
+        return true;
+      }
       if (state.threadKeysByRunId.get(runId) === key) {
         // Reserved locally (a sendSignal wake that has not prepared its run yet):
         // record the abort intent so preparation aborts the run before it starts.
