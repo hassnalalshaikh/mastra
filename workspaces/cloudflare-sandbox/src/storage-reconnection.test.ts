@@ -155,7 +155,7 @@ describe('required durable storage', () => {
     const sandbox = new CloudflareSandbox({ baseUrl: 'https://bridge.example.com', fetch: bridge.fetch });
     await sandbox._start();
     expect((await sandbox.mount(filesystem(), path)).success).toBe(true);
-    expect(bridge.mounts[0]).toEqual({ bucket: 'WORKSPACE_FILES', mountPath: path, options: { prefix: '/chat-one/' } });
+    expect(bridge.mounts[0]).toEqual({ binding: 'WORKSPACE_FILES', mountPath: path, options: { prefix: '/chat-one/' } });
     await sandbox.mount(filesystem({ ...config, region: 'us-east-1' }), '/workspace/aws');
     expect(bridge.mounts[1]).toMatchObject({ options: { endpoint: 'https://s3.us-east-1.amazonaws.com' } });
     await sandbox.mount(filesystem({ ...config, endpoint: 'https://example.com', accessKeyId: 'key', secretAccessKey: 'secret' }), '/workspace/s3');

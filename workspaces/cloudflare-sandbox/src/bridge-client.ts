@@ -42,8 +42,10 @@ export interface CloudflareMountBucketOptions {
 }
 
 export interface CloudflareMountBucketRequest {
-  /** Bucket name, e.g. `my-r2-bucket`. */
-  bucket: string;
+  /** Remote bucket name when options.endpoint is supplied. */
+  bucket?: string;
+  /** Worker R2 binding name when options.endpoint is absent. */
+  binding?: string;
   /** Local filesystem path to mount at, e.g. `/mnt/data`. */
   mountPath: string;
   options?: CloudflareMountBucketOptions;

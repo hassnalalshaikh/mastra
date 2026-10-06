@@ -95,7 +95,7 @@ function toMountRequest(
   const prefix = s3.prefix ? (s3.prefix.startsWith('/') ? s3.prefix : `/${s3.prefix}`) : undefined;
   return {
     request: {
-      bucket: s3.bucket,
+      ...(endpoint ? { bucket: s3.bucket } : { binding: s3.bucket }),
       mountPath,
       options: {
         endpoint,

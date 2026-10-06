@@ -172,7 +172,15 @@ export function createFakeBridge(options: { apiToken?: string; baseUrl?: string 
 
       const mount = /^\/v1\/sandbox\/([^/]+)\/mount$/.exec(path);
       if (method === 'POST' && mount) {
-        const body = JSON.parse(bodyText ?? '{}') as { mountPath?: string };
+        const body = JSON.parse(bodyText ?? '{}') as {
+          mountPath?: string; bucket?: string; binding?: string; options?: { endpoint?: string };
+        };
+        // Match the native Bridge HTTP contract: remote endpoints use bucket;
+        // credential-free Worker R2 connections use binding, not bucket.
+        const name = body.options?.endpoint ? body.bucket : body.binding;
+        if (typeof name !== 'string' || !name) {
+          return Response.json({ error: body.options?.endpoint ? 'bucket required' : 'binding required' }, { status: 400 });
+        }
         bridge.mounts.push(body);
         if (body.mountPath) bridge.activeMounts.add(body.mountPath);
         return Response.json({ ok: true });

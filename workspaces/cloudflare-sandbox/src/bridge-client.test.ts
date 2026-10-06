@@ -155,6 +155,14 @@ describe('CloudflareSandboxBridgeClient', () => {
     });
   });
 
+  it('uses the binding field for a private R2 connection without an endpoint', async () => {
+    const { bridge, client } = createClient();
+    const id = await client.createSandbox();
+    await client.mountBucket(id, { binding: 'WORKSPACE_FILES', mountPath: '/workspace', options: { prefix: '/private-chat/' } });
+    expect(bridge.mounts.at(-1)).toEqual({ binding: 'WORKSPACE_FILES', mountPath: '/workspace', options: { prefix: '/private-chat/' } });
+    await expect(client.mountBucket(id, { bucket: 'WORKSPACE_FILES', mountPath: '/workspace' })).rejects.toThrow('binding required');
+  });
+
   it('unmounts a bucket with POST /unmount', async () => {
     const { bridge, client } = createClient();
     const id = await client.createSandbox();
