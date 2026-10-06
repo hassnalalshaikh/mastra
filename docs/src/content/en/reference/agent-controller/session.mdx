@@ -173,6 +173,22 @@ Returns the same `{ id, type, accepted }` handle as `sendSignal`. The `accepted`
 
 File conversion can throw before a signal is sent. Routing and stream setup failures reject `accepted`. The method doesn't retry. Existing `sendMessage` behavior is unchanged.
 
+Each file may include `source`, an optional string with its original source reference. The Session stores this reference as a separate text part with attachment provenance, alongside the normalized file. It remains separate from editable message text. The same file field works with `sendMessage`, `steer`, and `followUp`; HTTP clients accept up to 16,384 characters per source reference.
+
+```typescript
+await session.sendMessage({
+  content: 'Summarize the notes.',
+  files: [{
+    data: 'Meeting notes',
+    mediaType: 'text/plain',
+    filename: 'notes.txt',
+    source: 'Original notes: https://example.com/notes.txt',
+  }],
+})
+```
+
+The admitted `AgentController.editMessage()` contribution preserves marked source references and normalized attachments while replacing editable text in a new thread. For older unmarked normalized files, it requires matching stored source provenance. It refuses an unverifiable named or unnamed attachment with status 409 before cloning or sending. The original thread and its external effects remain intact.
+
 #### `sendMessage({ content, files?, requestContext? })`
 
 Send a user message. The session creates a thread first when no thread is active.

@@ -1,0 +1,94 @@
+[
+  {
+    "id": "synthetic-message-0",
+    "role": "signal",
+    "type": "user",
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "content": {
+      "format": 2,
+      "parts": [
+        {
+          "type": "text",
+          "text": "Harmless attachment test.\n\n[Attachment source 1: attachment-document.docx; application/vnd.openxmlformats-officedocument.wordprocessingml.document](https://example.test/fixtures/0/attachment-document.docx)\n\n[Attachment source 2: attachment-presentation.pptx; application/vnd.openxmlformats-officedocument.presentationml.presentation](https://example.test/fixtures/0/attachment-presentation.pptx)\n\n[Attachment source 3: attachment-sheet.xlsx; application/vnd.openxmlformats-officedocument.spreadsheetml.sheet](https://example.test/fixtures/0/attachment-sheet.xlsx)\n\n[Attachment source 4: attachment-text.txt; text/plain](https://example.test/fixtures/0/attachment-text.txt)\n\n[Attachment source 5: attachment-photo.png; image/webp](https://example.test/fixtures/0/attachment-photo.png)"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-document.docx]\n```\nSynthetic sample: DOCUMENT-ONE.\n```"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-presentation.pptx]\n```\nSynthetic sample: PRESENTATION-ONE.\n```"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-sheet.xlsx]\n```\nSynthetic sample: SHEET-ONE.\n```"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-text.txt]\n```\nSynthetic sample: TEXT-ONE.\n```"
+        },
+        {
+          "type": "file",
+          "data": "https://example.test/fixtures/0/attachment-photo.png",
+          "mimeType": "image/webp",
+          "filename": "attachment-photo.png"
+        }
+      ],
+      "metadata": {
+        "signal": {
+          "id": "synthetic-message-0",
+          "type": "user",
+          "tagName": "user",
+          "createdAt": "2025-01-01T00:00:00.000Z",
+          "acceptedAt": "2025-01-01T00:00:00.000Z"
+        }
+      }
+    }
+  },
+  {
+    "id": "synthetic-message-1",
+    "role": "signal",
+    "type": "user",
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "content": {
+      "format": 2,
+      "parts": [
+        {
+          "type": "text",
+          "text": "Harmless attachment test.\n\n[Attachment source 1: attachment-document.docx; application/vnd.openxmlformats-officedocument.wordprocessingml.document](https://example.test/fixtures/1/attachment-document.docx)\n\n[Attachment source 2: attachment-presentation.pptx; application/vnd.openxmlformats-officedocument.presentationml.presentation](https://example.test/fixtures/1/attachment-presentation.pptx)\n\n[Attachment source 3: attachment-sheet.xlsx; application/vnd.openxmlformats-officedocument.spreadsheetml.sheet](https://example.test/fixtures/1/attachment-sheet.xlsx)\n\n[Attachment source 4: attachment-text.txt; text/plain](https://example.test/fixtures/1/attachment-text.txt)\n\n[Attachment source 5: attachment-photo.png; image/webp](https://example.test/fixtures/1/attachment-photo.png)"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-document.docx]\n```\nSynthetic sample: DOCUMENT-ONE.\n```"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-presentation.pptx]\n```\nSynthetic sample: PRESENTATION-ONE.\n```"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-sheet.xlsx]\n```\nSynthetic sample: SHEET-ONE.\n```"
+        },
+        {
+          "type": "text",
+          "text": "[File: attachment-text.txt]\n```\nSynthetic sample: TEXT-ONE.\n```"
+        },
+        {
+          "type": "file",
+          "data": "https://example.test/fixtures/1/attachment-photo.png",
+          "mimeType": "image/webp",
+          "filename": "attachment-photo.png"
+        }
+      ],
+      "metadata": {
+        "signal": {
+          "id": "synthetic-message-1",
+          "type": "user",
+          "tagName": "user",
+          "createdAt": "2025-01-01T00:00:00.000Z",
+          "acceptedAt": "2025-01-01T00:00:00.000Z"
+        }
+      }
+    }
+  }
+]

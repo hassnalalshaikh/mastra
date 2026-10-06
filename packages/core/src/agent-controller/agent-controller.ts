@@ -25,6 +25,7 @@ import type { DynamicArgument } from '../types';
 import { Workspace } from '../workspace/workspace';
 
 import { Session } from './session';
+import { retainedEditAttachments } from './message-edit-attachments';
 import type { ThreadDataStore } from './session';
 import { projectCompletedToolMessages } from './tool-completion-display';
 import {
@@ -1356,7 +1357,7 @@ export class AgentController<TState = {}> {
           details: { status: 404 },
         });
       const originalContents = mastraDBMessageToSignal({ ...original, type: 'user' }).contents;
-      const files = typeof originalContents === 'string' ? [] : originalContents.filter(part => part.type === 'file');
+      const attachments = retainedEditAttachments(originalContents);
       const { workingMemory: _workingMemory, ...metadata } = source.metadata ?? {};
       const editedMetadata = { ...metadata, editedFrom: { threadId: sourceThreadId, messageId } };
       let thread: StorageThreadType;
@@ -1398,7 +1399,7 @@ export class AgentController<TState = {}> {
       });
       await session.sendSignal(
         {
-          content: [{ type: 'text', text: content }, ...files],
+          content: [{ type: 'text', text: content }, ...attachments],
           requestContext: context,
         },
         { requireDelivery: true },
