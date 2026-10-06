@@ -22941,6 +22941,7 @@ export type PostAgentControllerControllerIdSessionsResourceIdMessages_Body = {
         data: string;
         mediaType: string;
         filename?: string | undefined;
+        source?: string | undefined;
       }[]
     | undefined;
 };

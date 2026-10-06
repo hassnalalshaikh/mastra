@@ -5,6 +5,7 @@ import { MASTRA_THREAD_ID_KEY, RequestContext } from '../request-context';
 import { InMemoryStore } from '../storage/mock';
 import { AgentController } from './agent-controller';
 import { createMockWorkspace } from './test-utils';
+import attachmentRows from './edit-attachment-fixture.json';
 
 async function fixture(count = 4) {
   const storage = new InMemoryStore();
@@ -62,6 +63,58 @@ async function fixture(count = 4) {
 }
 
 describe('Controller edited conversations', () => {
+  it.each(attachmentRows.map((row, index) => [index, row] as const))('retains all five real stored attachments in row %i', async (_index, row) => {
+    const f = await fixture();
+    await f.store.saveMessages({ messages: [{ ...f.messages[2], role: 'signal', type: 'user',
+      content: row.content as unknown as MastraDBMessage['content'] }] });
+    await f.controller.editMessage(f.input);
+    const input = f.sendSignal.mock.calls[0]![0] as unknown as { content: Array<{ type: string; text?: string; data?: string }> };
+    expect(input.content[0]).toEqual({ type: 'text', text: 'Corrected' });
+    for (const marker of ['DOCUMENT-ONE', 'PRESENTATION-ONE', 'SHEET-ONE', 'TEXT-ONE']) {
+      expect(input.content.some(part => part.text?.includes(marker))).toBe(true);
+    }
+    expect(input.content.filter(part => part.type === 'file')).toHaveLength(1);
+    expect(input.content.filter(part => part.text?.startsWith('[Attachment source '))).toHaveLength(5);
+    expect(JSON.stringify(input.content)).not.toContain('Harmless attachment test.');
+    expect((await f.store.listMessages({ threadId: 'source', perPage: false })).messages).toHaveLength(4);
+  });
+
+  it('does not retain ordinary text alongside a file', async () => {
+    const f = await fixture();
+    await f.store.saveMessages({ messages: [{ ...f.messages[2], content: { format: 2, parts: [
+      { type: 'text', text: 'Old editable text' }, { type: 'text', text: 'More old editable text' },
+      { type: 'file', data: 'https://example.test/a.png', mimeType: 'image/png' },
+    ] } }] });
+    await f.controller.editMessage(f.input);
+    expect(JSON.stringify(f.sendSignal.mock.calls[0])).not.toContain('Old editable text');
+    expect(JSON.stringify(f.sendSignal.mock.calls[0])).not.toContain('More old editable text');
+  });
+
+  it.each(['[File: uncertain.txt]', '[Attached file]'])('refuses an unmarked %s block with no matching source before making a copy', async label => {
+    const f = await fixture();
+    await f.store.saveMessages({ messages: [{ ...f.messages[2], content: { format: 2, parts: [
+      { type: 'text', text: 'Old editable text' }, { type: 'text', text: `${label}\n\`\`\`\nUnknown\n\`\`\`` },
+    ] } }] });
+    await expect(f.controller.editMessage(f.input)).rejects.toMatchObject({ details: { status: 409 } });
+    expect(await f.store.getThreadById({ threadId: 'edited' })).toBeNull();
+    expect(f.sendSignal).not.toHaveBeenCalled();
+  });
+
+  it('retains native marked source and normalized text with no legacy source pattern', async () => {
+    const f = await fixture();
+    const marked = { mastra: { attachmentInput: { version: 1, kind: 'file', filename: 'note.txt' } } };
+    await f.store.saveMessages({ messages: [{ ...f.messages[2], content: { format: 2, parts: [
+      { type: 'text', text: 'Old editable text' },
+      { type: 'text', text: '[File: note.txt]\n```\nBody\n```', providerMetadata: marked },
+      { type: 'text', text: 'Original audio and video references', providerMetadata: {
+        mastra: { attachmentInput: { version: 1, kind: 'source' } },
+      } },
+    ] } }] });
+    await f.controller.editMessage(f.input);
+    expect(JSON.stringify(f.sendSignal.mock.calls[0])).toContain('Original audio and video references');
+    expect(JSON.stringify(f.sendSignal.mock.calls[0])).toContain('Body');
+    expect(JSON.stringify(f.sendSignal.mock.calls[0])).not.toContain('Old editable text');
+  });
   it('keeps the original and copies only messages before the edited one', async () => {
     const f = await fixture();
     const original = await f.store.listMessages({ threadId: 'source', perPage: false });
