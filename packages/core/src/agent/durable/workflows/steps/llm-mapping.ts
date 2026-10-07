@@ -19,6 +19,7 @@ import type {
   DurableLLMStepOutput,
   DurableToolCallOutput,
   DurableAgenticExecutionOutput,
+  DurableAgenticWorkflowInput,
   SerializableDurableState,
 } from '../../types';
 import { rebuildRunToolsFromMastra } from '../../utils/resolve-runtime';
@@ -510,7 +511,11 @@ export function createDurableLLMMappingStep() {
           let saveQueueManager = globalRunRegistry.get(_runId)?.saveQueueManager;
           let memory = globalRunRegistry.get(_runId)?.memory;
           if (!saveQueueManager && mastra) {
+            const originalContext = params.getInitData<DurableAgenticWorkflowInput>();
             const rebuilt = await rebuildRunToolsFromMastra({
+              requestContextEntries: originalContext.requestContextEntries,
+              resumeRequestContextKeys: originalContext.resumeRequestContextKeys,
+              resumeRequestContextInputEntries: originalContext.resumeRequestContextInputEntries,
               mastra: mastra as Mastra,
               runId: _runId,
               agentId: _agentId,

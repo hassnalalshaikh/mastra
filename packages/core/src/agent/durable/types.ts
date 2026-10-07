@@ -347,6 +347,8 @@ export interface DurableAgenticWorkflowInput {
    * Only plain JSON-safe entries should appear here.
    */
   requestContextEntries?: Record<string, unknown>;
+  resumeRequestContextKeys?: string[];
+  resumeRequestContextInputEntries?: Record<string, unknown>;
 }
 
 /**

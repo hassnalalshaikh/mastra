@@ -168,6 +168,8 @@ export const baseIterationStateSchema = z.object({
   // instance resolve with the same request context on iteration N as on
   // iteration 1. Dropping it here silently falls back to an empty context.
   requestContextEntries: z.record(z.string(), z.any()).optional(),
+  resumeRequestContextKeys: z.array(z.string()).optional(),
+  resumeRequestContextInputEntries: z.record(z.string(), z.any()).optional(),
   // Iteration tracking
   iterationCount: z.number(),
   accumulatedSteps: z.array(z.any()),

@@ -137,6 +137,8 @@ export function createBaseIterationStateUpdate(input: IterationStateUpdateInput)
     // Carried, not recomputed: the request context is fixed for the run, and
     // the steps that rebuild from Mastra have no other source for it.
     requestContextEntries: currentState.requestContextEntries,
+    resumeRequestContextKeys: currentState.resumeRequestContextKeys,
+    resumeRequestContextInputEntries: currentState.resumeRequestContextInputEntries,
     iterationCount: currentState.iterationCount + 1,
     accumulatedSteps: [...currentState.accumulatedSteps, stepRecord],
     accumulatedUsage: newUsage,

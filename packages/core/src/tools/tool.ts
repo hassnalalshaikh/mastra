@@ -1,7 +1,12 @@
 import type { ToolBackgroundConfig } from '../background-tasks';
 import type { Mastra } from '../mastra';
 import { RequestContext } from '../request-context';
-import { getRequestContextInputSource, REQUEST_CONTEXT_INPUT_SOURCE } from '../request-context/input-source';
+import {
+  getRequestContextInputSource,
+  REQUEST_CONTEXT_INPUT_SOURCE,
+  getOriginalSelectedExecutionValues,
+  assertResumeRequestContext,
+} from '../request-context/input-source';
 import { toStandardSchema } from '../schema';
 import type { PublicSchema, StandardSchemaWithJSON, InferPublicSchema } from '../schema';
 import type { SuspendOptions } from '../workflows';
@@ -88,8 +93,9 @@ class TransformedRequestContext extends RequestContext<Record<string, any>> {
     transformedValues: Record<string, unknown>,
     acceptsInput: RequestContextInputValidator,
     encode?: RequestContextEncoder,
+    selectedExecutionValues?: Record<string, unknown>,
   ) {
-    super(Object.entries({ ...source.all, ...transformedValues }));
+    super(Object.entries({ ...source.all, ...transformedValues, ...selectedExecutionValues }));
     this.#source = source;
     this.#acceptsInput = acceptsInput;
     this.#encode = encode;
@@ -410,6 +416,13 @@ export class Tool<
     if (opts.execute) {
       const originalExecute = opts.execute;
       this.execute = markPolicyExecutor(async (inputData: TSchemaIn, context?: any) => {
+        const selectedExecutionValues = getOriginalSelectedExecutionValues(context?.requestContext);
+        const selectedExecutionSnapshot = selectedExecutionValues
+          ? {
+              resumeRequestContextKeys: Object.keys(selectedExecutionValues),
+              requestContextEntries: selectedExecutionValues,
+            }
+          : undefined;
         // When a tool is being resumed (resumeData present in context), skip input
         // validation. The original args were already validated during the initial
         // execution, and during resume the tool's execute function checks resumeData
@@ -439,6 +452,7 @@ export class Tool<
         if (requestContextError) {
           return requestContextError as any;
         }
+        if (selectedExecutionSnapshot) assertResumeRequestContext(context.requestContext, selectedExecutionSnapshot);
 
         const executionRequestContext = this.requestContextSchema
           ? new TransformedRequestContext(
@@ -446,6 +460,7 @@ export class Tool<
               validatedRequestContext as Record<string, unknown>,
               getRequestContextInputValidator(this.requestContextSchema),
               getRequestContextEncoder(this.requestContextSchema),
+              selectedExecutionValues,
             )
           : context?.requestContext;
 
@@ -574,6 +589,10 @@ export class Tool<
         const decision = await checkExecutionPolicy(context, data);
         if (decision?.allowed === false) return decision.error as any;
         await notifyToolExecutionStart(context, data);
+        if (selectedExecutionSnapshot) {
+          assertResumeRequestContext(context.requestContext, selectedExecutionSnapshot);
+          assertResumeRequestContext(organizedContext.requestContext, selectedExecutionSnapshot);
+        }
         delete organizedContext[TOOL_EXECUTION_POLICY];
         delete organizedContext[TOOL_EXECUTION_START];
         const output = await originalExecute(data as any, organizedContext);

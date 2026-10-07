@@ -28,6 +28,7 @@ import type { AnySpan } from '../../observability';
 import { executeWithContext } from '../../observability/utils';
 import { PROCESSOR_TOOL_OWNER, getProcessorToolOwner } from '../../processors/tool-provenance';
 import { RequestContext } from '../../request-context';
+import { hasOriginalSelectedContext } from '../../request-context/input-source';
 import { isStandardSchemaWithJSON, toStandardSchema, standardSchemaToJSONSchema } from '../../schema';
 import type { StandardSchemaWithJSON } from '../../schema';
 import { getNeedsApprovalFn, isVercelTool, isProviderDefinedTool } from '../../tools/toolchecks';
@@ -99,6 +100,9 @@ function mergeRequestContexts(
   closureRC: RequestContext | undefined,
   execRC: RequestContext | undefined,
 ): RequestContext {
+  // Native durable restoration already selected the originals over fresh scope.
+  // The old closure cannot overwrite them or resurrect an omitted permission.
+  if (hasOriginalSelectedContext(execRC)) return execRC!;
   if (closureRC && closureRC === execRC) return closureRC;
   if (!closureRC && !execRC) return new RequestContext();
   if (!closureRC) return isRequestContextLike(execRC) ? execRC : new RequestContext();
