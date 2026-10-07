@@ -692,6 +692,10 @@ export interface GoalConfig {
 export type AgentDurableOption =
   | boolean
   | {
+      /** Selected JSON-safe context keys retained from the original run before resumed model/default resolution. */
+      resumeRequestContextKeys?: readonly string[];
+      /** Validate completed selected execution values before initial persistence and resumed resolution. Output is ignored. */
+      resumeRequestContextSchema?: PublicSchema<Record<string, unknown>>;
       /** See createDurableAgent options: cache backend for resumable streams. */
       cache?: MastraServerCache | false;
       /** See createDurableAgent options: pubsub instance for streaming events. */

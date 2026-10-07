@@ -326,6 +326,8 @@ export function createWorkflowInput(params: {
   agentSpanData?: unknown;
   modelSpanData?: unknown;
   requestContextEntries?: Record<string, unknown>;
+  resumeRequestContextKeys?: readonly string[];
+  resumeRequestContextInputEntries?: Record<string, unknown>;
 }): DurableAgenticWorkflowInput {
   return {
     __workflowKind: 'durable-agent',
@@ -344,6 +346,8 @@ export function createWorkflowInput(params: {
     agentSpanData: params.agentSpanData,
     modelSpanData: params.modelSpanData,
     requestContextEntries: params.requestContextEntries,
+    resumeRequestContextKeys: params.resumeRequestContextKeys ? [...params.resumeRequestContextKeys] : undefined,
+    resumeRequestContextInputEntries: params.resumeRequestContextInputEntries,
   };
 }
 

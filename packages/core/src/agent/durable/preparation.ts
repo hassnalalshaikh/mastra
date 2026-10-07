@@ -24,8 +24,17 @@ import {
   mergeVersionOverrides,
 } from '../../request-context';
 import type { VersionOverrides } from '../../request-context';
-import { getRequestContextInputValues } from '../../request-context/input-source';
+import {
+  getRequestContextInputValues,
+  captureResumeRequestContext,
+  finalizeResumeRequestContext,
+  assertResumeRequestContext,
+  restoreResumeRequestContext,
+  validateResumeRequestContextSchema,
+} from '../../request-context/input-source';
+import type { ResumeRequestContextSnapshot } from '../../request-context/input-source';
 import { toStandardSchema } from '../../schema';
+import type { PublicSchema } from '../../schema';
 import { asJsonSchema } from '../../stream/base/schema';
 import { normalizeToolPayloadTransformPolicy } from '../../tools/payload-transform';
 import { ToolPolicyError } from '../../tools/tool-policy';
@@ -222,6 +231,10 @@ export interface PreparationResult<_OUTPUT = undefined> {
  * Options for preparation phase
  */
 export interface PreparationOptions<OUTPUT = undefined> {
+  resumeRequestContextKeys?: readonly string[];
+  resumeRequestContextSchema?: PublicSchema<Record<string, unknown>>;
+  /** Internal original raw capture, or both original forms on resume. */
+  resumeRequestContextSnapshot?: ResumeRequestContextSnapshot;
   /** Already-processed native input used only to rebuild a saved run's runtime resources. */
   resumeMessageListState?: SerializedMessageListState;
   /** Set while preparing a saved run only to deliver a tool denial. */
@@ -305,7 +318,16 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
   const messageId = crypto.randomUUID();
 
   // 2. Get request context
-  const requestContext = providedRequestContext ?? new RequestContext();
+  let requestContext = providedRequestContext ?? new RequestContext();
+  const selectedContext =
+    options.resumeRequestContextSnapshot ??
+    captureResumeRequestContext(requestContext, options.resumeRequestContextKeys ?? []);
+  if (selectedContext && !options.resumeRequestContextSnapshot)
+    requestContext = restoreResumeRequestContext(selectedContext, requestContext);
+  const resumingSelectedContext = !!resumeMessageListState && !!selectedContext;
+  if (resumingSelectedContext) assertResumeRequestContext(requestContext, selectedContext);
+  if (resumingSelectedContext)
+    await validateResumeRequestContextSchema(selectedContext, options.resumeRequestContextSchema);
 
   // 2a. Validate the request context against the agent's requestContextSchema,
   // mirroring Agent.stream()/generate(). Without this, schema violations are
@@ -346,6 +368,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       ) as AgentExecutionOptions<OUTPUT>);
 
   validateModelTimeoutSettings(execOptions.modelSettings?.timeout);
+  if (resumingSelectedContext) assertResumeRequestContext(requestContext, selectedContext);
 
   if (execOptions.eagerToolExecution) {
     throw new Error('eagerToolExecution is not supported by durable agents');
@@ -364,6 +387,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
   // Resolve and validate the complete model selection before durable preparation
   // can persist a thread or run user-defined processors, tools, or hooks.
   const { model, modelList, fallbackTimeouts } = await typedAgent.__getModelAndModelList({ requestContext });
+  if (resumingSelectedContext) assertResumeRequestContext(requestContext, selectedContext);
   if (!model) {
     throw new Error('Agent model not available');
   }
@@ -790,6 +814,14 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
   });
 
   // 13. Create serialized workflow input
+  if (resumingSelectedContext) assertResumeRequestContext(requestContext, selectedContext);
+  const originalSelectedContext = selectedContext
+    ? resumingSelectedContext
+      ? selectedContext
+      : finalizeResumeRequestContext(requestContext, selectedContext)
+    : undefined;
+  await validateResumeRequestContextSchema(originalSelectedContext, options.resumeRequestContextSchema);
+  if (originalSelectedContext) assertResumeRequestContext(requestContext, originalSelectedContext);
   const workflowInput = createWorkflowInput({
     runId,
     agentId: publicAgentId,
@@ -865,7 +897,14 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     messageId,
     agentSpanData: agentSpan?.exportSpan(),
     modelSpanData: modelSpan?.exportSpan(),
-    requestContextEntries: requestContextEntriesSnapshot,
+    requestContextEntries: originalSelectedContext
+      ? {
+          ...requestContextEntriesSnapshot,
+          ...originalSelectedContext.requestContextEntries,
+        }
+      : requestContextEntriesSnapshot,
+    resumeRequestContextKeys: originalSelectedContext?.resumeRequestContextKeys,
+    resumeRequestContextInputEntries: originalSelectedContext?.resumeRequestContextInputEntries,
   });
 
   // 14. Create registry entry for non-serializable state
@@ -960,6 +999,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
     cleanup: () => {},
   };
 
+  if (originalSelectedContext) assertResumeRequestContext(requestContext, originalSelectedContext);
   return {
     runId,
     messageId,
