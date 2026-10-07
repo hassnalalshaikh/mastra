@@ -28,6 +28,7 @@ import type { ProcessorState } from '../../../../processors';
 import { BACKGROUND_WORK_CONTEXT } from '../../../../processors/background-work-signals';
 import { ProcessorRunner } from '../../../../processors/runner';
 import type { RequestContext } from '../../../../request-context';
+import { assertResumeRequestContext } from '../../../../request-context/input-source';
 import type { ChunkType, ProviderMetadata } from '../../../../stream/types';
 import { ChunkFrom } from '../../../../stream/types';
 import {
@@ -305,16 +306,8 @@ export function createDurableToolCallStep() {
     inputSchema: durableToolCallInputSchema,
     outputSchema: durableToolCallOutputSchema,
     execute: async params => {
-      const {
-        inputData,
-        mastra,
-        suspend,
-        resumeData: workflowResumeData,
-        suspendData,
-        requestContext,
-        actor,
-        getInitData,
-      } = params;
+      const { inputData, mastra, suspend, resumeData: workflowResumeData, suspendData, actor, getInitData } = params;
+      let requestContext = params.requestContext;
 
       // Access pubsub via symbol
       const pubsub = (params as any)[PUBSUB_SYMBOL] as PubSub | undefined;
@@ -368,12 +361,20 @@ export function createDurableToolCallStep() {
           threadExists?: boolean;
         };
         requestContextEntries?: Record<string, unknown>;
+        resumeRequestContextKeys?: string[];
+        resumeRequestContextInputEntries?: Record<string, unknown>;
         messageListState?: SerializedMessageListState;
         agentSpanData?: unknown;
         modelSpanData?: unknown;
       }>();
 
       const { runId, options: agentOptions, state } = initData;
+      if (initData.resumeRequestContextKeys?.length) {
+        requestContext =
+          globalRunRegistry.get(runId)?.requestContext ??
+          restoreRequestContext(initData.requestContextEntries, requestContext, initData);
+        assertResumeRequestContext(requestContext, initData);
+      }
       const logger = (mastra as any)?.getLogger?.();
       const isAborted = () => (globalRunRegistry.get(runId)?.abortSignal ?? params.abortSignal)?.aborted === true;
 
@@ -510,6 +511,8 @@ export function createDurableToolCallStep() {
           state: state as any,
           options: agentOptions,
           requestContextEntries: initData.requestContextEntries,
+          resumeRequestContextKeys: initData.resumeRequestContextKeys,
+          resumeRequestContextInputEntries: initData.resumeRequestContextInputEntries,
           requestContext,
           logger,
         });
@@ -668,7 +671,8 @@ export function createDurableToolCallStep() {
       // rebuild uses — so context-aware approval predicates still see the
       // request scope captured when the run started.
       const approvalRequestContext =
-        registryEntry?.requestContext ?? restoreRequestContext(initData.requestContextEntries, requestContext);
+        registryEntry?.requestContext ??
+        restoreRequestContext(initData.requestContextEntries, requestContext, initData);
       const requiresApproval =
         !!tool &&
         (agentOptions.toolApprovalPolicy === 'manual' ||

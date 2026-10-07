@@ -10,8 +10,18 @@ import { createTimeoutAbortSignal } from '../../loop/timeout';
 import type { Mastra } from '../../mastra';
 import { createObservabilityContext, getOrCreateSpan, SpanType, EntityType } from '../../observability';
 import { RequestContext } from '../../request-context';
+import {
+  validateResumeRequestContextKeys,
+  captureResumeRequestContext,
+  restoreResumeRequestContext,
+  assertResumeRequestContext,
+  ResumeRequestContextError,
+  validateResumeRequestContextSchema,
+} from '../../request-context/input-source';
+import type { ResumeRequestContextSnapshot } from '../../request-context/input-source';
 import type { DeclaredAgentSchedule } from '../../schedules/define';
 import { toStandardSchema } from '../../schema';
+import type { PublicSchema } from '../../schema';
 import type { WorkflowsStorage } from '../../storage';
 import type { FullOutput, MastraModelOutput } from '../../stream/base/output';
 import type { ChunkType, MastraOnFinishCallback, MastraStreamTransformOptions } from '../../stream/types';
@@ -54,6 +64,7 @@ import { createDurableAgenticWorkflow } from './workflows';
 import { MAP_FINAL_OUTPUT_STEP_ID } from './workflows/durable-loop-builder';
 
 const RESOLVED_EXECUTION_OPTIONS = Symbol('mastra.durable.resolvedExecutionOptions');
+const SELECTED_REQUEST_CONTEXT = Symbol('mastra.durable.selectedRequestContext');
 const RECOVERY_LEASE_TTL_MS = 30_000;
 const RECOVERY_LEASE_RENEW_INTERVAL_MS = 10_000;
 const localRecoveryClaims = new Map<string, string>();
@@ -359,6 +370,9 @@ export interface DurableAgentConfig<
   TTools extends ToolsInput = ToolsInput,
   TOutput = undefined,
 > {
+  /** Selected original context keys restored before resumed model/default resolution. */
+  resumeRequestContextKeys?: readonly string[];
+  resumeRequestContextSchema?: PublicSchema<Record<string, unknown>>;
   /**
    * The Agent to wrap with durable execution capabilities.
    * All agent methods (getModel, listTools, etc.) delegate to this agent.
@@ -667,6 +681,17 @@ export class DurableAgent<
 
   /** Whether the one-time persistence-policy guardrail warnings have run */
   #warnedPersistencePolicy = false;
+  #resumeRequestContextKeys: readonly string[];
+  #resumeRequestContextSchema?: PublicSchema<Record<string, unknown>>;
+
+  /** @internal Static native configuration for step rehydration. */
+  get resumeRequestContextKeys(): readonly string[] {
+    return this.#resumeRequestContextKeys;
+  }
+  /** @internal Static validation-only schema, never stored with a run. */
+  get resumeRequestContextSchema(): PublicSchema<Record<string, unknown>> | undefined {
+    return this.#resumeRequestContextSchema;
+  }
 
   /**
    * Create a new DurableAgent that wraps an existing Agent
@@ -682,6 +707,8 @@ export class DurableAgent<
       cleanupTimeoutMs,
       shouldCache,
       shouldPersistSnapshot,
+      resumeRequestContextKeys,
+      resumeRequestContextSchema,
     } = config;
 
     // Use provided id/name or fall back to agent.id/agent.name
@@ -699,6 +726,9 @@ export class DurableAgent<
     });
 
     this.#wrappedAgent = agent;
+    this.#resumeRequestContextKeys = validateResumeRequestContextKeys(resumeRequestContextKeys);
+    if (resumeRequestContextSchema && !this.#resumeRequestContextKeys.length) throw new ResumeRequestContextError();
+    this.#resumeRequestContextSchema = resumeRequestContextSchema;
     this.#runRegistry = new ExtendedRunRegistry();
     this.#maxSteps = maxSteps;
     this.#hasCustomPubsub = !!pubsub;
@@ -1150,9 +1180,15 @@ export class DurableAgent<
     recoveryLease: RecoveryLease;
     cancellation?: { toolCallId: string };
   }): Promise<RehydratedRecoveryState> {
-    const requestContext: RequestContext = workflowInput.requestContextEntries
-      ? new RequestContext(Object.entries(workflowInput.requestContextEntries) as Iterable<readonly [string, unknown]>)
-      : new RequestContext();
+    const requestContext: RequestContext =
+      workflowInput.resumeRequestContextKeys?.length || this.#resumeRequestContextKeys.length
+        ? restoreResumeRequestContext(workflowInput, undefined, this.#resumeRequestContextKeys)
+        : workflowInput.requestContextEntries
+          ? new RequestContext(
+              Object.entries(workflowInput.requestContextEntries) as Iterable<readonly [string, unknown]>,
+            )
+          : new RequestContext();
+    await validateResumeRequestContextSchema(workflowInput, this.#resumeRequestContextSchema);
 
     const messageListMemoryInfo = (
       workflowInput.messageListState as { memoryInfo?: { threadId?: string; resourceId?: string } } | undefined
@@ -1184,7 +1220,9 @@ export class DurableAgent<
     let model;
     try {
       model = await wrapped.getModel({ requestContext });
+      if (workflowInput.resumeRequestContextKeys?.length) assertResumeRequestContext(requestContext, workflowInput);
     } catch (error) {
+      if (workflowInput.resumeRequestContextKeys?.length || error instanceof ResumeRequestContextError) throw error;
       this.#mastra?.getLogger?.()?.warn?.(`[DurableAgent] Failed to resolve model during recover(${runId}): ${error}`);
     }
     recoveryLease.assertOwned();
@@ -1214,6 +1252,7 @@ export class DurableAgent<
             );
         }
       } catch (error) {
+        if (workflowInput.resumeRequestContextKeys?.length) throw error;
         this.#mastra
           ?.getLogger?.()
           ?.warn?.(`[DurableAgent] Failed to resolve model list during recover(${runId}): ${error}`);
@@ -1225,6 +1264,7 @@ export class DurableAgent<
     try {
       memory = await wrapped.getMemory({ requestContext });
     } catch (error) {
+      if (workflowInput.resumeRequestContextKeys?.length) throw error;
       this.#mastra?.getLogger?.()?.warn?.(`[DurableAgent] Failed to resolve memory during recover(${runId}): ${error}`);
     }
     recoveryLease.assertOwned();
@@ -1245,6 +1285,7 @@ export class DurableAgent<
       outputProcessors = (await (wrapped as any).listOutputProcessors?.(requestContext)) ?? [];
       errorProcessors = (await (wrapped as any).listErrorProcessors?.(requestContext)) ?? [];
     } catch (error) {
+      if (workflowInput.resumeRequestContextKeys?.length) throw error;
       this.#mastra?.getLogger?.()?.warn?.(`[DurableAgent] recover(${runId}) processor resolution failed: ${error}`);
     }
     recoveryLease.assertOwned();
@@ -1506,12 +1547,27 @@ export class DurableAgent<
 
   async #resolveExecutionOptions(
     options?: DurableAgentStreamOptions<TOutput>,
+    originalSelectedContext?: ResumeRequestContextSnapshot,
   ): Promise<DurableAgentStreamOptions<TOutput>> {
     if ((options as any)?.[RESOLVED_EXECUTION_OPTIONS]) {
       return options!;
     }
 
+    const selectedContext =
+      originalSelectedContext ?? captureResumeRequestContext(options?.requestContext, this.#resumeRequestContextKeys);
+    if (selectedContext && !originalSelectedContext)
+      options = {
+        ...options,
+        requestContext: restoreResumeRequestContext(
+          selectedContext,
+          options?.requestContext,
+        ) as DurableAgentStreamOptions<TOutput>['requestContext'],
+      };
+    if (originalSelectedContext && options?.requestContext)
+      assertResumeRequestContext(options.requestContext, originalSelectedContext);
     const defaultOptions = await this.getDefaultOptions({ requestContext: options?.requestContext });
+    if (originalSelectedContext && options?.requestContext)
+      assertResumeRequestContext(options.requestContext, originalSelectedContext);
     const resolvedOptions = deepMerge(
       (defaultOptions ?? {}) as Record<string, unknown>,
       (options ?? {}) as Record<string, unknown>,
@@ -1523,6 +1579,8 @@ export class DurableAgent<
     }
     // Preserve the marker when the until-idle wrapper spreads these options.
     Object.defineProperty(resolvedOptions, RESOLVED_EXECUTION_OPTIONS, { value: true, enumerable: true });
+    if (selectedContext)
+      Object.defineProperty(resolvedOptions, SELECTED_REQUEST_CONTEXT, { value: selectedContext, enumerable: true });
     return resolvedOptions;
   }
 
@@ -1808,6 +1866,8 @@ export class DurableAgent<
       cache: this.#cacheConfig,
       maxSteps: this.#maxSteps,
       cleanupTimeoutMs: this.#cleanupTimeoutMs,
+      resumeRequestContextKeys: this.#resumeRequestContextKeys,
+      resumeRequestContextSchema: this.#resumeRequestContextSchema,
       shouldCache: this.#shouldCache,
       shouldPersistSnapshot: this.userShouldPersistSnapshot,
     });
@@ -2472,6 +2532,9 @@ export class DurableAgent<
       runId: options?.runId,
       requestContext: options?.requestContext,
       optionsAreResolved: true,
+      resumeRequestContextKeys: this.#resumeRequestContextKeys,
+      resumeRequestContextSchema: this.#resumeRequestContextSchema,
+      resumeRequestContextSnapshot: (options as any)?.[SELECTED_REQUEST_CONTEXT],
       mastra: this.#mastra,
       durableAgentId: this.id,
       durableAgentName: this.name,
@@ -2676,7 +2739,9 @@ export class DurableAgent<
     options?: DurableAgentResumeOptions<TOutput>,
   ): Promise<DurableAgentStreamResult<TOutput>> {
     let entry = this.#runRegistry.get(runId);
-    if (!entry || this.#mastra?.getToolPolicy() || this.getToolPolicy()) {
+    let originalSelectedContext: ResumeRequestContextSnapshot | undefined;
+    const needsPreparation = !entry || !!this.#mastra?.getToolPolicy() || !!this.getToolPolicy();
+    if (needsPreparation || this.#resumeRequestContextKeys.length) {
       // A configured policy is resolved afresh on every resume, including warm
       // resumes. Native preparation restores current skill instructions before
       // the saved call is allowed to continue.
@@ -2749,6 +2814,8 @@ export class DurableAgent<
               );
             }
           } catch (versionError) {
+            if (workflowInput.resumeRequestContextKeys?.length || this.#resumeRequestContextKeys.length)
+              throw versionError;
             // The pinned version may have been deleted while the run sat
             // suspended — resume on the current definition rather than
             // failing at the approver (mirrors Agent#execute's fallback).
@@ -2776,6 +2843,13 @@ export class DurableAgent<
       const snapshotRequestContext = workflowInput.requestContextEntries
         ? new RequestContext<unknown>(Object.entries(workflowInput.requestContextEntries))
         : undefined;
+      if (workflowInput.resumeRequestContextKeys?.length || this.#resumeRequestContextKeys.length) {
+        originalSelectedContext = workflowInput;
+      }
+      const restoredRequestContext = originalSelectedContext
+        ? restoreResumeRequestContext(originalSelectedContext, options?.requestContext, this.#resumeRequestContextKeys)
+        : (options?.requestContext ?? snapshotRequestContext);
+      await validateResumeRequestContextSchema(originalSelectedContext, this.#resumeRequestContextSchema);
       const memory = threadId
         ? {
             ...options?.memory,
@@ -2785,24 +2859,26 @@ export class DurableAgent<
         : options?.memory;
 
       try {
-        await this.#prepareForExecution(
-          [],
-          {
-            ...(options as AgentExecutionOptions<TOutput>),
-            runId,
-            requestContext: options?.requestContext ?? snapshotRequestContext,
-            memory,
-            // Restore the original run's flag from the persisted snapshot so a
-            // cross-process resume still returns scoringData; caller override wins.
-            returnScorerData: options?.returnScorerData ?? workflowInput.options?.returnScorerData,
-            // Restore the original run's modelSettings so the rebuilt registry
-            // entry re-arms the run-level timeout budget (#21724); caller
-            // override wins.
-            modelSettings: options?.modelSettings ?? (workflowInput.options?.modelSettings as any),
-          },
-          resumeMessageListState,
-          (resumeData as { approved?: unknown } | undefined)?.approved === false,
-        );
+        if (needsPreparation)
+          await this.#prepareForExecution(
+            [],
+            {
+              ...(options as AgentExecutionOptions<TOutput>),
+              runId,
+              requestContext: restoredRequestContext,
+              memory,
+              // Restore the original run's flag from the persisted snapshot so a
+              // cross-process resume still returns scoringData; caller override wins.
+              returnScorerData: options?.returnScorerData ?? workflowInput.options?.returnScorerData,
+              // Restore the original run's modelSettings so the rebuilt registry
+              // entry re-arms the run-level timeout budget (#21724); caller
+              // override wins.
+              modelSettings: options?.modelSettings ?? (workflowInput.options?.modelSettings as any),
+            },
+            resumeMessageListState,
+            (resumeData as { approved?: unknown } | undefined)?.approved === false,
+            originalSelectedContext,
+          );
         entry = this.#runRegistry.get(runId);
         // Reject a revoked dependency before waking the persisted call. Returning
         // a tool error after resume would consume the suspension and its job data.
@@ -2849,8 +2925,10 @@ export class DurableAgent<
         } as DurableAgentStreamOptions<TOutput>['memory'])
       : options?.memory;
 
-    let resumeRequestContext = entry.requestContext;
-    if (options?.requestContext) {
+    let resumeRequestContext = originalSelectedContext
+      ? restoreResumeRequestContext(originalSelectedContext, options?.requestContext, this.#resumeRequestContextKeys)
+      : entry.requestContext;
+    if (!originalSelectedContext && options?.requestContext) {
       // Keep the caller's instance so schema-transformed contexts retain their
       // input source. Caller values win except for framework-managed memory.
       resumeRequestContext = options.requestContext;
@@ -2863,6 +2941,9 @@ export class DurableAgent<
         resumeRequestContext.delete('MastraMemory');
       }
     }
+    if (originalSelectedContext && entry.requestContext?.has('MastraMemory')) {
+      resumeRequestContext!.set('MastraMemory', entry.requestContext.get('MastraMemory'));
+    }
 
     entry.requestContext = resumeRequestContext;
     const globalEntryForContext = globalRunRegistry.get(runId);
@@ -2870,11 +2951,14 @@ export class DurableAgent<
       globalEntryForContext.requestContext = resumeRequestContext;
     }
 
-    const resolvedOptions = (await this.#resolveExecutionOptions({
-      ...(options as DurableAgentStreamOptions<TOutput>),
-      requestContext: resumeRequestContext as DurableAgentStreamOptions<TOutput>['requestContext'],
-      memory: registeredMemory ?? options?.memory,
-    })) as DurableAgentResumeOptions<TOutput>;
+    const resolvedOptions = (await this.#resolveExecutionOptions(
+      {
+        ...(options as DurableAgentStreamOptions<TOutput>),
+        requestContext: resumeRequestContext as DurableAgentStreamOptions<TOutput>['requestContext'],
+        memory: registeredMemory ?? options?.memory,
+      },
+      originalSelectedContext,
+    )) as DurableAgentResumeOptions<TOutput>;
 
     // Delegate to the idle-loop wrapper when `untilIdle` is set. Strip
     // `untilIdle` before passing to the wrapper so the inner agent.resume()
@@ -3297,6 +3381,8 @@ export class DurableAgent<
             return (resolved as unknown as DurableAgent<TAgentId, TTools, TOutput>).recover(runId, options);
           }
         } catch (versionError) {
+          if (workflowInput.resumeRequestContextKeys?.length || this.#resumeRequestContextKeys.length)
+            throw versionError;
           // The pinned version may have been deleted while the run sat
           // crashed — recover on the current definition rather than failing
           // an unattended path (mirrors resume()'s deleted-pin fallback).
@@ -3670,6 +3756,9 @@ export class DurableAgent<
       runId: options?.runId,
       requestContext: options?.requestContext,
       optionsAreResolved: true,
+      resumeRequestContextKeys: this.#resumeRequestContextKeys,
+      resumeRequestContextSchema: this.#resumeRequestContextSchema,
+      resumeRequestContextSnapshot: (options as any)?.[SELECTED_REQUEST_CONTEXT],
       mastra: this.#mastra,
       methodType: 'generate',
       durableAgentId: this.id,
@@ -4515,6 +4604,7 @@ export class DurableAgent<
     options?: AgentExecutionOptions<TOutput>,
     resumeMessageListState?: SerializedMessageListState,
     decliningToolCall = false,
+    resumeRequestContextSnapshot?: ResumeRequestContextSnapshot,
   ) {
     const preparation = await prepareForDurableExecution<TOutput>({
       agent: this.#wrappedAgent as Agent<string, any, TOutput>,
@@ -4530,6 +4620,9 @@ export class DurableAgent<
       runId: options?.runId,
       requestContext: options?.requestContext,
       mastra: this.#mastra,
+      resumeRequestContextKeys: this.#resumeRequestContextKeys,
+      resumeRequestContextSchema: this.#resumeRequestContextSchema,
+      resumeRequestContextSnapshot: resumeRequestContextSnapshot ?? (options as any)?.[SELECTED_REQUEST_CONTEXT],
     });
 
     this.#runRegistry.registerWithMessageList(preparation.runId, preparation.registryEntry, preparation.messageList, {

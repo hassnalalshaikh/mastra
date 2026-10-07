@@ -71,6 +71,39 @@ export const mastra = new Mastra({
 
 `mastra.getAgent('myAgent')` returns the wrapped `DurableAgent`. Standalone agents (constructed but never registered on a `Mastra` instance) don't become durable. The wrapping is applied at registration.
 
+### Keep selected request values across resume
+
+Use `resumeRequestContextKeys` to keep a run's original choices while current authentication and permissions remain fresh. Supply those keys before the initial call. Register the durable agent on the `Mastra` instance used for execution and resume.
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { RequestContext } from '@mastra/core/request-context'
+import { z } from 'zod'
+
+const myAgent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'Help the user',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  durable: {
+    resumeRequestContextKeys: ['selection'],
+    resumeRequestContextSchema: z.object({
+      selection: z.object({ modelId: z.string() }),
+    }),
+  },
+})
+
+const requestContext = new RequestContext([['selection', { modelId: 'chosen-model' }]])
+```
+
+The key list is static and defaults to empty. Selected values must be present and complete plain JSON. Undefined values, functions, accessors, cycles, non-finite numbers, class instances, sparse arrays, and data exceeding the serialization budget are refused before dynamic defaults or model resolution. Native authentication, resource, thread, memory, and controller keys cannot be selected. Each selected raw-input or completed-execution map has a 16 MiB encoded UTF-8 limit (32 MiB combined); the strict traversal is also bounded. This limits saved data, not model context tokens.
+
+Mastra saves the original schema input separately from the final prepared execution values. Initial defaults and model callbacks may complete execution values before the final capture. A request-context schema may transform input values without requiring those two saved forms to match.
+
+`resumeRequestContextSchema` validates the selected execution record after initial preparation and before resumed resolvers. It requires a nonempty key list. Validation does not replace or transform the saved values. Use it to require completed choices that aren't present in the initial input.
+
+Warm resume, cold reconstruction, tool-policy preparation, and recovery restore selected originals before dynamic resolution. Other current values stay current; omitted nonselected values remain absent. Resumed callbacks cannot change the saved choices. Missing or invalid selected values, changed configured key sets, or failed current permission checks refuse continuation. Without these options, existing context behavior is unchanged.
+
 ## `createDurableAgent(options)`
 
 Wraps an `Agent` with durable execution and resumable streams. This is the recommended way to create a `DurableAgent`.
@@ -126,6 +159,21 @@ Returns: `DurableAgent`
     type: 'number',
     isOptional: true,
     description: 'Maximum number of steps for the agentic loop.',
+  },
+  {
+    name: 'resumeRequestContextKeys',
+    type: 'readonly string[]',
+    isOptional: true,
+    defaultValue: '[]',
+    description:
+      'Static keys whose original input and prepared execution values are restored on resume. Each selected value must be complete plain JSON. Current nonselected values and absences remain current.',
+  },
+  {
+    name: 'resumeRequestContextSchema',
+    type: 'PublicSchema<Record<string, unknown>>',
+    isOptional: true,
+    description:
+      'Validation-only schema for completed selected execution values. Requires a nonempty resumeRequestContextKeys list. Runs before initial persistence and resumed dynamic resolution.',
   },
   {
     name: 'shouldCache',

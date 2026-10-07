@@ -7,6 +7,8 @@ import type { TracingContext } from '../../../observability';
 import type { OutputResult } from '../../../processors';
 import { ProcessorRunner } from '../../../processors/runner';
 import { RequestContext } from '../../../request-context';
+import { restoreResumeRequestContext } from '../../../request-context/input-source';
+import type { ResumeRequestContextSnapshot } from '../../../request-context/input-source';
 import type { Agent } from '../../agent';
 import { convertMessages, coreContentToString, MessageList } from '../../message-list';
 import type { SerializedMessageListState } from '../../message-list/state';
@@ -40,7 +42,9 @@ export interface DurableFinishSideEffectsResult {
 function restoreRequestContext(
   entries: Record<string, unknown> | undefined,
   fallback: RequestContext | undefined,
+  selected?: ResumeRequestContextSnapshot,
 ): RequestContext {
+  if (selected?.resumeRequestContextKeys?.length) return restoreResumeRequestContext(selected, fallback);
   if (!entries) return fallback ?? new RequestContext();
 
   const restored = new RequestContext<unknown>(fallback?.entries());
@@ -119,7 +123,7 @@ export async function runDurableFinishSideEffects({
     }
   }
 
-  const effectiveRequestContext = restoreRequestContext(initData.requestContextEntries, requestContext);
+  const effectiveRequestContext = restoreRequestContext(initData.requestContextEntries, requestContext, initData);
   // Deserialize into the run's existing MessageList when there is one. MastraModelOutput
   // holds that instance and reads it during final processing, so swapping in a new one
   // would leave the stream reporting pre-processor messages.
