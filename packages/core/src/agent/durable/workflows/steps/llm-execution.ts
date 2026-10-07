@@ -58,7 +58,11 @@ import { DurableStepIds } from '../../constants';
 import { endRunSpansWithError, globalRunRegistry, markRunActive } from '../../run-registry';
 import { emitChunkEvent, emitStepStartEvent } from '../../stream-adapter';
 import type { DurableAgenticWorkflowInput, DurableLLMStepOutput, DurableToolCallInput } from '../../types';
-import { resolveRuntimeDependencies, resolveModelFromListEntry } from '../../utils/resolve-runtime';
+import {
+  resolveRuntimeDependencies,
+  resolveModelFromListEntry,
+  restoreRequestContext,
+} from '../../utils/resolve-runtime';
 import { durableOptionsSchema } from '../shared/schemas';
 
 /**
@@ -119,6 +123,8 @@ const durableLLMInputSchema = z.object({
   // rebuild-from-Mastra path resolves the model and tools with the caller's
   // context rather than an empty one.
   requestContextEntries: z.record(z.string(), z.any()).optional(),
+  resumeRequestContextKeys: z.array(z.string()).optional(),
+  resumeRequestContextInputEntries: z.record(z.string(), z.any()).optional(),
   // Agent span data for model span parenting
   agentSpanData: z.any().optional(),
   // Model span data (ONE span for entire agent run, created before workflow)
@@ -203,7 +209,8 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
     inputSchema: durableLLMInputSchema,
     outputSchema: durableLLMOutputSchema,
     execute: async params => {
-      const { inputData, mastra, tracingContext, requestContext, abortSignal } = params;
+      const { inputData, mastra, tracingContext, abortSignal } = params;
+      let requestContext = params.requestContext;
 
       // Access pubsub via symbol
       const pubsub = (params as any)[PUBSUB_SYMBOL] as PubSub | undefined;
@@ -211,6 +218,10 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
       const typedInput = inputData as DurableAgenticWorkflowInput;
       const { agentId, messageId, options: execOptions } = typedInput;
       const runId = typedInput.runId;
+      if (typedInput.resumeRequestContextKeys?.length)
+        requestContext =
+          globalRunRegistry.get(runId)?.requestContext ??
+          restoreRequestContext(typedInput.requestContextEntries, requestContext, typedInput);
       const logger = mastra?.getLogger?.();
 
       // 1. Resolve runtime dependencies (tools from Mastra)

@@ -13,6 +13,14 @@ import type {
   OutputProcessorOrWorkflow,
 } from '../../../processors';
 import { MASTRA_AUTH_TOKEN_KEY, RequestContext } from '../../../request-context';
+import {
+  restoreResumeRequestContext,
+  assertResumeRequestContext,
+  ResumeRequestContextError,
+  validateResumeRequestContextSchema,
+} from '../../../request-context/input-source';
+import type { ResumeRequestContextSnapshot } from '../../../request-context/input-source';
+import type { PublicSchema } from '../../../schema';
 import { getPreparedToolPolicy } from '../../../tools/tool-policy-execution';
 import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import type { CoreTool, RequireToolApproval, ToolApprovalContext } from '../../../tools/types';
@@ -75,6 +83,24 @@ function makeSaveQueueManager(memory: MastraMemory | undefined, mastra?: Mastra)
   return new SaveQueueManager({ logger: mastra?.getLogger?.(), memory });
 }
 
+async function validateSelectedRuntimeContext(
+  mastra: Mastra | undefined,
+  agentId: string,
+  original: ResumeRequestContextSnapshot,
+): Promise<void> {
+  const agent = Object.values(mastra?.listAgents?.() ?? {}).find(agent => agent.id === agentId) as
+    | {
+        resumeRequestContextKeys?: readonly string[];
+        resumeRequestContextSchema?: PublicSchema<Record<string, unknown>>;
+      }
+    | undefined;
+  if (original.resumeRequestContextKeys?.length || agent?.resumeRequestContextKeys?.length) {
+    // Validate even when a hydrated registry would otherwise skip reconstruction.
+    restoreResumeRequestContext(original, undefined, agent?.resumeRequestContextKeys ?? []);
+    await validateResumeRequestContextSchema(original, agent?.resumeRequestContextSchema);
+  }
+}
+
 /**
  * Options for resolving runtime dependencies
  */
@@ -107,7 +133,14 @@ export interface ResolveRuntimeOptions {
  * resolution (tenant/user, workspace, dynamic model/memory) working for tools
  * rebuilt on a cross-process worker, including a delegated subagent's.
  */
-export function restoreRequestContext(entries?: Record<string, unknown>, runLevel?: RequestContext): RequestContext {
+export function restoreRequestContext(
+  entries?: Record<string, unknown>,
+  runLevel?: RequestContext,
+  selected?: ResumeRequestContextSnapshot,
+): RequestContext {
+  if (selected?.resumeRequestContextKeys?.length) {
+    return restoreResumeRequestContext(selected, runLevel);
+  }
   if (entries) {
     // Drop any persisted token from legacy snapshots written before the token
     // was excluded from persistence — a stale bearer token must never be restored.
@@ -203,6 +236,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
   // real model instance (every in-process seeding site stores the live model;
   // placeholders and metadata-only stubs do not).
   const globalEntry = globalRunRegistry.get(runId);
+  await validateSelectedRuntimeContext(mastra, agentId, input);
   const hasHydratedEntry = isHydratedRegistryEntry(globalEntry);
   // Prefer the full toolset over `tools`: after the first step `tools` holds the
   // per-step snapshot the model was shown (possibly narrowed by processors such
@@ -220,6 +254,8 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
   let processorStates: Map<string, ProcessorState> | undefined = globalEntry?.processorStates;
   let rehydratedFromMastra = false;
   let preparedRequestContext = globalEntry?.requestContext;
+  if (input.resumeRequestContextKeys?.length && preparedRequestContext)
+    assertResumeRequestContext(preparedRequestContext, input);
 
   // If the registry entry is a real (non-placeholder) in-process entry we
   // trust it wholesale (in-process / same-process resume). Otherwise fall
@@ -234,7 +270,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
       // the workflow input (mirrors durable-agent.ts resume handling), so
       // request-scoped tools / workspace / memory / processors resolve with
       // the same configuration as the original call site.
-      const resolveRequestContext = restoreRequestContext(input.requestContextEntries, options.requestContext);
+      const resolveRequestContext = restoreRequestContext(input.requestContextEntries, options.requestContext, input);
 
       preparedRequestContext = resolveRequestContext;
       tools = await agent.getToolsForExecution({
@@ -246,10 +282,12 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
         memoryConfig: input.state.memoryConfig,
         autoResumeSuspendedTools: input.options?.autoResumeSuspendedTools,
       });
+      assertResumeRequestContext(resolveRequestContext, input);
 
       model =
         (await (agent as any).getModel?.({ requestContext: resolveRequestContext })) ??
         resolveModel(input.modelConfig, mastra);
+      assertResumeRequestContext(resolveRequestContext, input);
 
       const rawModelList = await (agent as any).getModelList?.(resolveRequestContext);
       if (rawModelList && Array.isArray(rawModelList)) {
@@ -304,6 +342,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
         // there is no prior state to carry, and processors are re-run per step.
         processorStates = globalEntry?.processorStates ?? new Map<string, ProcessorState>();
       } catch (processorError) {
+        if (input.resumeRequestContextKeys?.length) throw processorError;
         // Fail the step loudly rather than continuing (and writing back) an
         // incomplete pipeline: running without the rebuilt processors would
         // silently drop skills / workspace instructions.
@@ -314,6 +353,8 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
       rehydratedFromMastra = true;
     } catch (error) {
       if (
+        input.resumeRequestContextKeys?.length ||
+        error instanceof ResumeRequestContextError ||
         error instanceof DurableProcessorRebuildError ||
         mastra.getToolPolicy() ||
         Object.values(mastra.listAgents())
@@ -325,6 +366,7 @@ export async function resolveRuntimeDependencies(options: ResolveRuntimeOptions)
       model = resolveModel(input.modelConfig, mastra);
     }
   } else {
+    if (input.resumeRequestContextKeys?.length) throw new ResumeRequestContextError();
     logger?.debug?.(`[DurableAgent:${agentId}] No Mastra instance available, using fallback model`);
     model = resolveModel(input.modelConfig);
   }
@@ -433,22 +475,24 @@ export interface RebuiltRunTools {
  * Returns `undefined` when no Mastra instance is available or the agent can't
  * be resolved — callers fall back to their existing `ToolNotFoundError`.
  */
-export async function rebuildRunToolsFromMastra(options: {
-  mastra?: Mastra;
-  runId: string;
-  agentId: string;
-  state: SerializableDurableState;
-  options?: SerializableDurableOptions;
-  /** JSON-safe request-context snapshot from the workflow input (see preparation.ts). */
-  requestContextEntries?: Record<string, unknown>;
-  /**
-   * The step's run-level RequestContext, used when `requestContextEntries` is
-   * absent. See `restoreRequestContext`.
-   */
-  requestContext?: RequestContext;
-  messageList?: MessageList;
-  logger?: { debug?: (...args: any[]) => void };
-}): Promise<RebuiltRunTools | undefined> {
+export async function rebuildRunToolsFromMastra(
+  options: ResumeRequestContextSnapshot & {
+    mastra?: Mastra;
+    runId: string;
+    agentId: string;
+    state: SerializableDurableState;
+    options?: SerializableDurableOptions;
+    /** JSON-safe request-context snapshot from the workflow input (see preparation.ts). */
+    requestContextEntries?: Record<string, unknown>;
+    /**
+     * The step's run-level RequestContext, used when `requestContextEntries` is
+     * absent. See `restoreRequestContext`.
+     */
+    requestContext?: RequestContext;
+    messageList?: MessageList;
+    logger?: { debug?: (...args: any[]) => void };
+  },
+): Promise<RebuiltRunTools | undefined> {
   const {
     mastra,
     runId,
@@ -459,7 +503,11 @@ export async function rebuildRunToolsFromMastra(options: {
     requestContext,
     logger,
   } = options;
-  if (!mastra) return undefined;
+  if (!mastra) {
+    if (options.resumeRequestContextKeys?.length) throw new ResumeRequestContextError();
+    return undefined;
+  }
+  await validateSelectedRuntimeContext(mastra, agentId, options);
 
   try {
     const agent = mastra.getAgentById(agentId);
@@ -470,7 +518,10 @@ export async function rebuildRunToolsFromMastra(options: {
     // from the JSON-safe snapshot.
     const liveEntry = globalRunRegistry.get(runId);
     const liveRequestContext = isHydratedRegistryEntry(liveEntry) ? liveEntry?.requestContext : undefined;
-    const resolveRequestContext = liveRequestContext ?? restoreRequestContext(requestContextEntries, requestContext);
+    if (options.resumeRequestContextKeys?.length && liveRequestContext)
+      assertResumeRequestContext(liveRequestContext, options);
+    const resolveRequestContext =
+      liveRequestContext ?? restoreRequestContext(requestContextEntries, requestContext, options);
 
     const tools = await agent.getToolsForExecution({
       resumeMessageList: options.messageList,
@@ -481,9 +532,11 @@ export async function rebuildRunToolsFromMastra(options: {
       memoryConfig: state.memoryConfig,
       autoResumeSuspendedTools: execOptions?.autoResumeSuspendedTools,
     });
+    assertResumeRequestContext(resolveRequestContext, options);
 
     const memory = await (agent as any).getMemory?.({ requestContext: resolveRequestContext });
     const workspace = await (agent as any).getWorkspace?.({ requestContext: resolveRequestContext });
+    assertResumeRequestContext(resolveRequestContext, options);
     const saveQueueManager = makeSaveQueueManager(memory, mastra);
 
     // Write back so sibling steps in this process reuse the rebuilt tools.
@@ -511,6 +564,8 @@ export async function rebuildRunToolsFromMastra(options: {
     return { tools, workspace, memory, saveQueueManager, requestContext: resolveRequestContext };
   } catch (error) {
     if (
+      options.resumeRequestContextKeys?.length ||
+      error instanceof ResumeRequestContextError ||
       mastra.getToolPolicy() ||
       Object.values(mastra.listAgents())
         .find(agent => agent.id === agentId)

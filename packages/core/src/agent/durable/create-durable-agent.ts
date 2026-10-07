@@ -26,6 +26,7 @@
 
 import type { MastraServerCache } from '../../cache/base';
 import type { PubSub } from '../../events/pubsub';
+import type { PublicSchema } from '../../schema';
 import type { ShouldPersistSnapshotFn } from '../../workflows/types';
 import type { Agent } from '../agent';
 
@@ -40,6 +41,9 @@ export interface CreateDurableAgentOptions<
   TTools extends Record<string, any> = Record<string, any>,
   TOutput = undefined,
 > {
+  /** Selected original context keys restored before resumed model/default resolution. */
+  resumeRequestContextKeys?: readonly string[];
+  resumeRequestContextSchema?: PublicSchema<Record<string, unknown>>;
   /** The Agent to wrap with durable execution capabilities */
   agent: Agent<TAgentId, TTools, TOutput>;
 
@@ -143,7 +147,19 @@ export function createDurableAgent<
   TTools extends Record<string, any> = Record<string, any>,
   TOutput = undefined,
 >(options: CreateDurableAgentOptions<TAgentId, TTools, TOutput>): DurableAgent<TAgentId, TTools, TOutput> {
-  const { agent, id, name, cache, pubsub, maxSteps, cleanupTimeoutMs, shouldCache, shouldPersistSnapshot } = options;
+  const {
+    agent,
+    id,
+    name,
+    cache,
+    pubsub,
+    maxSteps,
+    cleanupTimeoutMs,
+    shouldCache,
+    shouldPersistSnapshot,
+    resumeRequestContextKeys,
+    resumeRequestContextSchema,
+  } = options;
 
   return new DurableAgent({
     agent,
@@ -155,6 +171,8 @@ export function createDurableAgent<
     cleanupTimeoutMs,
     shouldCache,
     shouldPersistSnapshot,
+    resumeRequestContextKeys,
+    resumeRequestContextSchema,
   } as DurableAgentConfig<TAgentId, TTools, TOutput>);
 }
 
