@@ -183,12 +183,14 @@ describe('CloudflareSandbox', () => {
     expect(bridge.files.size).toBe(0);
   });
 
-  it('requires start before remote operations', async () => {
+  it('starts on first remote operation through the native lifecycle', async () => {
     const bridge = createFakeBridge({ apiToken: 'secret' });
     const sandbox = createSandbox(bridge, { id: 'not-started' });
 
-    await expect(sandbox.executeCommand('echo', ['hi'])).rejects.toThrow(/has not been started/);
-    await expect(sandbox.writeFiles([{ path: 'a.txt', content: 'x' }])).rejects.toThrow(/has not been started/);
+    expect((await sandbox.executeCommand('echo', ['hi'])).stdout).toBe('hi\n');
+    await sandbox.writeFiles([{ path: 'a.txt', content: 'x' }]);
+    expect(bridge.files.get('/workspace/a.txt')).toBe('x');
+    expect(sandbox.status).toBe('running');
   });
 
   it('rejects an explicit per-file mode without writing', async () => {
@@ -234,13 +236,16 @@ describe('CloudflareSandbox', () => {
     expect(Array.from(bridge.hydrations.at(-1)!)).toEqual([9, 8, 7]);
   });
 
-  it('requires start before readFile, persistWorkspace and hydrateWorkspace', async () => {
+  it('starts on first read, archive or restore through the native lifecycle', async () => {
     const bridge = createFakeBridge({ apiToken: 'secret' });
     const sandbox = createSandbox(bridge, { id: 'not-started-2' });
 
-    await expect(sandbox.readFile('a.txt')).rejects.toThrow(/has not been started/);
-    await expect(sandbox.persistWorkspace()).rejects.toThrow(/has not been started/);
-    await expect(sandbox.hydrateWorkspace(new Uint8Array([1]))).rejects.toThrow(/has not been started/);
+    bridge.files.set('/workspace/a.txt', 'keep');
+    expect(Buffer.from(await sandbox.readFile('a.txt')).toString()).toBe('keep');
+    expect(Buffer.from(await sandbox.persistWorkspace()).toString()).toBe('fake-tar-archive');
+    await sandbox.hydrateWorkspace(new Uint8Array([1]));
+    expect(Array.from(bridge.hydrations.at(-1)!)).toEqual([1]);
+    expect(sandbox.status).toBe('running');
   });
 
   describe('mounts', () => {

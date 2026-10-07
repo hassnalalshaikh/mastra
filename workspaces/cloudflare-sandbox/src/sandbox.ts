@@ -225,6 +225,7 @@ export class CloudflareSandbox extends MastraSandbox {
   }
 
   async executeCommand(command: string, args?: string[], options?: ExecuteCommandOptions): Promise<CommandResult> {
+    await this.ensureRunning();
     const sandboxId = this.requireSandboxId();
     await this.ensureMountsActive(sandboxId);
 
@@ -324,6 +325,7 @@ export class CloudflareSandbox extends MastraSandbox {
 
   async writeFiles(files: SandboxFileInput[]): Promise<void> {
     assertModesUnsupported(files, 'Cloudflare');
+    await this.ensureRunning();
     const sandboxId = this.requireSandboxId();
     await this.ensureMountsActive(sandboxId);
     // The bridge writes one file per request.
@@ -335,6 +337,7 @@ export class CloudflareSandbox extends MastraSandbox {
 
   /** Reads a single file under /workspace, returning its raw bytes. */
   async readFile(path: string): Promise<Uint8Array> {
+    await this.ensureRunning();
     const sandboxId = this.requireSandboxId();
     await this.ensureMountsActive(sandboxId);
     const bytes = await this.client.readFile(sandboxId, resolveWorkspacePath(path));
@@ -344,6 +347,7 @@ export class CloudflareSandbox extends MastraSandbox {
 
   /** Archives /workspace, returning raw tar bytes that can later restore it via hydrateWorkspace. */
   async persistWorkspace(options?: CloudflarePersistWorkspaceOptions): Promise<Uint8Array> {
+    await this.ensureRunning();
     const sandboxId = this.requireSandboxId();
     await this.ensureMountsActive(sandboxId);
     const archive = await this.client.persistWorkspace(sandboxId, options);
@@ -353,6 +357,7 @@ export class CloudflareSandbox extends MastraSandbox {
 
   /** Restores /workspace from a raw tar payload produced by persistWorkspace. */
   async hydrateWorkspace(tar: Uint8Array): Promise<void> {
+    await this.ensureRunning();
     const sandboxId = this.requireSandboxId();
     await this.ensureMountsActive(sandboxId);
     await this.client.hydrateWorkspace(sandboxId, tar);
