@@ -180,7 +180,7 @@ export class PromptBlocksPG extends PromptBlocksStorage {
 
   async create(input: { promptBlock: StorageCreatePromptBlockInput }): Promise<StoragePromptBlockType> {
     const { promptBlock } = input;
-    // @khayalek-known-mastra-violation KV-PG-008
+    // @khayalek-known-mastra-violation KV-AG-016
     // A failed insert must never clean up another request's draft.
     let inserted = false;
     try {
