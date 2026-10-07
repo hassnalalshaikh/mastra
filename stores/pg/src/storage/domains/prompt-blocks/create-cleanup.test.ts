@@ -11,7 +11,7 @@ describe('prompt initial-create cleanup ownership', () => {
       } else if (sql.startsWith('DELETE')) throw new Error('Loser tried to delete winner');
     });
     const store = new PromptBlocksPG({ client: { none } as unknown as DbClient });
-    vi.spyOn(store, 'createVersion').mockResolvedValue(undefined);
+    vi.spyOn(store, 'createVersion').mockImplementation(async version => ({ ...version, createdAt: new Date() }));
     const results = await Promise.allSettled([0, 1].map(() => store.create({
       promptBlock: { id: 'shared', name: 'Shared', content: 'Keep winner' },
     })));
@@ -26,5 +26,17 @@ describe('prompt initial-create cleanup ownership', () => {
     await expect(store.create({ promptBlock: { id: 'own', name: 'Own', content: 'Draft' } })).rejects.toThrow();
     expect(none).toHaveBeenCalledTimes(2);
     expect(none.mock.calls[1][0]).toContain('DELETE FROM');
+  });
+
+  it('cleans up its own draft when the actual native version write wraps the database failure', async () => {
+    const none = vi.fn(async (sql: string) => {
+      if (sql.includes('INSERT INTO') && sql.includes('mastra_prompt_block_versions')) {
+        throw new Error('Version database write failed');
+      }
+    });
+    const store = new PromptBlocksPG({ client: { none } as unknown as DbClient });
+    await expect(store.create({ promptBlock: { id: 'wrapped', name: 'Wrapped', content: 'Draft' } })).rejects.toThrow();
+    expect(none).toHaveBeenCalledTimes(3);
+    expect(none.mock.calls[2][0]).toContain('DELETE FROM');
   });
 });

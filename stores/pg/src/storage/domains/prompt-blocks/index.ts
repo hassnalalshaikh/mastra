@@ -230,7 +230,6 @@ export class PromptBlocksPG extends PromptBlocksStorage {
         updatedAt: now,
       };
     } catch (error) {
-      if (error instanceof MastraError) throw error;
       // Best-effort cleanup
       try {
         const tableName = getTableName({ indexName: TABLE_PROMPT_BLOCKS, schemaName: getSchemaName(this.#schema) });
@@ -243,6 +242,8 @@ export class PromptBlocksPG extends PromptBlocksStorage {
       } catch {
         // Ignore cleanup errors
       }
+
+      if (error instanceof MastraError) throw error;
 
       throw new MastraError(
         {
