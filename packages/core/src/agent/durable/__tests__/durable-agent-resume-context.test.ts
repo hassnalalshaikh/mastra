@@ -7,7 +7,9 @@ import { RequestContext, MASTRA_AUTH_TOKEN_KEY } from '../../../request-context'
 import {
   REQUEST_CONTEXT_INPUT_SOURCE,
   captureResumeRequestContext,
+  finalizeResumeRequestContext,
   restoreResumeRequestContext,
+  getRequestContextInputSource,
   getRequestContextInputValues,
 } from '../../../request-context/input-source';
 import { InMemoryStore } from '../../../storage';
@@ -255,6 +257,40 @@ describe('original selected durable context', () => {
     expect(() => restoreResumeRequestContext({ ...saved, requestContextEntries: {} }, current)).toThrow();
     expect(() => restoreResumeRequestContext({}, current, ['binding'])).toThrow();
   });
+
+  it('keeps the prepared native instance and both selected forms with fresh nonselected scope', () => {
+    const admitted = new RequestContext([['binding', null]]);
+    const original = captureResumeRequestContext(admitted, ['binding'])!;
+    admitted.set('binding', { model: 'A', price: 2 });
+    const saved = finalizeResumeRequestContext(admitted, original);
+    const restored = restoreResumeRequestContext(
+      saved,
+      new RequestContext([[MASTRA_AUTH_TOKEN_KEY, 'current-token']]),
+      ['binding'],
+    );
+    const same = restoreRequestContext(saved.requestContextEntries, restored, saved);
+    expect(same).toBe(restored);
+    expect(same.get('binding')).toEqual({ model: 'A', price: 2 });
+    expect(getRequestContextInputSource(same)?.get('binding')).toBeNull();
+    expect(same.get(MASTRA_AUTH_TOKEN_KEY)).toBe('current-token');
+    expect(same.has('user')).toBe(false);
+    expect(same.has('allowed')).toBe(false);
+  });
+
+  it.each(['raw', 'completed', 'missing-raw', 'policy'] as const)(
+    'refuses marked native view reuse after %s corruption',
+    problem => {
+      const saved = captureResumeRequestContext(context(), ['binding'])!;
+      const restored = restoreResumeRequestContext(saved, new RequestContext(), ['binding']);
+      if (problem === 'raw') getRequestContextInputSource(restored)!.set('binding', { model: 'B', price: 99 });
+      if (problem === 'completed') restored.set('binding', { model: 'B', price: 99 });
+      if (problem === 'missing-raw') getRequestContextInputSource(restored)!.delete('binding');
+      const original = problem === 'policy' ? { ...saved, resumeRequestContextKeys: ['other'] } : saved;
+      expect(() => restoreRequestContext(original.requestContextEntries, restored, original)).toThrow(
+        'complete original selected request context',
+      );
+    },
+  );
 
   it.each([
     'hot',
