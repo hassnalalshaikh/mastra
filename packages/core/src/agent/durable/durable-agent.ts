@@ -2925,9 +2925,20 @@ export class DurableAgent<
         } as DurableAgentStreamOptions<TOutput>['memory'])
       : options?.memory;
 
-    let resumeRequestContext = originalSelectedContext
-      ? restoreResumeRequestContext(originalSelectedContext, options?.requestContext, this.#resumeRequestContextKeys)
-      : entry.requestContext;
+    let resumeRequestContext = entry.requestContext;
+    if (originalSelectedContext) {
+      if (needsPreparation) {
+        // Native processors restored their live state on this freshly prepared instance.
+        if (!resumeRequestContext) throw new ResumeRequestContextError();
+        assertResumeRequestContext(resumeRequestContext, originalSelectedContext);
+      } else {
+        resumeRequestContext = restoreResumeRequestContext(
+          originalSelectedContext,
+          options?.requestContext,
+          this.#resumeRequestContextKeys,
+        );
+      }
+    }
     if (!originalSelectedContext && options?.requestContext) {
       // Keep the caller's instance so schema-transformed contexts retain their
       // input source. Caller values win except for framework-managed memory.

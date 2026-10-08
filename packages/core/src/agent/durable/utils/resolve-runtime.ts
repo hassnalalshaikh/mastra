@@ -16,6 +16,8 @@ import { MASTRA_AUTH_TOKEN_KEY, RequestContext } from '../../../request-context'
 import {
   restoreResumeRequestContext,
   assertResumeRequestContext,
+  assertRestoredResumeRequestContext,
+  hasOriginalSelectedContext,
   ResumeRequestContextError,
   validateResumeRequestContextSchema,
 } from '../../../request-context/input-source';
@@ -139,6 +141,10 @@ export function restoreRequestContext(
   selected?: ResumeRequestContextSnapshot,
 ): RequestContext {
   if (selected?.resumeRequestContextKeys?.length) {
+    if (runLevel && hasOriginalSelectedContext(runLevel)) {
+      assertRestoredResumeRequestContext(runLevel, selected);
+      return runLevel;
+    }
     return restoreResumeRequestContext(selected, runLevel);
   }
   if (entries) {
