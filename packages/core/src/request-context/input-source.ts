@@ -224,12 +224,10 @@ export async function validateResumeRequestContextSchema(
   }
 }
 
-/** @internal Restore selected originals only; all other current values and absences win. */
-export function restoreResumeRequestContext(
+function readSavedSelectedContext(
   original: ResumeRequestContextSnapshot,
-  current?: RequestContext,
   requiredKeys?: readonly string[],
-): RequestContext {
+): { keys: readonly string[]; execution: Record<string, unknown>; input: Record<string, unknown> } {
   const keys = validateResumeRequestContextKeys(original.resumeRequestContextKeys);
   // A changed configuration cannot broaden or shrink the original restore authority.
   // Internal propagation omits this argument only after the native admission check.
@@ -238,8 +236,6 @@ export function restoreResumeRequestContext(
     (requiredKeys && (keys.length !== requiredKeys.length || requiredKeys.some(key => !keys.includes(key))))
   )
     throw new ResumeRequestContextError();
-  const execution = new RequestContext(current?.entries());
-  const input = new RequestContext(getRequestContextInputSource(current)?.entries());
   const savedExecution = Object.create(null) as Record<string, unknown>;
   const savedInput = Object.create(null) as Record<string, unknown>;
   for (const key of keys) {
@@ -255,8 +251,37 @@ export function restoreResumeRequestContext(
     savedExecution[key] = executionValue.value;
     savedInput[key] = inputValue.value;
   }
-  const clonedExecution = copySelectedJSON(savedExecution) as Record<string, unknown>;
-  const clonedInput = copySelectedJSON(savedInput) as Record<string, unknown>;
+  return {
+    keys,
+    execution: copySelectedJSON(savedExecution) as Record<string, unknown>,
+    input: copySelectedJSON(savedInput) as Record<string, unknown>,
+  };
+}
+
+/** @internal Reuse a restored native view only while both selected representations remain original. */
+export function assertRestoredResumeRequestContext(
+  context: RequestContext,
+  original: ResumeRequestContextSnapshot,
+): void {
+  const markedKeys = originalSelectedKeys(context);
+  if (!markedKeys?.length) throw new ResumeRequestContextError();
+  const saved = readSavedSelectedContext(original, validateResumeRequestContextKeys(markedKeys));
+  if (
+    JSON.stringify(selectedEntries(context, saved.keys)) !== JSON.stringify(saved.execution) ||
+    JSON.stringify(selectedEntries(getRequestContextInputSource(context), saved.keys)) !== JSON.stringify(saved.input)
+  )
+    throw new ResumeRequestContextError();
+}
+
+/** @internal Restore selected originals only; all other current values and absences win. */
+export function restoreResumeRequestContext(
+  original: ResumeRequestContextSnapshot,
+  current?: RequestContext,
+  requiredKeys?: readonly string[],
+): RequestContext {
+  const { keys, execution: clonedExecution, input: clonedInput } = readSavedSelectedContext(original, requiredKeys);
+  const execution = new RequestContext(current?.entries());
+  const input = new RequestContext(getRequestContextInputSource(current)?.entries());
   for (const key of keys) {
     execution.set(key, clonedExecution[key]);
     input.set(key, clonedInput[key]);
