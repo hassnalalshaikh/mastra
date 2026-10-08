@@ -674,6 +674,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       backgroundTaskPolicy: execOptions?.backgroundTaskPolicy,
       model,
       inputProcessors: configuredInputProcessors,
+      resumeMessageList: resumeMessageListState ? messageList : undefined,
     });
   } catch (error) {
     if (decliningToolCall && error instanceof ToolPolicyError) {
