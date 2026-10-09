@@ -229,6 +229,8 @@ async function abortDeadline(run: Session['run'], guard: AbortSignal, graceMs: n
 
 type StreamState = {
   threadId?: string;
+  /** Identity of this stream, independent of later session run changes. */
+  runId?: string | null;
   currentMessage: MastraDBMessage;
   lastFinishedMessage?: MastraDBMessage;
   messageStarted: boolean;
@@ -385,9 +387,13 @@ export class SessionRunEngine {
     state.completedToolPrelude = false;
   }
 
-  createStreamState(threadId = this.#session.thread.getId() ?? undefined): StreamState {
+  createStreamState(
+    threadId = this.#session.thread.getId() ?? undefined,
+    runId: string | null = this.#session.run.getRunId(),
+  ): StreamState {
     return {
       threadId,
+      runId,
       currentMessage: this.createEmptyAssistantMessage(threadId),
       messageStarted: false,
       isSuspended: false,
@@ -681,6 +687,8 @@ export class SessionRunEngine {
     agent: Agent = this.#machinery.getAgent(),
     isCurrent: () => boolean = () => true,
   ): Promise<{ message: MastraDBMessage; suspended?: boolean } | undefined> {
+    const chunkRunId = 'runId' in chunk ? (chunk.runId as string | undefined) : undefined;
+    state.runId ??= chunkRunId ?? this.#session.run.getRunId();
     if ('runId' in chunk && chunk.runId) {
       this.#session.run.setRunId({ runId: chunk.runId });
     }
@@ -1923,7 +1931,7 @@ export class SessionRunEngine {
         if (runId && abortedRunId) abortedRunId = undefined;
 
         if (!currentRun) {
-          currentRun = this.createStreamState(threadId);
+          currentRun = this.createStreamState(threadId, runId ?? null);
           this.#session.run.nextOperation();
           this.#session.run.ensureAbortController();
           this.#session.run.setRunId({ runId });
