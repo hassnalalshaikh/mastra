@@ -253,6 +253,17 @@ function unsearchableResolvedTools(tools: Record<string, unknown> | undefined): 
   return Object.fromEntries(Object.entries(tools ?? {}).filter(([name]) => META_TOOL_NAMES.has(name)));
 }
 
+/**
+ * A deferred tool runs only for the request that discovered it. A durable run that resumed after an
+ * approval rebuilds its RequestContext from the saved entries, so the same request can arrive as a
+ * new object: the same object, or the same entries, is the same request.
+ */
+function isSameRequestIdentity(current: RequestContext | undefined, original: RequestContext | undefined): boolean {
+  if (current === original) return true;
+  if (!current || !original) return false;
+  return isDeepStrictEqual(Object.fromEntries(current.entries()), Object.fromEntries(original.entries()));
+}
+
 export class ToolSearchProcessor implements Processor<'tool-search'> {
   readonly id = 'tool-search';
   readonly name = 'Tool Search Processor';
@@ -439,7 +450,9 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
         : undefined;
       const execute = markPolicyExecutor(async (input: unknown, context: any) => {
         const currentContext = context?.requestContext ?? requestContext;
-        if (currentContext !== requestContext) throw new Error(`Deferred tool request identity changed: ${toolName}`);
+        if (!isSameRequestIdentity(currentContext, requestContext)) {
+          throw new Error(`Deferred tool request identity changed: ${toolName}`);
+        }
         const catalog = this.catalogForStep(undefined);
         await this.ensureDeferredCatalog(catalog, currentContext);
         const current = this.findToolForDynamicName(catalog, toolName);
