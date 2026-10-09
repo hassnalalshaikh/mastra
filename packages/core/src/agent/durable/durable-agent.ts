@@ -926,6 +926,11 @@ export class DurableAgent<
   async #loadRecoverableSnapshot(
     workflowsStore: WorkflowsStorage,
     runId: string,
+    /**
+     * Cancelling a parked run and re-attaching a scheduled approval read a run that is
+     * suspended on purpose; only a re-drive (`restart()`) needs an active status.
+     */
+    { requireRestartable = true }: { requireRestartable?: boolean } = {},
   ): Promise<{ snapshot: WorkflowRunState; workflowInput: DurableAgenticWorkflowInput }> {
     const persisted = await workflowsStore.getWorkflowRunById({
       runId,
@@ -984,7 +989,7 @@ export class DurableAgent<
       (snapshot.status === 'pending' &&
         snapshot.context != null &&
         Object.prototype.hasOwnProperty.call(snapshot.context, 'input'));
-    if (!restartable) {
+    if (requireRestartable && !restartable) {
       throw new MastraError({
         id: 'DURABLE_AGENT_RECOVER_RUN_NOT_ACTIVE',
         domain: ErrorDomain.AGENT,
@@ -3495,7 +3500,9 @@ export class DurableAgent<
 
     // 1. Validate the persisted durable-agent input before claiming ownership
     //    so obvious caller errors fail fast.
-    let { workflowInput } = await this.#loadRecoverableSnapshot(workflowsStore, runId);
+    let { workflowInput } = await this.#loadRecoverableSnapshot(workflowsStore, runId, {
+      requireRestartable: !cancellation,
+    });
 
     // A crashed run that was executing a stored version must recover on
     // *that* version — rehydration rebuilds tools/model/instructions from
@@ -3559,7 +3566,9 @@ export class DurableAgent<
       // The lease RPC itself may have waited while an earlier owner completed.
       // Re-read after acquisition and recover from that authoritative snapshot,
       // never from the pre-claim copy.
-      const loaded = await this.#loadRecoverableSnapshot(workflowsStore, runId);
+      const loaded = await this.#loadRecoverableSnapshot(workflowsStore, runId, {
+        requireRestartable: !cancellation,
+      });
       workflowInput = loaded.workflowInput;
       // map-final-output publishes FINISH before its result is saved, so a saved
       // success means FINISH went out before the crash. The default engine
@@ -4326,7 +4335,9 @@ export class DurableAgent<
       try {
         const store = await this.#mastra?.getStorage()?.getStore('workflows');
         if (!store) throw new Error('Scheduled approval recovery requires storage');
-        const { workflowInput: input } = await this.#loadRecoverableSnapshot(store, pending.runId);
+        const { workflowInput: input } = await this.#loadRecoverableSnapshot(store, pending.runId, {
+          requireRestartable: false,
+        });
         await this.#bindScheduledController(input);
         restoredApprovals.push(pending.runId);
       } catch (error) {
