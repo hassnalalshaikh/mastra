@@ -124,6 +124,53 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
     expect(optedOut.restart).not.toHaveBeenCalled();
   });
 
+  it('never reads the snapshots of workflows that opt out of generic recovery', async () => {
+    const optedOutWorkflow = createWorkflow({
+      id: 'opted-out-wf',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+      options: { autoRestartActiveRuns: false },
+    }).commit();
+    const defaultWorkflow = createWorkflow({
+      id: 'default-wf',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+    }).commit();
+    const mastra = new Mastra({
+      logger: false,
+      storage: new MockStore(),
+      workflows: { optedOutWorkflow, defaultWorkflow },
+    });
+    const optedOutList = vi.spyOn(optedOutWorkflow, 'listActiveWorkflowRuns');
+    const defaultList = vi.spyOn(defaultWorkflow, 'listActiveWorkflowRuns').mockResolvedValue({ runs: [], total: 0 });
+
+    await mastra.restartAllActiveWorkflowRuns();
+
+    // The listing reads whole snapshots; skipping after the read would load them for nothing.
+    expect(optedOutList).not.toHaveBeenCalled();
+    expect(defaultList).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the public listing complete: listActiveWorkflowRuns still includes opted-out workflows', async () => {
+    const optedOutWorkflow = createWorkflow({
+      id: 'opted-out-wf',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+      options: { autoRestartActiveRuns: false },
+    }).commit();
+    const mastra = new Mastra({ logger: false, storage: new MockStore(), workflows: { optedOutWorkflow } });
+    const optedOutList = vi.spyOn(optedOutWorkflow, 'listActiveWorkflowRuns').mockResolvedValue({
+      runs: [createWorkflowRun('opted-out-wf', 'run-1', 'running')],
+      total: 1,
+    });
+
+    const listed = await mastra.listActiveWorkflowRuns();
+
+    expect(optedOutList).toHaveBeenCalledTimes(1);
+    expect(listed.runs.map(run => run.runId)).toEqual(['run-1']);
+    expect(listed.total).toBe(1);
+  });
+
   describe('dynamic (stored-definition) workflows', () => {
     const echo = createTool({
       id: 'echo',
@@ -187,6 +234,19 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
       expect(code.restart).toHaveBeenCalledTimes(1);
       expect(dynamic.createRun).not.toHaveBeenCalled();
       expect(dynamic.restart).not.toHaveBeenCalled();
+    });
+
+    it("does not read the snapshots of dynamic workflows when recovery.dynamicWorkflows is 'off'", async () => {
+      const { mastra } = await setup({ dynamicWorkflows: 'off' });
+      const dynamicWorkflow = mastra.getWorkflow('saved-echo');
+      const codeWorkflow = mastra.getWorkflow('codeWorkflow');
+      const dynamicList = vi.spyOn(dynamicWorkflow, 'listActiveWorkflowRuns');
+      const codeList = vi.spyOn(codeWorkflow, 'listActiveWorkflowRuns');
+
+      await mastra.restartAllActiveWorkflowRuns();
+
+      expect(dynamicList).not.toHaveBeenCalled();
+      expect(codeList).toHaveBeenCalledTimes(1);
     });
 
     it("never restarts a saved definition loaded from storage at boot when recovery.dynamicWorkflows is 'off'", async () => {

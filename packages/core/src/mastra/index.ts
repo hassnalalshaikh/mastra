@@ -4172,6 +4172,16 @@ export class Mastra<
   }
 
   public async listActiveWorkflowRuns(): Promise<WorkflowRuns> {
+    return this.#listActiveWorkflowRuns();
+  }
+
+  /**
+   * Lists active runs of every default-engine workflow, or only of those that
+   * pass `include`. Listing reads whole snapshots, so a caller that will ignore
+   * some workflows must exclude them here instead of dropping their runs after
+   * the read.
+   */
+  async #listActiveWorkflowRuns(include?: (workflow: AnyWorkflow) => boolean) {
     const storage = this.#storage;
     if (!storage) {
       this.#logger.debug('Cannot get active workflow runs. Mastra storage is not initialized');
@@ -4179,7 +4189,9 @@ export class Mastra<
     }
 
     // Get all workflows with default engine type
-    const defaultEngineWorkflows = Object.values(this.#workflows).filter(workflow => workflow.engineType === 'default');
+    const defaultEngineWorkflows = Object.values(this.#workflows).filter(
+      workflow => workflow.engineType === 'default' && (include?.(workflow) ?? true),
+    );
 
     const activeRunsByWorkflow = await Promise.all(
       defaultEngineWorkflows.map(workflow => workflow.listActiveWorkflowRuns()),
@@ -4195,7 +4207,25 @@ export class Mastra<
   }
 
   public async restartAllActiveWorkflowRuns(): Promise<void> {
-    const activeRuns = await this.listActiveWorkflowRuns();
+    // Decide which workflows are restarted BEFORE reading their snapshots: listing
+    // reads every active run in full, and a workflow that opts out of generic
+    // recovery has all of its runs skipped anyway.
+    const activeRuns = await this.#listActiveWorkflowRuns(listed => {
+      const workflow = this.getWorkflowById(listed.id);
+      if (workflow?.options?.autoRestartActiveRuns === false) {
+        this.#logger.debug('Skipping workflow auto-restart; workflow opts out of generic recovery', {
+          workflow: listed.id,
+        });
+        return false;
+      }
+      if (workflow?.origin === 'dynamic' && this.#recoveryConfig.dynamicWorkflows === 'off') {
+        this.#logger.debug('Skipping workflow auto-restart; dynamic workflow recovery is off', {
+          workflow: listed.id,
+        });
+        return false;
+      }
+      return true;
+    });
     if (activeRuns.runs.length > 0) {
       this.#logger.debug(
         `Restarting ${activeRuns.runs.length} active workflow run${activeRuns.runs.length > 1 ? 's' : ''}`,
@@ -4203,20 +4233,6 @@ export class Mastra<
     }
     for (const runSnapshot of activeRuns.runs) {
       const workflow = this.getWorkflowById(runSnapshot.workflowName);
-      if (workflow?.options?.autoRestartActiveRuns === false) {
-        this.#logger.debug('Skipping workflow run auto-restart; workflow opts out of generic recovery', {
-          workflow: runSnapshot.workflowName,
-          runId: runSnapshot.runId,
-        });
-        continue;
-      }
-      if (workflow?.origin === 'dynamic' && this.#recoveryConfig.dynamicWorkflows === 'off') {
-        this.#logger.debug('Skipping workflow run auto-restart; dynamic workflow recovery is off', {
-          workflow: runSnapshot.workflowName,
-          runId: runSnapshot.runId,
-        });
-        continue;
-      }
       try {
         const run = await workflow.createRun({ runId: runSnapshot.runId });
         await run.restart();
