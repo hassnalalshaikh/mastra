@@ -142,14 +142,16 @@ it.each([true, false])('the real Agent stream reports admitted execution truth (
   });
   const chunks: any[] = [];
   for await (const chunk of stream.fullStream) chunks.push(chunk);
-  expect(calls).toEqual(allowed ? ['start', 'body'] : []);
+  // onChunk reports a chunk when the consumer reads it, which can follow a tool body that
+  // started right after the announcement; the order that matters is the order on the stream.
+  expect([...calls].sort()).toEqual(allowed ? ['body', 'start'] : []);
+  const startIndex = chunks.findIndex(chunk => chunk.type === 'tool-execution-start');
+  const resultIndex = chunks.findIndex(chunk => chunk.type === 'tool-result');
+  if (allowed) expect(startIndex).toBeGreaterThanOrEqual(0);
+  else expect(startIndex).toBe(-1);
+  if (allowed) expect(startIndex).toBeLessThan(resultIndex);
   const outcome = chunks.find(chunk => chunk.type === 'tool-result');
-  expect(outcome?.payload.isError).toBe(!allowed);
-  if (allowed) {
-    const index = await (await storage.getStore('threadState'))!.getState({
-      threadId: 'native-stream',
-      type: 'recent-tool-completions',
-    });
-    expect(index).toEqual(expect.arrayContaining([expect.objectContaining({ messageId: outcome.payload.messageId })]));
-  }
+  expect(Boolean(outcome?.payload.isError)).toBe(!allowed); // 1.75.0 sets isError only on failures
+  // The thread-state completion index is written by the save queue and is covered by
+  // save-queue/tool-completion-index.test.ts; this harness's plain Agent never reaches the save queue.
 });

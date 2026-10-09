@@ -143,9 +143,12 @@ describe('DurableAgent tool writer', () => {
     // Simulate a separate worker process: the run-registry entry exists but has
     // no tools, so the tool-call step falls through to `mastra.getTool()`, which
     // returns the raw `Tool` instance (not a CoreToolBuilder wrapper).
+    // A worker's registry entry is a placeholder (no tools, no model; see resolveRuntimeDependencies),
+    // so both steps rebuild from the agent. An entry that keeps its live model but has no tools would
+    // persist an empty active tool set for the run, which the tool step must refuse.
     const originalSet = globalRunRegistry.set.bind(globalRunRegistry);
     globalRunRegistry.set = ((runId: string, entry: any) =>
-      originalSet(runId, { ...entry, tools: {} })) as typeof globalRunRegistry.set;
+      originalSet(runId, { ...entry, isPlaceholder: true, tools: {}, model: undefined })) as typeof globalRunRegistry.set;
 
     try {
       const chunks = await drain((await durableAgent.stream('go', { maxSteps: 3 })).fullStream);

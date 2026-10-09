@@ -2160,22 +2160,43 @@ function durableToolCompletion(
   messageList: MessageList | undefined,
   toolCallId: string,
   runId: string,
-): { toolCompletion: { completedAt: string; runId: string }; messageId?: string } {
+): {
+  toolCompletion: { completedAt: string; runId: string };
+  messageId?: string;
+  waitingFor?: 'user' | 'external';
+} {
   let messageId: string | undefined;
+  let waitingFor: 'user' | 'external' | undefined;
   try {
     const messages = messageList?.get?.all?.db?.();
     messageId = Array.isArray(messages) ? findToolCallMessageId(messages, toolCallId) : undefined;
+    // A call that waited on someone keeps its wait kind on the outcome, as the plain loop does (12138715).
+    const message = Array.isArray(messages) ? messages.find(candidate => candidate.id === messageId) : undefined;
+    const part = message?.content?.parts?.find(
+      candidate => candidate.type === 'tool-invocation' && candidate.toolInvocation.toolCallId === toolCallId,
+    );
+    const kind = (part as { providerMetadata?: { mastra?: { toolSuspensionWaitingFor?: unknown } } } | undefined)
+      ?.providerMetadata?.mastra?.toolSuspensionWaitingFor;
+    waitingFor = kind === 'user' || kind === 'external' ? kind : undefined;
   } catch {
     messageId = undefined;
   }
-  return { toolCompletion: { completedAt: new Date().toISOString(), runId }, ...(messageId ? { messageId } : {}) };
+  return {
+    toolCompletion: { completedAt: new Date().toISOString(), runId },
+    ...(messageId ? { messageId } : {}),
+    ...(waitingFor ? { waitingFor } : {}),
+  };
 }
 
 /** Completion fields a published outcome carries (display annotation only). */
 function completionPayload(completion: ReturnType<typeof durableToolCompletion> | undefined) {
   if (!completion) return {};
   return {
-    providerMetadata: withCommittedToolCompletion(undefined, completion.toolCompletion) as ProviderMetadata,
+    providerMetadata: withCommittedToolCompletion(
+      undefined,
+      completion.toolCompletion,
+      completion.waitingFor,
+    ) as ProviderMetadata,
     ...(completion.messageId ? { messageId: completion.messageId } : {}),
   };
 }

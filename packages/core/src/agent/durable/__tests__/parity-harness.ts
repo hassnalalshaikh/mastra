@@ -233,6 +233,10 @@ type StreamChunk = { from?: string; type: string; payload?: any };
 async function drainInto(acc: TurnChunks, output: MastraModelOutput<any>): Promise<string | undefined> {
   let suspendedToolCallId: string | undefined;
   for await (const chunk of output.fullStream as AsyncIterable<StreamChunk>) {
+    // The admitted-start announcement (Khayalek fork, 684756cf) is a progress signal published when
+    // a tool body is admitted; where it lands among sibling tool chunks is engine timing, so it is
+    // not part of the compared contract (tools/tool-execution-events.test.ts covers it).
+    if (chunk.type === 'tool-execution-start') continue;
     // Tool chunks carry their tool name so a swapped tool order shows up here;
     // toolCallIds are compared through `toolCalls`/`toolResults`.
     const toolName = chunk.payload?.toolName;
