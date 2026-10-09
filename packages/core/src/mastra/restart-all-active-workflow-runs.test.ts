@@ -151,6 +151,28 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
     expect(defaultList).toHaveBeenCalledTimes(1);
   });
 
+  it('never queries the store for durable-agent snapshots at boot (the read this change removes)', async () => {
+    const userWorkflow = createWorkflow({
+      id: 'user-wf',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+    }).commit();
+    const durable = createDurableAgent({
+      agent: new Agent({ id: 'durable-b', name: 'durable-b', instructions: 'x', model: 'openai/gpt-4o' }),
+    });
+    const storage = new InMemoryStore();
+    const mastra = new Mastra({ logger: false, storage, workflows: { userWorkflow }, agents: { durable } });
+    const workflowsStore = await storage.getStore('workflows');
+    const list = vi.spyOn(workflowsStore!, 'listWorkflowRuns');
+
+    await mastra.restartAllActiveWorkflowRuns();
+
+    const queried = list.mock.calls.map(([args]) => args?.workflowName);
+    expect(queried).toContain('user-wf');
+    expect(queried).not.toContain('durable-agentic-loop');
+    expect(queried).not.toContain('durable-agentic-execution');
+  });
+
   it('keeps the public listing complete: listActiveWorkflowRuns still includes opted-out workflows', async () => {
     const optedOutWorkflow = createWorkflow({
       id: 'opted-out-wf',
