@@ -181,6 +181,10 @@ export class WorkflowsInMemory extends WorkflowsStorage {
     return true;
   }
 
+  override supportsAgentRunSummaries(): boolean {
+    return true;
+  }
+
   async dangerouslyClearAll(): Promise<void> {
     this.db.workflows.clear();
   }
@@ -344,6 +348,7 @@ export class WorkflowsInMemory extends WorkflowsStorage {
     resourceId,
     threadId,
     status,
+    summary,
   }: StorageListWorkflowRunsInput = {}): Promise<WorkflowRuns> {
     if (page !== undefined && page < 0) {
       throw new Error('page must be >= 0');
@@ -366,7 +371,7 @@ export class WorkflowsInMemory extends WorkflowsStorage {
           } catch {
             return false;
           }
-        } else {
+        } else if (!summary) {
           snapshot = cloneRunData(snapshot) as WorkflowRunState;
         }
 
@@ -424,7 +429,28 @@ export class WorkflowsInMemory extends WorkflowsStorage {
     // Deserialize snapshot if it's a string
     const parsedRuns = runs.map((run: any) => ({
       ...run,
-      snapshot: typeof run.snapshot === 'string' ? JSON.parse(run.snapshot) : cloneRunData(run.snapshot),
+      snapshot: (() => {
+        const snapshot = typeof run.snapshot === 'string' ? JSON.parse(run.snapshot) : run.snapshot;
+        if (!summary) return cloneRunData(snapshot);
+        // Match native PostgreSQL discovery projection without touching execution data.
+        const input = snapshot?.context?.input;
+        const info = input?.messageListState?.memoryInfo;
+        return {
+          status: snapshot?.status,
+          timestamp: snapshot?.timestamp,
+          context: {
+            input: {
+              agentId: input?.agentId,
+              messageListState: {
+                memoryInfo: {
+                  threadId: info?.threadId,
+                  resourceId: info?.resourceId,
+                },
+              },
+            },
+          },
+        };
+      })(),
       createdAt: new Date(run.createdAt),
       updatedAt: new Date(run.updatedAt),
       runId: run.run_id,

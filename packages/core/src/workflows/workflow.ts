@@ -3372,10 +3372,10 @@ export class Workflow<
     return workflowsStore.listWorkflowRuns({ workflowName: this.id, ...(args ?? {}) });
   }
 
-  public async listActiveWorkflowRuns() {
+  public async listActiveWorkflowRuns(options?: Pick<StorageListWorkflowRunsInput, 'summary'>) {
     const [runningRuns, waitingRuns] = await Promise.all([
-      this.listWorkflowRuns({ status: 'running' }),
-      this.listWorkflowRuns({ status: 'waiting' }),
+      this.listWorkflowRuns({ status: 'running', ...(options ?? {}) }),
+      this.listWorkflowRuns({ status: 'waiting', ...(options ?? {}) }),
     ]);
 
     return {

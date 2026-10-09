@@ -4068,6 +4068,10 @@ export class DurableAgent<
       const { runs, total: storageTotal } = await workflowsStore.listWorkflowRuns({
         workflowName: DurableStepIds.AGENTIC_LOOP,
         status: 'running',
+        // @khayalek-known-mastra-violation KV-AG-018
+        // Discovery needs ownership metadata, never execution checkpoint bodies.
+        threadId,
+        summary: workflowsStore.supportsAgentRunSummaries?.() ?? false,
         resourceId,
         fromDate,
         toDate,

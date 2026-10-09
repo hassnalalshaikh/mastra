@@ -49,7 +49,7 @@ function stubActiveRun(workflow: Workflow<any, any, any, any, any, any>, runId: 
   });
   const restart = vi.fn().mockResolvedValue(undefined);
   const createRun = vi.spyOn(workflow, 'createRun').mockResolvedValue({ restart } as any);
-  return { createRun, restart };
+  return { createRun, restart, discover: vi.mocked(workflow.listActiveWorkflowRuns) };
 }
 
 describe('Mastra.restartAllActiveWorkflowRuns', () => {
@@ -122,6 +122,8 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
 
     expect(optedOut.createRun).not.toHaveBeenCalled();
     expect(optedOut.restart).not.toHaveBeenCalled();
+    expect(optedOut.discover).not.toHaveBeenCalled();
+    expect(restarted.discover).toHaveBeenCalledWith({ summary: true });
   });
 
   describe('dynamic (stored-definition) workflows', () => {
@@ -187,6 +189,7 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
       expect(code.restart).toHaveBeenCalledTimes(1);
       expect(dynamic.createRun).not.toHaveBeenCalled();
       expect(dynamic.restart).not.toHaveBeenCalled();
+      expect(dynamic.discover).not.toHaveBeenCalled();
     });
 
     it("never restarts a saved definition loaded from storage at boot when recovery.dynamicWorkflows is 'off'", async () => {
@@ -206,6 +209,7 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
 
         expect(dynamic.createRun).not.toHaveBeenCalled();
         expect(dynamic.restart).not.toHaveBeenCalled();
+        expect(dynamic.discover).not.toHaveBeenCalled();
       } finally {
         await booted.stopWorkers();
       }

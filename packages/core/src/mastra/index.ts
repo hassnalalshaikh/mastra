@@ -4128,7 +4128,22 @@ export class Mastra<
   }
 
   public async restartAllActiveWorkflowRuns(): Promise<void> {
-    const activeRuns = await this.listActiveWorkflowRuns();
+    // @khayalek-known-mastra-violation KV-AG-018
+    // Apply opt-outs before discovery, so disabled recovery cannot load checkpoints.
+    const eligibleWorkflows = Object.values(this.#workflows).filter(
+      workflow =>
+        workflow.engineType === 'default' &&
+        workflow.options?.autoRestartActiveRuns !== false &&
+        !(workflow.origin === 'dynamic' && this.#recoveryConfig.dynamicWorkflows === 'off'),
+    );
+    const activeRuns: WorkflowRuns = { runs: [], total: 0 };
+    if (this.#storage) {
+      for (const workflow of eligibleWorkflows) {
+        const result = await workflow.listActiveWorkflowRuns({ summary: true });
+        activeRuns.runs.push(...result.runs);
+        activeRuns.total += result.total;
+      }
+    }
     if (activeRuns.runs.length > 0) {
       this.#logger.debug(
         `Restarting ${activeRuns.runs.length} active workflow run${activeRuns.runs.length > 1 ? 's' : ''}`,
