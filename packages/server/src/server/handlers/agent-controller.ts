@@ -21,7 +21,7 @@ import { HTTPException } from '../http-exception';
 import { filterSchema, includeSchema, messageOrderBySchema } from '../schemas/memory';
 import { createRoute } from '../server-adapter/routes/route-builder';
 import { handleError } from './error';
-import { enforceThreadAccess } from './utils';
+import { enforceThreadAccess, getEffectiveResourceId, getEffectiveThreadId } from './utils';
 
 /**
  * AgentController session routes.
