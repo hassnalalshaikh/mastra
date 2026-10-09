@@ -146,7 +146,9 @@ describe('SessionRunEngine — abort deadline', () => {
       // so it is awaited after the next run finishes instead of here.
       const steered = session.steer({ content: 'Change course.' });
       await vi.advanceTimersByTimeAsync(5_000);
-      await processed;
+      // 1.75.0: the steering message itself drops the stale subscription after its short idle wait, so a
+      // consumer parked inside an approval decline stays parked until that decline settles (below).
+      if (lateWork === 'iterator') await processed;
 
       expect(subscribe).toHaveBeenCalledTimes(1);
       expect(dispatch).toHaveBeenCalledTimes(1);
@@ -157,18 +159,22 @@ describe('SessionRunEngine — abort deadline', () => {
       const completedBeforeRelease = events.filter(event => event.type === 'tool_end').length;
       releaseOld();
       await vi.advanceTimersByTimeAsync(0);
+      await processed;
       expect(session.stream.isCurrent({ subscription: nextSubscription })).toBe(true);
       expect(JSON.stringify(events)).not.toContain('stale output');
       expect(events.filter(event => event.type === 'error')).toHaveLength(0);
       expect(events.filter(event => event.type === 'tool_end')).toHaveLength(completedBeforeRelease);
       expect(decline).toHaveBeenCalledTimes(lateWork.startsWith('decline-') ? 1 : 0);
       expect(session.run.isAbortRequested()).toBe(false);
-      expect(events.filter(event => event.type === 'agent_end')).toEqual([{ type: 'agent_end', reason: 'aborted' }]);
+      // The consumer parked in a decline never owned the abort deadline any more (steering replaced its
+      // subscription), so only the bailed iterator consumer reports the old run's abort.
+      const abortedEnd = [{ type: 'agent_end', reason: 'aborted' }];
+      expect(events.filter(event => event.type === 'agent_end')).toEqual(lateWork === 'iterator' ? abortedEnd : []);
       finishNext();
       await vi.advanceTimersByTimeAsync(0);
       await steered;
       expect(events.filter(event => event.type === 'agent_end')).toEqual([
-        { type: 'agent_end', reason: 'aborted' },
+        ...(lateWork === 'iterator' ? abortedEnd : []),
         { type: 'agent_end', reason: 'complete' },
       ]);
       session.stream.detach();

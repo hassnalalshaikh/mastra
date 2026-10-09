@@ -1170,6 +1170,10 @@ export class SessionRunEngine {
             continue;
           }
 
+          // A decline that settles after the Session moved on (steering opened a fresh stream) belongs to
+          // a superseded run: it must not settle display state or tear down the successor.
+          if (!isCurrent()) return;
+
           if (deferredAbort) {
             // The denial chunk the agent emits for this decline can never reach
             // us: we are blocking the consumer loop that would read it, and the
