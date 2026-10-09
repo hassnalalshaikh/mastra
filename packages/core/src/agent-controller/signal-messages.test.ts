@@ -104,6 +104,9 @@ async function createController(
   return { controller, session };
 }
 
+/** Provenance Session stamps on every submitted file (attachment-input.ts). */
+const fileInput = (filename: string) => ({ mastra: { attachmentInput: { version: 1, kind: 'file', filename } } });
+
 describe('AgentController signal messages', () => {
   it.each(['before', 'during', 'after'] as const)(
     'keeps one rich input when its transcript arrives %s delivery',
@@ -407,18 +410,24 @@ describe('AgentController signal messages', () => {
         expect.objectContaining({
           content: [
             { type: 'text', text: 'Read these files.' },
-            { type: 'text', text: '[File: notes.txt]\n```\nhello\n```' },
-            { type: 'text', text: '[File: data.json]\n```\n{invalid JSON is still document text}\n```' },
+            { type: 'text', text: '[File: notes.txt]\n```\nhello\n```', providerOptions: fileInput('notes.txt') },
+            {
+              type: 'text',
+              text: '[File: data.json]\n```\n{invalid JSON is still document text}\n```',
+              providerOptions: fileInput('data.json'),
+            },
             {
               type: 'file',
               data: 'data:application/pdf;base64,JVBERg==',
               mediaType: 'application/pdf',
               filename: 'file.pdf',
+              providerOptions: fileInput('file.pdf'),
             },
           ],
         }),
         { requireDelivery: true },
       );
+      await waitFor(() => prompts.length === 1);
       expect(prompts).toHaveLength(1);
       releases.splice(0).forEach(release => release());
       await waitFor(() => events.some(event => event.type === 'agent_end'));
@@ -493,12 +502,13 @@ describe('AgentController signal messages', () => {
 
     expect(input).toEqual([
       { type: 'text', text: 'Review these attachments.' },
-      { type: 'text', text: '[File: snippet.ts]\n```\nconsole.log("hi");\n```' },
+      { type: 'text', text: '[File: snippet.ts]\n```\nconsole.log("hi");\n```', providerOptions: fileInput('snippet.ts') },
       {
         type: 'file',
         data: 'data:application/octet-stream;base64,AAEC',
         mediaType: 'application/octet-stream',
         filename: 'archive.bin',
+        providerOptions: fileInput('archive.bin'),
       },
     ]);
   });
@@ -527,7 +537,11 @@ describe('AgentController signal messages', () => {
 
     expect(input).toEqual([
       { type: 'text', text: 'Review this markdown.' },
-      { type: 'text', text: '[File: notes.md]\n````\nconst fence = ```nested```;\n````' },
+      {
+        type: 'text',
+        text: '[File: notes.md]\n````\nconst fence = ```nested```;\n````',
+        providerOptions: fileInput('notes.md'),
+      },
     ]);
   });
 

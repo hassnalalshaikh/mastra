@@ -159,6 +159,7 @@ export const VOLATILE_PAYLOAD_KEYS = new Set([
   'id',
   'modelId',
   'createdAt',
+  'completedAt',
   'updatedAt',
   'timestamp',
   'startedAt',
@@ -412,9 +413,18 @@ export function lastUserText(request: CapturedRequest): string {
 export function normalizeRequest(request: CapturedRequest): unknown {
   const withoutCreatedAt = <T extends { providerOptions?: unknown }>(node: T): T => {
     const providerOptions = node.providerOptions as Record<string, any> | undefined;
-    if (!providerOptions?.mastra || !('createdAt' in providerOptions.mastra)) return node;
-    const { createdAt: _createdAt, ...mastra } = providerOptions.mastra;
-    return { ...node, providerOptions: { ...providerOptions, mastra } };
+    if (!providerOptions?.mastra) return node;
+    const { createdAt: _createdAt, toolCompletion, ...mastra } = providerOptions.mastra;
+    // A completed tool result carries when it finished and which run finished it (Khayalek fork,
+    // 505f8475); both are per-run values like `createdAt`, so engines are compared without them.
+    const { completedAt: _completedAt, runId: _runId, ...stableCompletion } = toolCompletion ?? {};
+    return {
+      ...node,
+      providerOptions: {
+        ...providerOptions,
+        mastra: { ...mastra, ...(toolCompletion ? { toolCompletion: stableCompletion } : {}) },
+      },
+    };
   };
   const { includeRawChunks, ...rest } = request;
   return {

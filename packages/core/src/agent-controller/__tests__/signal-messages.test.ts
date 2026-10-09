@@ -695,7 +695,11 @@ describe('AgentController signal messages', () => {
     expect(agent.queueMessage).toHaveBeenCalledWith(
       [
         { type: 'text', text: 'run this after the current task' },
-        { type: 'text', text: '[File: notes.txt]\n```\nhello\n```' },
+        {
+          type: 'text',
+          text: '[File: notes.txt]\n```\nhello\n```',
+          providerOptions: { mastra: { attachmentInput: { version: 1, kind: 'file', filename: 'notes.txt' } } },
+        },
       ],
       expect.objectContaining({
         resourceId: 'resource-1',

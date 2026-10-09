@@ -83,7 +83,9 @@ it.each(['finish', 'throwing-callback', 'error', 'abort'] as const)(
         expect(onError).toHaveBeenCalledExactlyOnceWith({
           error: expect.objectContaining({ ...original, cause: original }),
         });
-        expect(onFinish).toHaveBeenCalledTimes(1);
+        // 1.75.0 drives terminal callbacks from the FINISH event by reason: an error finish
+        // reports onError and does not also report onFinish.
+        expect(onFinish).not.toHaveBeenCalled();
       }
     } finally {
       cleanup();
