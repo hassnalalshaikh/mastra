@@ -680,13 +680,12 @@ describe('native Session cancellation reaches workflow tools', () => {
       agent.abortRunStream(parent.runId);
       await vi.waitFor(
         async () => {
-          expect(
-            (await store.loadWorkflowSnapshot({ workflowName: 'durable-agentic-loop', runId: parent.runId }))?.status,
-          ).toBe('canceled');
-          expect(
-            (await store.loadWorkflowSnapshot({ workflowName: 'durable-agentic-execution', runId: parent.runId }))
-              ?.status,
-          ).toBe('canceled');
+          // 1.75.0 removes a finished durable run's snapshots once its cancellation is saved, so a
+          // canceled parent reads as canceled or as already cleaned up; it is never left running.
+          for (const workflowName of ['durable-agentic-loop', 'durable-agentic-execution']) {
+            const status = (await store.loadWorkflowSnapshot({ workflowName, runId: parent.runId }))?.status;
+            expect([undefined, 'canceled']).toContain(status);
+          }
         },
         { timeout: 1500 },
       );
