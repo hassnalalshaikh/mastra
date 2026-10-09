@@ -36,7 +36,7 @@ export interface AgentControllerFollowUpRemoveAck {
 }
 
 /** File data accepted by native Session message commands. */
-export type AgentControllerMessageFile = { data: string; mediaType: string; filename?: string };
+export type AgentControllerMessageFile = { data: string; mediaType: string; filename?: string; source?: string };
 
 export type { MastraDBMessage, MastraMessageContentV2, MastraMessagePart } from '@mastra/core/agent-controller';
 import type { RequestContext } from '@mastra/core/request-context';

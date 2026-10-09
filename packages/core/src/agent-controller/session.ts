@@ -40,6 +40,7 @@ import { safeStringify } from '../utils';
 import { Workspace } from '../workspace';
 
 import { SessionStartupCancelledError } from './errors';
+import { attachmentInputOptions } from './attachment-input';
 import { readMessageAuthor, withMessageAuthor } from './message-author';
 import { SessionRunEngine } from './session-run-engine';
 import { LiveToolCompletionProjector } from './tool-completion-display';
@@ -4781,11 +4782,13 @@ export class Session<TState = unknown> {
     files,
   }: {
     content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
   }): AgentSignalContents {
     if (!files?.length) return content;
 
-    const fileParts = files.map(f => {
+    const fileParts = files.flatMap((f): Exclude<AgentSignalContents, string> => {
+      const reference = f.source ? [{ type: 'text' as const, text: f.source,
+        providerOptions: attachmentInputOptions('source', f.filename) }] : [];
       const isText = f.mediaType.startsWith('text/') || f.mediaType === 'application/json';
       if (isText) {
         let textContent = f.data;
@@ -4800,14 +4803,16 @@ export class Session<TState = unknown> {
         const label = f.filename ? `[File: ${f.filename}]` : '[Attached file]';
         const maxBacktickRun = Math.max(0, ...Array.from(textContent.matchAll(/`+/g), match => match[0].length));
         const fence = '`'.repeat(Math.max(3, maxBacktickRun + 1));
-        return { type: 'text' as const, text: `${label}\n${fence}\n${textContent}\n${fence}` };
+        return [...reference, { type: 'text' as const, text: `${label}\n${fence}\n${textContent}\n${fence}`,
+          providerOptions: attachmentInputOptions('file', f.filename) }];
       }
-      return {
+      return [...reference, {
         type: 'file' as const,
         data: f.data,
         mediaType: f.mediaType,
         ...(f.filename ? { filename: f.filename } : {}),
-      };
+        providerOptions: attachmentInputOptions('file', f.filename),
+      }];
     });
 
     return [{ type: 'text', text: content }, ...fileParts];
@@ -5263,7 +5268,7 @@ export class Session<TState = unknown> {
   }: {
     id?: string;
     content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
     tracingContext?: TracingContext;
     tracingOptions?: TracingOptions;
     requestContext?: RequestContext;
@@ -5379,7 +5384,7 @@ export class Session<TState = unknown> {
     /** The message id; the saved user message and its stream events carry it. */
     id?: string;
     content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
     tracingContext?: TracingContext;
     tracingOptions?: TracingOptions;
     requestContext?: RequestContext;
@@ -5417,7 +5422,7 @@ export class Session<TState = unknown> {
     requestContext: requestContextInput,
   }: {
     content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
     tracingContext?: TracingContext;
     tracingOptions?: TracingOptions;
     requestContext?: RequestContext;
@@ -5451,7 +5456,7 @@ export class Session<TState = unknown> {
     /** The message id; the saved user message and its stream events carry it. */
     id?: string;
     content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
     requestContext?: RequestContext;
   }): Promise<void> {
     this.abort();
@@ -5501,7 +5506,7 @@ export class Session<TState = unknown> {
     string,
     {
       content: string;
-      files?: Array<{ data: string; mediaType: string; filename?: string }>;
+      files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
       agent: Agent;
       resourceId: string;
       threadId: string;
@@ -5606,7 +5611,7 @@ export class Session<TState = unknown> {
      */
     id?: string;
     content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string }>;
+    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
     requestContext?: RequestContext;
   }): Promise<void> {
     if (requestedId !== undefined && (!requestedId.trim() || this.#queuedFollowUps.has(requestedId))) {

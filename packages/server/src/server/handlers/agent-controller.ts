@@ -191,6 +191,7 @@ const sendMessageBodySchema = z.object({
         data: z.string().max(MAX_FILE_DATA_LENGTH),
         mediaType: z.string(),
         filename: z.string().optional(),
+        source: z.string().max(16_384).optional(),
       }),
     )
     .max(20)
