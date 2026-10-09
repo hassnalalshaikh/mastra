@@ -130,6 +130,21 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * Fail the first publish of a processed result or processor-writer chunk. The fork's
+ * tool-execution-start announcement (684756cf) is also published through emitChunkEvent
+ * before the tool body runs, so it must not consume the injected failure.
+ */
+function rejectNextResultSideChunk() {
+  let rejected = false;
+  vi.mocked(emitChunkEvent).mockImplementation(async (_pubsub, _runId, chunk) => {
+    if (!rejected && (chunk as { type?: string }).type !== 'tool-execution-start') {
+      rejected = true;
+      throw new Error('pubsub closed');
+    }
+  });
+}
+
 describe('durable tool-call: processToolResult hook (Option B)', () => {
   it('provides a live conversation reader to tool execution', async () => {
     const messageList = seedMessageList();
@@ -307,7 +322,7 @@ describe('durable tool-call: processToolResult hook (Option B)', () => {
       },
       messageList,
     );
-    vi.mocked(emitChunkEvent).mockRejectedValueOnce(new Error('pubsub closed'));
+    rejectNextResultSideChunk();
 
     const output = await runToolCallStep();
 
@@ -329,7 +344,7 @@ describe('durable tool-call: processToolResult hook (Option B)', () => {
       },
       messageList,
     );
-    vi.mocked(emitChunkEvent).mockRejectedValueOnce(new Error('pubsub closed'));
+    rejectNextResultSideChunk();
 
     const output = await runToolCallStep();
 

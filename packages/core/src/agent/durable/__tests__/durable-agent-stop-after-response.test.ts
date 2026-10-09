@@ -342,12 +342,17 @@ describe('durable cancellation between model completion and tool execution', () 
         session.abort();
         releaseBoundary.resolve();
         await expect.poll(() => finalResults.length, { timeout: 2000 }).toBe(1);
-        await expect.poll(() => onAbort.mock.calls.length, { timeout: 2000 }).toBe(1);
+        // 1.75.0 drives terminal callbacks from the run's FINISH event, so the initial stream and each
+        // resumed stream (approvals) report the one abort to their own callback: once per attached stream.
+        await expect.poll(() => onAbort.mock.calls.length, { timeout: 2000 }).toBeGreaterThanOrEqual(1);
+        expect(onAbort.mock.calls.length).toBeLessThanOrEqual(requireApproval ? 2 : 1);
         const workflows = await storage.getStore('workflows');
         await expect.poll(async () => (await workflows!.listWorkflowRuns({})).runs, { timeout: 2000 }).toEqual([]);
         expect(execute).toHaveBeenCalledTimes(4);
         expect(modelCalls).toBe(5);
-        expect(finalResults[0]).toMatchObject({ finishReason: 'abort', totalTokens: boundary === 'stream' ? 60 : 75 });
+        // 1.75.0 reports usage as unknown when a model call was cut before it measured any (the
+        // aborted fifth call at the 'stream' boundary), instead of summing the four known calls.
+        expect(finalResults[0]).toMatchObject({ finishReason: 'abort', totalTokens: boundary === 'stream' ? undefined : 75 });
         expect(responseCalls).toBe(boundary === 'stream' ? 4 : 5);
         expect(stepCalls).toBe(boundary === 'stream' ? 4 : 5);
         if (['response', 'step', 'input'].includes(boundary)) {

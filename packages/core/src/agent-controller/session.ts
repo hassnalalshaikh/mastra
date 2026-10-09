@@ -3720,7 +3720,7 @@ export class Session<TState = unknown> {
   #tokenUsage: TokenUsage = createEmptyTokenUsage();
   /** Whether the in-flight abort teardown must stay local to this process. */
   #localOnlyAbort = false;
-  #deferredAbortOrigin: { bindingGeneration: number; localOnly: boolean } | undefined;
+  #deferredAbortOrigin: { bindingGeneration: number; operationId: number; localOnly: boolean } | undefined;
   /** Thread-settings persistence handle, injected by the AgentController via {@link setStore}. */
   #store: ThreadSettingsStore | undefined;
   /** Resolves a tool name to its category, injected by the AgentController via {@link setCategoryResolver} (the category map is AgentController config). */
@@ -4518,7 +4518,11 @@ export class Session<TState = unknown> {
       this.run.requestAbort({ deferSignal: true });
       // The engine completes this teardown after its decline await; a rebind can
       // start a successor run in that window, so bind it to this binding too.
-      this.#deferredAbortOrigin = { bindingGeneration: this.run.bindingGeneration(), localOnly: this.#localOnlyAbort };
+      this.#deferredAbortOrigin = {
+        bindingGeneration: this.run.bindingGeneration(),
+        operationId: this.run.getOperationId(),
+        localOnly: this.#localOnlyAbort,
+      };
       if (suspendedToolCalls.length === 0) {
         this.#releaseApprovalGates({ threadId: abortThreadId });
         return;
@@ -4532,7 +4536,11 @@ export class Session<TState = unknown> {
       // Settlement is async; a thread switch / `/new` can tear down the binding
       // and start a successor run before it lands. Bind the teardown to this
       // binding and abort mode so it cannot abort that successor.
-      const origin = { bindingGeneration: this.run.bindingGeneration(), localOnly: this.#localOnlyAbort };
+      const origin = {
+        bindingGeneration: this.run.bindingGeneration(),
+        operationId: this.run.getOperationId(),
+        localOnly: this.#localOnlyAbort,
+      };
       void settlement!.finally(() => this.completeDeferredAbort(origin));
       return;
     }
@@ -4553,7 +4561,7 @@ export class Session<TState = unknown> {
    * claims it as soon as the gate releases, so a later abort of another run
    * cannot overwrite the origin this run's teardown is checked against.
    */
-  takeDeferredAbortOrigin(): { bindingGeneration: number; localOnly: boolean } | undefined {
+  takeDeferredAbortOrigin(): { bindingGeneration: number; operationId: number; localOnly: boolean } | undefined {
     const origin = this.#deferredAbortOrigin;
     this.#deferredAbortOrigin = undefined;
     return origin;
@@ -4569,8 +4577,11 @@ export class Session<TState = unknown> {
    * run state. (The abort-requested flag is not a usable guard: the denial's
    * own resumed run resets it before settlement resolves.)
    */
-  completeDeferredAbort(origin?: { bindingGeneration: number; localOnly: boolean }): void {
+  completeDeferredAbort(origin?: { bindingGeneration: number; operationId: number; localOnly: boolean }): void {
     if (origin && this.run.bindingGeneration() !== origin.bindingGeneration) return;
+    // A message sent right after Stop starts a new operation before the parked run's
+    // settlement lands; that successor must not inherit the Stop.
+    if (origin && this.run.getOperationId() !== origin.operationId) return;
     this.stream.abort({ localOnly: origin?.localOnly ?? this.#localOnlyAbort });
     this.run.requestAbort();
   }
@@ -5087,7 +5098,10 @@ export class Session<TState = unknown> {
       // would never get a response. Wait for the stream to fully idle first.
       // Only do this in the post-abort window (an abort was requested but the
       // run hasn't reset yet) so normal idle signals aren't delayed.
-      if (submittedAbortRequested && (submittedRunId || submittedActiveRunId)) {
+      // A Stop on a run parked on a tool suspension leaves no run id of its own (the Session ended it as
+      // 'suspended') while the thread's saved run is still listed active until its cancellation lands;
+      // that case takes the brief detach wait below, not the full post-abort teardown wait.
+      if (submittedAbortRequested && (submittedRunId || (submittedActiveRunId && submittedIsRunning))) {
         // A deferred abort (parked approval gate) streams nothing and only
         // leaves once the gated call is declined, so the short wait is enough.
         // A normal abort tears down for real: the model stream has to cancel

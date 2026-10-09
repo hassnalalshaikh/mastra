@@ -293,7 +293,11 @@ describe('durable Session terminal consumption with real Memory', () => {
         expect(approvals).toEqual([...expectedApprovals, 'call-6']);
         expect(calls.model).toBe(7);
         expect(calls.tool).toBe(expectedApprovals.length + 1);
-        expect(calls.abort).toBe(ending === 'complete' ? 0 : 1);
+        // 1.75.0 reports the abort once to the initial stream and once to the resumed stream that
+        // continued after approvals, so an aborted run reports one or two times (never for a complete run).
+        if (ending === 'complete') expect(calls.abort).toBe(0);
+        else expect(calls.abort).toBeGreaterThanOrEqual(1);
+        expect(calls.abort).toBeLessThanOrEqual(2);
         expect((await (await harness.storage.getStore('workflows'))!.listWorkflowRuns({})).runs).toEqual([]);
         expect(errors).toEqual([]);
         expect(network).not.toHaveBeenCalled();

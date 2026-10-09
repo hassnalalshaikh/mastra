@@ -1226,13 +1226,18 @@ export function createDurableToolCallStep() {
 
       const toolOptions = {
         ...executionStartHook(async () => {
-          if (pubsub)
+          if (!pubsub) return;
+          // The start announcement is progress, not a result: a failed publish must not fail the tool.
+          try {
             await emitChunkEvent(pubsub, runId, {
               type: 'tool-execution-start',
               runId,
               from: ChunkFrom.AGENT,
               payload: { runId, args: { toolCallId, toolName } },
             });
+          } catch (emitError) {
+            logger?.warn?.(`[DurableAgent] Failed to emit tool-execution-start chunk for ${toolName}: ${emitError}`);
+          }
         }),
         toolCallId,
         messages: [],
