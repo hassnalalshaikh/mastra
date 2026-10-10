@@ -1,6 +1,10 @@
+import { MockLanguageModelV2 } from '@internal/ai-sdk-v5/test';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { createDurableAgent } from '../agent/durable';
 import type { MastraBrowser } from '../browser';
-import { createTestController } from './test-utils';
+import { createTool } from '../tools';
+import { createTestAgent, createTestController } from './test-utils';
 
 const browser = () => {
   const close = vi.fn().mockResolvedValue(undefined);
@@ -20,6 +24,88 @@ function deferred() {
 }
 
 describe('owned Session browser replacement', () => {
+  it.each([false, true])(
+    'routes registered agent tools to each replacement without replacing the chat (durable=%s)',
+    async durable => {
+      const calls: string[] = [];
+      const model = new MockLanguageModelV2({
+        doGenerate: async () => ({
+          content: [{ type: 'tool-call', toolCallId: 'fixture', toolName: 'browser_fixture', input: '{}' }],
+          finishReason: 'tool-calls',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          warnings: [],
+        }),
+        doStream: async () => ({
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({
+                type: 'tool-call',
+                toolCallId: 'fixture',
+                toolName: 'browser_fixture',
+                input: '{}',
+              });
+              controller.enqueue({
+                type: 'finish',
+                finishReason: 'tool-calls',
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              });
+              controller.close();
+            },
+          }),
+        }),
+      });
+      const base = createTestAgent({ model });
+      const agent = durable ? createDurableAgent({ agent: base }) : base;
+      let selected = 'cloudflare';
+      const controller = createTestController({
+        agent,
+        browser: async () => {
+          const provider = selected;
+          return {
+            ...browser(),
+            id: provider,
+            provider,
+            providerType: 'sdk',
+            headless: true,
+            getTools: () => ({
+              browser_fixture: createTool({
+                id: 'browser_fixture',
+                description: 'Read the current browser fixture',
+                inputSchema: z.object({}),
+                execute: async () => {
+                  calls.push(provider);
+                  return { provider };
+                },
+              }),
+            }),
+            getInputProcessors: () => [],
+            hasThreadSession: () => true,
+            isBrowserRunning: () => true,
+            getSessionId: () => provider,
+            getBrowserState: async () => ({ tabs: [{ url: 'https://example.com/' + provider }], activeTabIndex: 0 }),
+          } as unknown as MastraBrowser;
+        },
+      });
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'user', scope: 'chat' });
+      const threadId = session.thread.getId();
+      for (const provider of ['cloudflare', 'firecrawl', 'cloudflare']) {
+        if (selected !== provider) {
+          selected = provider;
+          await controller.replaceSessionBrowser(session);
+        }
+        const result = await agent.generate('Read my browser', {
+          requestContext: await session.machinery.buildRequestContext(),
+          maxSteps: 1,
+        });
+        expect(result.toolResults[0]?.payload.result).toEqual({ provider });
+        expect(await controller.getSessionByResource('user', 'chat')).toBe(session);
+        expect(session.thread.getId()).toBe(threadId);
+      }
+      expect(calls).toEqual(['cloudflare', 'firecrawl', 'cloudflare']);
+      await controller.deleteSession({ resourceId: 'user', scope: 'chat' });
+    },
+  );
   it('closes the previous provider and transfers deletion ownership without changing the chat', async () => {
     const first = browser();
     const second = browser();
