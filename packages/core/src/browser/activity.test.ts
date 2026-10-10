@@ -41,6 +41,40 @@ const deferred = () => {
 afterEach(() => vi.useRealTimers());
 
 describe('browser activity ownership', () => {
+  it('permanently releases ownership so stale commands cannot reopen a paid browser', async () => {
+    const browser = new TestBrowser();
+    await browser.ensureReady();
+    await browser.retire();
+    expect(browser.isRetired).toBe(true);
+    await expect(browser.ensureReady()).rejects.toThrow('ownership has been released');
+    await expect(browser.launch()).rejects.toThrow('ownership has been released');
+    const operation = vi.fn();
+    await expect(browser.runBrowserOperation(operation)).rejects.toThrow('ownership has been released');
+    expect(operation).not.toHaveBeenCalled();
+    expect(browser.launches).toBe(1);
+  });
+
+  it('allows cleanup to be retried after retirement without allowing another launch', async () => {
+    class FailingCloseBrowser extends TestBrowser {
+      failure = true;
+      protected override async doClose() {
+        if (this.failure) {
+          this.failure = false;
+          throw new Error('provider deletion failed');
+        }
+        await super.doClose();
+      }
+    }
+    const browser = new FailingCloseBrowser();
+    await browser.ensureReady();
+    await expect(browser.retire()).rejects.toThrow('provider deletion failed');
+    await expect(browser.ensureReady()).rejects.toThrow('ownership has been released');
+    await browser.close();
+    expect(browser.status).toBe('closed');
+    expect(browser.launches).toBe(1);
+    expect(browser.closes).toBe(1);
+  });
+
   it('automatically closes at the deadline without any browser client connected', async () => {
     vi.useFakeTimers();
     const browser = new TestBrowser();
@@ -149,6 +183,21 @@ describe('browser activity ownership', () => {
     expect(browser.closes).toBe(1);
   });
 
+  it('lets retirement run a close hook that inspects the existing ready connection', async () => {
+    const inspection = vi.fn();
+    const browser = new TestBrowser({
+      onClose: async ({ browser }) => {
+        await browser.ensureReady();
+        inspection();
+      },
+    });
+    await browser.ensureReady();
+    await browser.retire();
+    expect(inspection).toHaveBeenCalledOnce();
+    expect(browser.launches).toBe(1);
+    await expect(browser.ensureReady()).rejects.toThrow('ownership has been released');
+  });
+
   it('does not deadlock a launch hook when an external close already awaits launch', async () => {
     const gate = deferred();
     const browser = new TestBrowser({
@@ -176,6 +225,28 @@ describe('browser activity ownership', () => {
     await browser.close();
     expect(close).toHaveBeenCalledTimes(2);
     expect(browser.status).toBe('closed');
+  });
+
+  it('keeps the complete tab snapshot when provider cleanup fails after disconnecting', async () => {
+    class SnapshotBrowser extends TestBrowser {
+      saved() {
+        return this.lastBrowserState;
+      }
+    }
+    const browser = new SnapshotBrowser();
+    await browser.ensureReady();
+    const capture = vi
+      .spyOn(browser, 'getBrowserState')
+      .mockResolvedValueOnce({ tabs: [{ url: 'https://example.com/saved' }], activeTabIndex: 0 })
+      .mockResolvedValue({ tabs: [{ url: 'about:blank' }], activeTabIndex: 0 });
+    vi.spyOn(browser as any, 'doClose').mockRejectedValueOnce(new Error('remote deletion failed'));
+    await expect(browser.close()).rejects.toThrow('remote deletion failed');
+    await browser.close();
+    expect(capture).toHaveBeenCalledOnce();
+    expect(browser.saved()?.tabs).toEqual([{ url: 'https://example.com/saved' }]);
+    await browser.ensureReady();
+    await browser.close();
+    expect(capture).toHaveBeenCalledTimes(2);
   });
 
   it('retries the same idle closure after a state-capture error', async () => {

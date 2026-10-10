@@ -853,7 +853,7 @@ export class AgentController<TState = {}> {
     }
   }
 
-  async #releaseSessionBrowser(session: Session<TState>): Promise<void> {
+  async #releaseSessionBrowser(session: Session<TState>, permanent = false): Promise<void> {
     const browser = this.#sessionOwnedBrowsers.get(session);
     const owners = browser && this.#sessionBrowserOwners.get(browser);
     if (!browser || !owners?.has(session)) return;
@@ -875,7 +875,8 @@ export class AgentController<TState = {}> {
     const release = {
       pending: true,
       promise: Promise.resolve().then(async () => {
-        await browser.close();
+        if (permanent) await browser.retire();
+        else await browser.close();
         detach();
         this.#browserReleases.delete(browser);
       }),
@@ -930,6 +931,7 @@ export class AgentController<TState = {}> {
       this.#sessionDeletionPromises.set(session, deletion.tolerantPromise!);
       session.abort({ localOnly: true });
       try {
+        await session.__waitForBrowserReplacement();
         await this.#releaseSessionBrowser(session);
       } catch (error) {
         // Keep the session and browser reachable so deletion can retry cleanup.
@@ -1028,6 +1030,72 @@ export class AgentController<TState = {}> {
     if (typeof this.workspace !== 'function') return this.workspace ?? undefined;
     const ctx = await this.buildRequestContext(session, requestContext);
     return (await this.workspace({ requestContext: ctx, mastra: this.getMastra() })) ?? undefined;
+  }
+
+  /**
+   * Replace an idle Session's owned browser without replacing its thread or stream.
+   * The previous browser must close successfully before the factory is resolved.
+   * @khayalek-known-mastra-violation KV-BR-002
+   */
+  replaceSessionBrowser(
+    session: Session<TState>,
+    options: { browser?: DynamicArgument<MastraBrowser | undefined>; requestContext?: RequestContext } = {},
+  ): Promise<MastraBrowser | undefined> {
+    if (!this.#sessionRuntimeIds.has(session) || this.#sessionsBeingDeleted.has(session)) {
+      return Promise.reject(new Error('Session is unavailable for browser replacement'));
+    }
+    return session.__withBrowserReplacement(async () => {
+      const identity = { resourceId: session.identity.getResourceId(), threadId: session.thread.getId() };
+      const scope = this.#sessionScopes.get(session);
+      const key = sessionRegistryKey(identity.resourceId, scope);
+      const assertCurrent = async () => {
+        if (
+          this.#sessionsBeingDeleted.has(session) ||
+          (await this.#sessionsByResource.get(key)) !== session ||
+          session.identity.getResourceId() !== identity.resourceId ||
+          session.thread.getId() !== identity.threadId
+        ) {
+          throw new Error('Session target changed during browser replacement');
+        }
+      };
+      await assertCurrent();
+      const source = options.browser ?? this.browser;
+      if (typeof source !== 'function') throw new Error('Browser replacement requires a Session browser factory');
+      const previous = session.browser;
+      if (previous && this.#sessionOwnedBrowsers.get(session) !== previous) {
+        throw new Error('Cannot replace a borrowed Session browser');
+      }
+      if (
+        previous &&
+        (this.#borrowedBrowsers.has(previous) || (this.#sessionBrowserOwners.get(previous)?.size ?? 0) > 1)
+      ) {
+        throw new Error('Cannot replace a browser shared by multiple Sessions');
+      }
+      if (previous?.getActivityState().activeOperations) throw new Error('Cannot replace an active browser');
+      await this.#releaseSessionBrowser(session, true);
+      await assertCurrent();
+      const requestContext = await this.buildRequestContext(session, options.requestContext);
+      const replacement = await source({ requestContext, mastra: this.getMastra() });
+      if (!replacement) return undefined;
+      if (
+        replacement === previous ||
+        this.#borrowedBrowsers.has(replacement) ||
+        this.#sessionBrowserOwners.has(replacement)
+      ) {
+        throw new Error('Browser replacement requires an exclusive browser instance');
+      }
+      session.browser = replacement;
+      session.__bindBrowserIdentity(identity);
+      this.#sessionOwnedBrowsers.set(session, replacement);
+      this.#sessionBrowserOwners.set(replacement, new Set([session]));
+      try {
+        await assertCurrent();
+      } catch (error) {
+        await this.#releaseSessionBrowser(session);
+        throw error;
+      }
+      return replacement;
+    });
   }
 
   /**
@@ -1931,6 +1999,7 @@ export class AgentController<TState = {}> {
    * — the deletion's {@link #dropSessionFromRegistry} cleans up all keys.
    */
   async setResourceId(session: Session<TState>, { resourceId }: { resourceId: string }): Promise<void> {
+    await session.__waitForBrowserReplacement();
     // If the session was already deleted (or deletion is in progress), don't
     // re-key it — a dead session must never be registered under a new key.
     if (this.#sessionsBeingDeleted.has(session)) return;

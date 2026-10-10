@@ -3931,6 +3931,8 @@ export class Session<TState = unknown> {
   readonly #workspace: Workspace | undefined;
   #browser?: MastraBrowser;
   #browserIdentity?: { resourceId: string; threadId: string | null };
+  #browserReplacement?: Promise<unknown>;
+  #browserGeneration = 0;
 
   /** The browser bound to this session's current identity, if available. */
   get browser(): MastraBrowser | undefined {
@@ -3949,8 +3951,35 @@ export class Session<TState = unknown> {
   }
 
   /** @internal Bind a controller factory result to the identity it was created for. */
-  __bindBrowserIdentity(): void {
-    this.#browserIdentity = { resourceId: this.identity.getResourceId(), threadId: this.thread.getId() };
+  __bindBrowserIdentity(identity = { resourceId: this.identity.getResourceId(), threadId: this.thread.getId() }): void {
+    this.#browserIdentity = { ...identity };
+  }
+
+  /** @internal Serialize browser ownership changes without replacing the chat Session. */
+  __withBrowserReplacement<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+    if (this.#browserReplacement) return Promise.reject(new Error('Session browser replacement is in progress'));
+    if (this.run.isRunning() || this.stream.isActive() || this.approval.isArmed() || this.suspensions.hasPending()) {
+      return Promise.reject(new Error('Cannot replace the browser of an active Session'));
+    }
+    this.#browserGeneration += 1;
+    const replacement = Promise.resolve()
+      .then(operation)
+      .finally(() => {
+        if (this.#browserReplacement === replacement) this.#browserReplacement = undefined;
+      });
+    this.#browserReplacement = replacement;
+    return replacement;
+  }
+
+  /** @internal Teardown waits for ownership to settle, then retries any failed cleanup. */
+  async __waitForBrowserReplacement(): Promise<void> {
+    await this.#browserReplacement?.catch(() => undefined);
+  }
+
+  private assertBrowserGeneration(generation: number): void {
+    if (this.#browserReplacement || generation !== this.#browserGeneration) {
+      throw new Error('Session browser replacement superseded message startup');
+    }
   }
 
   constructor({
@@ -5170,7 +5199,9 @@ export class Session<TState = unknown> {
       return settled && 'runId' in settled ? settled.runId : undefined;
     };
     const submittedAbortGeneration = this.#abortGeneration;
+    const submittedBrowserGeneration = this.#browserGeneration;
     const assertNotCancelled = () => {
+      this.assertBrowserGeneration(submittedBrowserGeneration);
       if (this.#abortGeneration !== submittedAbortGeneration) {
         // A newer signal may already own the session controller. Reject only
         // this obsolete startup, without aborting that newer run.
@@ -5217,6 +5248,7 @@ export class Session<TState = unknown> {
     const signal = submittedWhileWorking ? asInterjection(submitted) : submitted;
     this.#pendingSignals++;
     const accepted = Promise.resolve().then(async () => {
+      assertNotCancelled();
       const threadId = await this.thread.ensureId({ requestContext: requestContextInput });
 
       const agent = this.machinery.getAgent();
@@ -5634,6 +5666,8 @@ export class Session<TState = unknown> {
     tracingOptions?: TracingOptions;
     requestContext?: RequestContext;
   }): Promise<void> {
+    const browserGeneration = this.#browserGeneration;
+    this.assertBrowserGeneration(browserGeneration);
     const wasActive = this.stream.isActive();
     this.assertNotEditing();
     this.#pendingSignals++;
@@ -5643,6 +5677,7 @@ export class Session<TState = unknown> {
         tracingContext,
         tracingOptions,
       });
+      this.assertBrowserGeneration(browserGeneration);
       const messageInput = this.createMessageInput({ content, files });
       const providerOptions = withMessageAuthor(undefined, readMessageAuthor(requestContextInput));
       const result = this.machinery
