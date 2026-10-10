@@ -108,6 +108,14 @@ then interact with elements using their refs (e.g., @e5).`,
 
 ## Session lifecycle
 
+The pinned browser contribution also accepts `sessionLifecycle` observations. `beforeCreate({ threadId })` runs before the paid request; `created({ sessionId, threadId })` runs after provisioning; `deleted({ sessionId, threadId, receipt })` receives the provider's confirmed deletion response, including available duration and billed credits. These hooks are awaited. A failed deletion or observation keeps cleanup pending, and confirmed receipts can be observed again without issuing a second deletion. `assertCleanupSettled()` surfaces any incomplete cleanup.
+
+Shared sessions retain AgentBrowser's viewer preferences, saved tabs, trusted input observation and idle closure. A failed close can be retried through the native `close()` method. This enhanced behavior belongs to the pinned contribution until an accepted stable upstream replacement is adopted.
+
+The contribution exposes `ownsProviderSession(sessionId)` to check this instance's retained cleanup identity. A persisted native workflow can release an exact recorded resource through `FirecrawlBrowser.deleteProviderSession({ apiKey, sessionId, apiUrl? })`. This returns the confirmed provider deletion response without launching another browser. The workflow caller must verify the record's owner before supplying the identity and credentials.
+
+`createThreadManager(options)` can return a subclass of the public `FirecrawlAgentBrowserThreadManager`, including one that checks restored page URLs before navigation. The supplied options retain native provider ownership and cleanup. Returning another manager type is rejected.
+
 Session provisioning depends on the `scope` option inherited from `AgentBrowser`:
 
 - `'thread'` (default): Each conversation thread gets its own Firecrawl sandbox session, created on first use and deleted when the thread's browser session is destroyed.

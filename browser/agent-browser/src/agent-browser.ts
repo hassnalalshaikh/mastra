@@ -142,6 +142,7 @@ export class AgentBrowser extends MastraBrowser {
    * call checkBrowserAlive(), which needs at least one thread browser to exist.
    */
   override async ensureReady(): Promise<void> {
+    this.assertNotRetired();
     const scope = this.threadManager.getScope();
     const threadId = this.getCurrentThread();
     const existingSession = this.threadManager.hasSession(threadId);
@@ -166,6 +167,7 @@ export class AgentBrowser extends MastraBrowser {
    */
   async getManagerForThread(threadId?: string): Promise<BrowserManager> {
     const effectiveThreadId = threadId ?? this.getCurrentThread();
+    if (this.isRetired && !this.isBrowserRunning(effectiveThreadId)) this.assertNotRetired();
     const scope = this.threadManager.getScope();
 
     // In 'thread' scope with no specific threadId, check for an existing manager first
@@ -185,10 +187,14 @@ export class AgentBrowser extends MastraBrowser {
   // Lifecycle
   // ---------------------------------------------------------------------------
 
-  protected override async doLaunch(): Promise<void> {
+  protected async prepareBrowserLaunch(): Promise<void> {
     if (this.savedTabs) this.lastBrowserState = await this.savedTabs.load();
     this.pendingCloseReasons.clear();
     this.activeUrlChangeSources.clear();
+  }
+
+  protected override async doLaunch(): Promise<void> {
+    await this.prepareBrowserLaunch();
 
     const scope = this.threadManager.getScope();
 
@@ -225,6 +231,12 @@ export class AgentBrowser extends MastraBrowser {
     }
 
     await this.sharedManager.launch(launchOptions);
+    await this.initializeSharedBrowser(Boolean(launchOptions.cdpUrl));
+  }
+
+  /** Initialize native viewer, saved tabs and input observation for a connected shared manager. */
+  protected async initializeSharedBrowser(connectedOverCdp: boolean): Promise<void> {
+    if (!this.sharedManager) throw new Error('Shared browser manager is unavailable');
     await this.configureViewer(this.pendingViewerPreferences ?? this.browserConfig.viewerPreferences);
 
     // Register the shared manager with ThreadManager
@@ -233,7 +245,7 @@ export class AgentBrowser extends MastraBrowser {
     // Set up close listeners to detect external browser closure.
     // A resolved `cdpUrl` means we connected to an existing (remote/container)
     // browser we do not own — don't capture its PID (issue #23588).
-    this.setupCloseListenerForSharedScope(this.sharedManager, Boolean(launchOptions.cdpUrl));
+    this.setupCloseListenerForSharedScope(this.sharedManager, connectedOverCdp);
     if ((this.browserConfig.restoreTabsOnLaunch || this.savedTabs) && this.lastBrowserState?.tabs.length) {
       await this.threadManager.restoreBrowserState(
         this.sharedManager,
@@ -451,6 +463,9 @@ export class AgentBrowser extends MastraBrowser {
   }
 
   private rememberClosedBrowserState(manager: BrowserManager, reason: 'agent' | 'user', threadId?: string): void {
+    // Native close captured the complete state before pages began disappearing.
+    // A disconnect snapshot must not overwrite it before a failed close is retried.
+    if (this.status === 'closing' || this.status === 'closed') return;
     const state = this.getBrowserStateForManager(manager, threadId);
     if (!state || state.tabs.length === 0) return;
 

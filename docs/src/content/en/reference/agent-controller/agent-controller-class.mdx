@@ -672,6 +672,18 @@ Replace the controller browser and propagate it to the backing agents.
 controller.setBrowser(browser)
 ```
 
+#### `replaceSessionBrowser(session, options?)`
+
+Replace an idle session's exclusive factory-created browser while keeping its chat, thread, and subscription. The previous browser is permanently retired and must finish cleanup before the replacement factory runs. Concurrent replacements, active runs, parked approvals, suspensions, and active browser operations are rejected.
+
+```typescript
+await controller.replaceSessionBrowser(session, { requestContext })
+```
+
+By default the controller resolves its configured browser factory again with this session's request context. Pass `browser` to use a different factory for this replacement. A factory result becomes owned by the same session and is closed when that session is deleted. Caller-owned or shared browser instances cannot be replaced through this method. A failed close retains its cleanup owner and prevents the next factory from running.
+
+This API is provided by the pinned browser contribution. It is not an accepted stable upstream contract.
+
 ### Mastra and channels
 
 #### `getMastra()`
