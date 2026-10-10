@@ -52,7 +52,7 @@ export class FirecrawlBrowser extends AgentBrowser {
           ...opts,
           firecrawl,
           sessions,
-          resolveWebSocketUrl: url => resolveCdpWebSocketUrl(url, opts.logger),
+          resolveWebSocketUrl: (url: string) => resolveCdpWebSocketUrl(url, opts.logger),
           sessionOptions: sessionOpts,
         };
         const manager =
