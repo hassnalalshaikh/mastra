@@ -41,6 +41,12 @@ async function remoteChrome() {
       endpoint,
       inspector,
       async close() {
+        // Closing an attached Playwright connection only disconnects it. Ask this
+        // private Chromium to exit so its own children release the profile too.
+        await Promise.race([
+          inspector.newBrowserCDPSession().then(session => session.send('Browser.close')).catch(() => undefined),
+          new Promise<void>(resolve => setTimeout(resolve, 3000)),
+        ]);
         await Promise.race([
           inspector.close().catch(() => undefined),
           new Promise<void>(resolve => setTimeout(resolve, 3000)),
@@ -59,7 +65,7 @@ async function remoteChrome() {
         ) {
           throw new Error('Test profile cleanup escaped its owned directory');
         }
-        await rm(profile, { recursive: true, force: true, maxRetries: 3 });
+        await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
       },
     };
   } catch (error) {
