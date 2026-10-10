@@ -49,7 +49,7 @@ function stubActiveRun(workflow: Workflow<any, any, any, any, any, any>, runId: 
   });
   const restart = vi.fn().mockResolvedValue(undefined);
   const createRun = vi.spyOn(workflow, 'createRun').mockResolvedValue({ restart } as any);
-  return { createRun, restart };
+  return { createRun, restart, discover: vi.mocked(workflow.listActiveWorkflowRuns) };
 }
 
 describe('Mastra.restartAllActiveWorkflowRuns', () => {
@@ -122,6 +122,8 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
 
     expect(optedOut.createRun).not.toHaveBeenCalled();
     expect(optedOut.restart).not.toHaveBeenCalled();
+    expect(optedOut.discover).not.toHaveBeenCalled();
+    expect(restarted.discover).toHaveBeenCalledWith({ summary: true });
   });
 
   it('never reads the snapshots of workflows that opt out of generic recovery', async () => {
@@ -256,6 +258,7 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
       expect(code.restart).toHaveBeenCalledTimes(1);
       expect(dynamic.createRun).not.toHaveBeenCalled();
       expect(dynamic.restart).not.toHaveBeenCalled();
+      expect(dynamic.discover).not.toHaveBeenCalled();
     });
 
     it("does not read the snapshots of dynamic workflows when recovery.dynamicWorkflows is 'off'", async () => {
@@ -288,6 +291,7 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
 
         expect(dynamic.createRun).not.toHaveBeenCalled();
         expect(dynamic.restart).not.toHaveBeenCalled();
+        expect(dynamic.discover).not.toHaveBeenCalled();
       } finally {
         await booted.stopWorkers();
       }

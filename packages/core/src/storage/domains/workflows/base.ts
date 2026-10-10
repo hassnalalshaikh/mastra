@@ -12,6 +12,15 @@ export abstract class WorkflowsStorage extends StorageDomain {
 
   abstract supportsConcurrentUpdates(): boolean;
 
+  /**
+   * Whether summary-mode workflow reads retain the durable input's agentId and
+   * messageListState.memoryInfo. Older adapters may return only status/timestamp.
+   * Native agent discovery requests summaries only from adapters opting in here.
+   */
+  supportsAgentRunSummaries(): boolean {
+    return false;
+  }
+
   abstract updateWorkflowResults({
     workflowName,
     runId,

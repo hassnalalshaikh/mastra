@@ -346,6 +346,89 @@ describe('DurableAgent.listActiveRuns', () => {
     await expect(agent.listActiveRuns({ perPage: 1.5 })).rejects.toThrow(/perPage to be a positive integer/);
   });
 
+  it('pushes the thread filter to storage and never reads execution bodies during discovery', async () => {
+    await seed(
+      store,
+      makeSnapshot('matching', 'running', { agentId: 'agent-A', threadId: 'target', resourceId: 'r' }),
+      'r',
+    );
+    await seed(
+      store,
+      makeSnapshot('other-thread', 'running', { agentId: 'agent-A', threadId: 'other', resourceId: 'r' }),
+      'r',
+    );
+    await seed(
+      store,
+      makeSnapshot('other-agent', 'running', { agentId: 'agent-B', threadId: 'target', resourceId: 'r' }),
+      'r',
+    );
+    const workflows = (await store.getStore('workflows'))!;
+    const spy = vi.spyOn(workflows, 'listWorkflowRuns');
+    for (const stored of (workflows as any).db.workflows.values()) {
+      Object.defineProperty(stored.snapshot.context.input, 'requestContextEntries', {
+        enumerable: true,
+        get() {
+          throw new Error('Execution body was read during discovery');
+        },
+      });
+    }
+    const result = await agent.listActiveRuns({ threadId: 'target', resourceId: 'r', perPage: 1, page: 0 });
+    expect(result.total).toBe(1);
+    expect(result.runs.map(run => run.runId)).toEqual(['matching']);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'target', summary: true, resourceId: 'r' }));
+  });
+
+  it('retains full-snapshot adapter compatibility and re-verifies ownership', async () => {
+    await seed(
+      store,
+      makeSnapshot('matching', 'running', { agentId: 'agent-A', threadId: 'target', resourceId: 'r' }),
+      'r',
+    );
+    await seed(
+      store,
+      makeSnapshot('other-thread', 'running', { agentId: 'agent-A', threadId: 'other', resourceId: 'r' }),
+      'r',
+    );
+    const workflows = (await store.getStore('workflows'))!;
+    const original = workflows.listWorkflowRuns.bind(workflows);
+    vi.spyOn(workflows, 'supportsAgentRunSummaries').mockReturnValue(false);
+    const spy = vi
+      .spyOn(workflows, 'listWorkflowRuns')
+      .mockImplementation(args => original({ ...args, threadId: undefined }));
+    const result = await agent.listActiveRuns({ threadId: 'target', resourceId: 'r' });
+    expect(result.total).toBe(1);
+    expect(result.runs.map(run => run.runId)).toEqual(['matching']);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ summary: false }));
+  });
+
+  it('refuses incomplete or different ownership summaries without loading full bodies', async () => {
+    const workflows = (await store.getStore('workflows'))!;
+    const spy = vi.spyOn(workflows, 'listWorkflowRuns').mockResolvedValue({
+      total: 3,
+      runs: [
+        { runId: 'missing', snapshot: { status: 'running' } },
+        {
+          runId: 'wrong-agent',
+          snapshot: makeSnapshot('wrong-agent', 'running', { agentId: 'agent-B', threadId: 'target', resourceId: 'r' }),
+        },
+        {
+          runId: 'wrong-resource',
+          resourceId: 'different',
+          snapshot: makeSnapshot('wrong-resource', 'running', {
+            agentId: 'agent-A',
+            threadId: 'target',
+            resourceId: 'different',
+          }),
+        },
+      ] as any,
+    });
+    const result = await agent.listActiveRuns({ threadId: 'target', resourceId: 'r' });
+    expect(result).toEqual({ runs: [], total: 0 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ summary: true }));
+  });
+
   it('rejects invalid page', async () => {
     await expect(agent.listActiveRuns({ page: -1 })).rejects.toThrow(/page to be a non-negative integer/);
     await expect(agent.listActiveRuns({ page: 1.5 })).rejects.toThrow(/page to be a non-negative integer/);

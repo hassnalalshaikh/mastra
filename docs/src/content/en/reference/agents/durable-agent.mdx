@@ -419,6 +419,8 @@ Recovery re-drives a run from its last persisted snapshot. Mastra treats a sub-a
 
 Lists this agent's runs whose persisted snapshot is in `running` status: runs whose agentic loop was mid-execution when the workflow engine last saved state. On a live process they transition to `suspended` or a terminal status. After a crash or restart they stay `running` with nothing driving them, which is what `recoverActiveRuns()` re-drives. Runs started by other durable agents on the same storage aren't included.
 
+Discovery passes the thread filter to storage. Stores that advertise `supportsAgentRunSummaries()` return only lifecycle and ownership fields; PostgreSQL and in-memory storage support this mode. Full checkpoint data remains available when a native operation loads it. Other adapters keep their existing full-snapshot discovery behavior. The agent checks ownership before returning any run.
+
 `running` snapshots are only written when `recovery.durableAgents` is `'auto'` or a custom `shouldPersistSnapshot` includes `running`. Without one of those, this method returns no runs. See [snapshot persistence](/docs/harness/durable-agents#snapshot-persistence).
 
 ```typescript

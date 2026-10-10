@@ -73,7 +73,7 @@ import { InMemoryDB } from '../storage/domains/inmemory-db';
 import type { Schedule, ScheduleUpdate, SchedulesStorage } from '../storage/domains/schedules/base';
 import { WorkflowsInMemory } from '../storage/domains/workflows/inmemory';
 import { augmentWithInit } from '../storage/storageWithInit';
-import type { StorageResolvedPromptBlockType } from '../storage/types';
+import type { StorageListWorkflowRunsInput, StorageResolvedPromptBlockType } from '../storage/types';
 import { trackFeatureUsage } from '../telemetry/feature-telemetry';
 import type { ToolLoopAgentLike } from '../tool-loop-agent';
 import { isToolLoopAgentLike, toolLoopAgentToMastraAgent } from '../tool-loop-agent';
@@ -4177,11 +4177,14 @@ export class Mastra<
 
   /**
    * Lists active runs of every default-engine workflow, or only of those that
-   * pass `include`. Listing reads whole snapshots, so a caller that will ignore
-   * some workflows must exclude them here instead of dropping their runs after
-   * the read.
+   * pass `include`. A full listing reads whole snapshots, so a caller that will
+   * ignore some workflows must exclude them here instead of dropping their runs
+   * after the read, and a caller that needs only run ids passes `summary`.
    */
-  async #listActiveWorkflowRuns(include?: (workflow: AnyWorkflow) => boolean) {
+  async #listActiveWorkflowRuns(
+    options?: Pick<StorageListWorkflowRunsInput, 'summary'>,
+    include?: (workflow: AnyWorkflow) => boolean,
+  ) {
     const storage = this.#storage;
     if (!storage) {
       this.#logger.debug('Cannot get active workflow runs. Mastra storage is not initialized');
@@ -4194,7 +4197,7 @@ export class Mastra<
     );
 
     const activeRunsByWorkflow = await Promise.all(
-      defaultEngineWorkflows.map(workflow => workflow.listActiveWorkflowRuns()),
+      defaultEngineWorkflows.map(workflow => workflow.listActiveWorkflowRuns(options)),
     );
 
     const allRuns = activeRunsByWorkflow.flatMap(activeRuns => activeRuns.runs);
@@ -4207,10 +4210,12 @@ export class Mastra<
   }
 
   public async restartAllActiveWorkflowRuns(): Promise<void> {
-    // Decide which workflows are restarted BEFORE reading their snapshots: listing
-    // reads every active run in full, and a workflow that opts out of generic
-    // recovery has all of its runs skipped anyway.
-    const activeRuns = await this.#listActiveWorkflowRuns(listed => {
+    // Decide which workflows are restarted BEFORE reading their snapshots: a
+    // workflow that opts out of generic recovery has all of its runs skipped anyway.
+    // @khayalek-known-mastra-violation KV-AG-018
+    // The runs that remain are listed as summaries: restart() loads each run's own
+    // checkpoint by runId, so discovery never needs execution checkpoint bodies.
+    const activeRuns = await this.#listActiveWorkflowRuns({ summary: true }, listed => {
       const workflow = this.getWorkflowById(listed.id);
       if (workflow?.options?.autoRestartActiveRuns === false) {
         this.#logger.debug('Skipping workflow auto-restart; workflow opts out of generic recovery', {

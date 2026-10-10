@@ -138,6 +138,10 @@ export class WorkflowsPG extends WorkflowsStorage {
     return true;
   }
 
+  override supportsAgentRunSummaries(): boolean {
+    return true;
+  }
+
   private parseWorkflowRun(row: Record<string, any>): WorkflowRun {
     let parsedSnapshot: WorkflowRunState | string = row.snapshot as string;
     if (typeof parsedSnapshot === 'string') {
@@ -715,7 +719,8 @@ export class WorkflowsPG extends WorkflowsStorage {
       const normalizedPerPage = usePagination ? normalizePerPage(perPage, Number.MAX_SAFE_INTEGER) : 0;
       const offset = usePagination ? page! * normalizedPerPage : undefined;
 
-      // In summary mode only read status/timestamp out of the snapshot so large snapshots aren't transferred.
+      // @khayalek-known-mastra-violation KV-AG-018
+      // Summary reads retain only lifecycle and durable ownership metadata.
       // Legacy json/text columns get the same sanitizing path as the status filter so bad escapes can't fail the list.
       let selectList = '*';
       if (summary) {
@@ -724,7 +729,7 @@ export class WorkflowsPG extends WorkflowsStorage {
           snapshotType === 'jsonb'
             ? 'snapshot'
             : `regexp_replace(snapshot::text, '\\\\u(0000|[Dd][89A-Fa-f][0-9A-Fa-f]{2})', '', 'g')::jsonb`;
-        selectList = `workflow_name, run_id, "resourceId", "createdAt", "createdAtZ", "updatedAt", "updatedAtZ", jsonb_build_object('status', ${snapshotJson} -> 'status', 'timestamp', ${snapshotJson} -> 'timestamp') AS snapshot`;
+        selectList = `workflow_name, run_id, "resourceId", "createdAt", "createdAtZ", "updatedAt", "updatedAtZ", jsonb_build_object('status', ${snapshotJson} -> 'status', 'timestamp', ${snapshotJson} -> 'timestamp', 'context', jsonb_build_object('input', jsonb_build_object('agentId', ${snapshotJson} #> '{context,input,agentId}', 'messageListState', jsonb_build_object('memoryInfo', jsonb_build_object('threadId', ${snapshotJson} #> '{context,input,messageListState,memoryInfo,threadId}', 'resourceId', ${snapshotJson} #> '{context,input,messageListState,memoryInfo,resourceId}'))))) AS snapshot`;
       }
 
       const query = `
