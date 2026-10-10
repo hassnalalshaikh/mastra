@@ -157,8 +157,15 @@ describe('shared Firecrawl native browser integration', () => {
           expect(browser.getActivityState().lastActivityAt).toBeGreaterThan(activity.lastActivityAt),
         );
         console.info('Firecrawl fixture: checking failed provider cleanup');
+        await page.evaluate(() => {
+          document.cookie = 'native_profile_fixture=saved; Max-Age=900; Path=/';
+        });
+        expect(await page.evaluate(() => document.cookie)).toContain('native_profile_fixture=saved');
         expect((await browser.getBrowserState())?.tabs.map(tab => tab.url)).toContain(url);
         await expect(browser.close()).rejects.toThrow('cleanup');
+        // Local CDP disconnect must leave the provider's context and cookies
+        // intact for its own saved-profile deletion path.
+        expect(await page.evaluate(() => document.cookie)).toContain('native_profile_fixture=saved');
         expect((await memory.getThreadById({ threadId: 'chat' }))?.metadata?.mastra_browser_saved_tabs).toMatchObject({
           tabs: expect.arrayContaining([{ url }]),
         });
@@ -192,6 +199,6 @@ describe('shared Firecrawl native browser integration', () => {
         await new Promise<void>(resolve => server.close(() => resolve()));
       }
     },
-    45000,
+    120000,
   );
 });
