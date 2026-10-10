@@ -10,6 +10,7 @@ import type { ProcessorContext, ProcessorStreamWriter } from '@mastra/core/proce
 import { MessageHistory } from '@mastra/core/processors';
 import type { RequestContext } from '@mastra/core/request-context';
 import type { MemoryStorage, ObservationalMemoryRecord, ObservationalMemoryHistoryOptions } from '@mastra/core/storage';
+import { MessageRevisionError } from '@mastra/core/storage';
 import type { ProviderMetadata } from '@mastra/core/stream';
 import xxhash from 'xxhash-wasm';
 
@@ -4212,6 +4213,25 @@ ${formattedMessages}
     await this.storage.clearObservationalMemory(ids.threadId, ids.resourceId);
     // Clean up static maps to prevent memory leaks
     this.buffering.cleanupStaticMaps(ids.threadId ?? ids.resourceId, ids.resourceId);
+  }
+
+  /** Refuse correction if a bounded drain left native memory work running. */
+  assertThreadRevisionIdle(threadId: string): void {
+    if (this.scope !== 'thread')
+      throw new MessageRevisionError('UNSUPPORTED', 'Editing requires thread-scoped observations');
+    if (
+      this.pendingBackgroundWork.size > 0 ||
+      BufferingCoordinator.asyncBufferingOps.has(`obs:thread:${threadId}`) ||
+      BufferingCoordinator.asyncBufferingOps.has(`refl:thread:${threadId}`)
+    ) {
+      throw new MessageRevisionError('BUSY', 'Memory work must finish before editing');
+    }
+  }
+
+  /** Reset only derived thread buffering state after a saved-history correction. */
+  resetThreadRevisionState(threadId: string, resourceId: string): void {
+    if (this.scope !== 'thread') return;
+    this.buffering.cleanupStaticMaps(threadId, resourceId);
   }
 
   /**

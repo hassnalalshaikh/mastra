@@ -9027,6 +9027,22 @@ export class Agent<
     return agentThreadStreamRuntime.getActiveThreadRunId(options, this.getPubSub());
   }
 
+  /** Reserve an idle conversation while correcting its stored history and dispatching once. */
+  async withIdleThreadMutation<T>(
+    options: { resourceId: string; threadId: string },
+    operation: (
+      dispatch: (signal: AgentSignal, target: SendAgentSignalOptions<any>) => SendAgentSignalResult<any>,
+      assertOwnership: () => Promise<void>,
+    ) => Promise<T>,
+  ): Promise<T> {
+    return agentThreadStreamRuntime.withIdleThreadMutation(
+      this.#getThreadRuntimeAgent(),
+      options,
+      operation,
+      this.getPubSub(),
+    );
+  }
+
   listActiveThreadRuns(): ActiveThreadRun[] {
     return agentThreadStreamRuntime.listActiveThreadRuns(this.getPubSub());
   }

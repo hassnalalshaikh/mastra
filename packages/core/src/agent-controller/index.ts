@@ -13,6 +13,7 @@ export {
   migratePersistedModelSelection,
 } from './session';
 export { SessionStartupCancelledError, isSessionStartupCancelledError } from './errors';
+export { MessageRevisionError } from '../storage/domains/memory/base';
 export type { ReservedThreadMetadataKey, SessionBeforeAgentEndListener } from './session';
 export type { MessageAuthor } from './message-author';
 export {

@@ -12,6 +12,14 @@ packages:
 
 The `Memory` class provides a reliable system for managing conversation history and thread-based message storage in Mastra. It enables persistent storage of conversations, semantic search capabilities, and efficient message retrieval. You must configure a storage provider for conversation history, and if you enable semantic recall you will also need to provide a vector store and embedder.
 
+## Saved input correction
+
+Use [`Session.editMessage()`](/reference/agent-controller/session#editmessage-messageid-content-requestcontext-) to revise saved input and regenerate on the same thread. The native Session reserves idle thread ownership before calling memory.
+
+`Memory.reviseThreadMessages(input, options?)` is the lower-level native memory operation. `input` supplies `threadId`, `resourceId`, `fromMessageId`, and a replacement `MastraDBMessage` with a new ID. PostgreSQL and InMemory storage replace the selected input and later rows atomically. Unsupported stores reject before mutation. `options.beforeCommit` can verify the caller's existing native ownership after vector cleanup and before the storage transaction.
+
+Memory waits for its pending work, then removes only the affected thread's message and observation vectors. Unfinished background work rejects with `BUSY`. Enabled resource-scoped observational memory rejects with `UNSUPPORTED`, because its combined observations cannot be safely reset for one thread. Cleanup errors propagate before the transcript changes. Thread-derived observations, working memory, and buffering state are reset. Resource working memory and other threads remain intact. Vector deletion and the storage rewrite cannot share a transaction, so a failed storage rewrite can leave reduced recall while retaining the original transcript.
+
 ## Usage example
 
 ```typescript title="src/mastra/agents/test-agent.ts"

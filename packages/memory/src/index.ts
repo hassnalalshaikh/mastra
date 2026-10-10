@@ -49,7 +49,9 @@ import type {
   BufferedObservationChunk,
   KnowledgeStorage,
   KnowledgeScope,
+  ReviseThreadMessagesInput,
 } from '@mastra/core/storage';
+import { MessageRevisionError, validateMessageRevision } from '@mastra/core/storage';
 import type { ToolAction } from '@mastra/core/tools';
 import { generateEmptyFromSchema } from '@mastra/core/utils';
 import type { VectorFilter } from '@mastra/core/vector';
@@ -1139,6 +1141,44 @@ export class Memory extends MastraMemory {
     if (!this.vector) return [];
     const indexes = await this.vector.listIndexes();
     return indexes.filter(name => prefixes.some(prefix => name.startsWith(prefix)));
+  }
+
+  /**
+   * Strict correction cleanup. Vectors cannot share the storage transaction, so
+   * remove derived recall first. A failure leaves the transcript unchanged;
+   * already removed embeddings may reduce recall, but cannot recall old text.
+   */
+  override async reviseThreadMessages(
+    input: ReviseThreadMessagesInput,
+    options?: { beforeCommit?: () => Promise<void> },
+  ): Promise<{ removedMessageIds: string[] }> {
+    const storage = await this.getMemoryStore();
+    if (!storage.supportsThreadMessageRevision)
+      throw new MessageRevisionError('UNSUPPORTED', 'Atomic message revision is not supported');
+    const omConfig = normalizeObservationalMemoryConfig(this.threadConfig.observationalMemory);
+    if (omConfig?.scope === 'resource')
+      throw new MessageRevisionError('UNSUPPORTED', 'Editing requires thread-scoped observations');
+    await this.settled();
+    const engine = this._omEngine ? await this._omEngine : this._omEngineInstance;
+    engine?.assertThreadRevisionIdle(input.threadId);
+    const thread = await storage.getThreadById({ threadId: input.threadId });
+    const { messages } = await storage.listMessagesById({ messageIds: [input.fromMessageId] });
+    validateMessageRevision(input, thread, messages[0]);
+    const existing = await storage.listMessagesById({ messageIds: [input.replacement.id] });
+    if (existing.messages.length) throw new MessageRevisionError('INVALID_INPUT', 'Replacement id already exists');
+    if (this.vector) {
+      // Discovery and every delete are awaited, without the best-effort catches
+      // used by ordinary deletion. Filters never include another thread.
+      const indexes = await this.getMemoryVectorIndexes([this.messageIndexPrefix, this.observationIndexPrefix]);
+      for (const indexName of indexes) {
+        await this.vector.deleteVectors({ indexName, filter: { thread_id: input.threadId } });
+      }
+    }
+    await options?.beforeCommit?.();
+    engine?.assertThreadRevisionIdle(input.threadId);
+    const result = await storage.reviseThreadMessages(input);
+    engine?.resetThreadRevisionState(input.threadId, input.resourceId);
+    return result;
   }
 
   /**
