@@ -14,7 +14,7 @@ The `Memory` class provides a reliable system for managing conversation history 
 
 ## Saved input correction
 
-Use [`Session.editMessage()`](/reference/agent-controller/session#editmessagemessageid-content-requestcontext) to revise saved input and regenerate on the same thread. The native Session reserves idle thread ownership before calling memory.
+Use [`Session.editMessage()`](/reference/agent-controller/session#editmessage-messageid-content-requestcontext-) to revise saved input and regenerate on the same thread. The native Session reserves idle thread ownership before calling memory.
 
 `Memory.reviseThreadMessages(input, options?)` is the lower-level native memory operation. `input` supplies `threadId`, `resourceId`, `fromMessageId`, and a replacement `MastraDBMessage` with a new ID. PostgreSQL and InMemory storage replace the selected input and later rows atomically. Unsupported stores reject before mutation. `options.beforeCommit` can verify the caller's existing native ownership after vector cleanup and before the storage transaction.
 
