@@ -14,7 +14,7 @@ import { AgentController } from '../agent-controller';
 import { createMockWorkspace } from '../test-utils';
 import type { AgentControllerEvent } from '../types';
 
-function createTextStreamModel(responseText: string) {
+function createTextStreamModel(responseText: string | (() => string)) {
   return new MockLanguageModelV2({
     doStream: async () => ({
       rawCall: { rawPrompt: null, rawSettings: {} },
@@ -23,7 +23,7 @@ function createTextStreamModel(responseText: string) {
         { type: 'stream-start', warnings: [] },
         { type: 'response-metadata', id: 'id-0', modelId: 'mock-model-id', timestamp: new Date(0) },
         { type: 'text-start', id: 'text-1' },
-        { type: 'text-delta', id: 'text-1', delta: responseText },
+        { type: 'text-delta', id: 'text-1', delta: typeof responseText === 'function' ? responseText() : responseText },
         { type: 'text-end', id: 'text-1' },
         {
           type: 'finish',
@@ -86,7 +86,8 @@ describe('stream ↔ persisted message identity', () => {
 
   it('edits a saved input and dispatches its new signal exactly once in the same thread', async () => {
     const storage = new InMemoryStore();
-    const model = createTextStreamModel('Corrected answer.');
+    let turn = 0;
+    const model = createTextStreamModel(() => (turn++ === 0 ? 'Old answer' : 'Corrected answer.'));
     const agent = new Agent({
       id: 'edit-agent',
       name: 'edit-agent',
@@ -108,13 +109,19 @@ describe('stream ↔ persisted message identity', () => {
     try {
       await session.thread.create();
       const threadId = session.thread.requireId();
-      await session.recordMessage({ id: 'old-input', role: 'user', content: 'Old input', createdAt: new Date(1) });
-      await session.recordMessage({
-        id: 'old-answer',
-        role: 'assistant',
-        content: 'Old answer',
-        createdAt: new Date(2),
-      });
+      const original = session.sendMessageWithReceipt({ id: 'old-input', content: 'Old input' });
+      await original.accepted;
+      await vi.waitFor(
+        async () => {
+          expect(session.run.isRunning()).toBe(false);
+          expect(
+            (await session.thread.listMessages({ threadId })).filter(row => row.role === 'assistant'),
+          ).toHaveLength(1);
+        },
+        { timeout: 10000 },
+      );
+      const oldRows = await session.thread.listMessages({ threadId });
+      const oldAnswerId = oldRows.find(row => row.role === 'assistant')!.id;
       const ended = new Promise<void>(resolve =>
         session.subscribe(event => {
           if (event.type === 'message_end') resolve();
@@ -134,10 +141,11 @@ describe('stream ↔ persisted message identity', () => {
       );
       const rows = await session.thread.listMessages({ threadId });
       expect(rows.filter(row => row.id === result.messageId)).toHaveLength(1);
-      expect(rows.some(row => row.id === 'old-input' || row.id === 'old-answer')).toBe(false);
+      expect(rows.some(row => row.id === 'old-input' || row.id === oldAnswerId)).toBe(false);
       expect(rows.filter(row => row.role === 'assistant')).toHaveLength(1);
       expect(session.thread.requireId()).toBe(threadId);
-      const prompt = JSON.stringify(model.doStreamCalls[0]?.prompt);
+      expect(model.doStreamCalls).toHaveLength(2);
+      const prompt = JSON.stringify(model.doStreamCalls[1]?.prompt);
       expect(prompt).toContain('Corrected input');
       expect(prompt).not.toContain('Old answer');
       expect(prompt).not.toContain('Old input');
