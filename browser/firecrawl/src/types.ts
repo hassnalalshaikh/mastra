@@ -1,4 +1,16 @@
 import type { AgentBrowserConfig } from '@mastra/agent-browser';
+import type { BrowserDeleteResponse } from 'firecrawl';
+import type {
+  FirecrawlAgentBrowserThreadManager,
+  FirecrawlAgentBrowserThreadManagerConfig,
+} from './firecrawl-thread-manager';
+
+/** Awaited product admission and usage observations; the native provider owns cleanup. */
+export interface FirecrawlBrowserSessionLifecycle {
+  beforeCreate?: (input: { threadId?: string }) => void | Promise<void>;
+  created?: (input: { sessionId: string; threadId?: string }) => void | Promise<void>;
+  deleted?: (input: { sessionId: string; threadId?: string; receipt: BrowserDeleteResponse }) => void | Promise<void>;
+}
 
 /**
  * Options passed to Firecrawl `POST /v2/browser` (see Firecrawl JS SDK `browser()`).
@@ -28,7 +40,9 @@ export interface FirecrawlBrowserSessionOptions {
 }
 
 /** Configuration for {@link FirecrawlBrowser}. */
-export type FirecrawlBrowserConfig = AgentBrowserConfig & {
+export type FirecrawlBrowserConfig = Omit<AgentBrowserConfig, 'createThreadManager'> & {
+  /** Customize the public native manager while preserving this provider's session ownership. */
+  createThreadManager?: (options: FirecrawlAgentBrowserThreadManagerConfig) => FirecrawlAgentBrowserThreadManager;
   /** Firecrawl API key (or set `FIRECRAWL_API_KEY` in the environment and omit). */
   apiKey?: string;
   /** Base URL for a self-hosted Firecrawl API. */
@@ -38,4 +52,6 @@ export type FirecrawlBrowserConfig = AgentBrowserConfig & {
    * (local Playwright profile path): see {@link FirecrawlBrowserSessionOptions.profile}.
    */
   firecrawl?: FirecrawlBrowserSessionOptions;
+  /** Provider lifecycle observations. Hook failures are surfaced and cleanup remains retryable. */
+  sessionLifecycle?: FirecrawlBrowserSessionLifecycle;
 };

@@ -194,6 +194,17 @@ Closes the browser and cleans up all resources. Implemented in the base class wi
 await browser.close()
 ```
 
+#### `retire()`
+
+The pinned Khayalek browser contribution adds `retire()` for permanently releasing a Session's browser instance. This is a temporary contribution API, not an accepted stable Mastra API. It closes the instance and prevents stale references from launching it again. Failed cleanup can still be retried with `close()`.
+
+```typescript
+await browser.retire()
+console.log(browser.isRetired) // true
+```
+
+Use `AgentController.replaceSessionBrowser()` to replace an owned Session browser so the controller also transfers cleanup ownership. Use `close()` for ordinary close and reopen behavior.
+
 #### `isBrowserRunning()`
 
 Checks if the browser is currently running.
