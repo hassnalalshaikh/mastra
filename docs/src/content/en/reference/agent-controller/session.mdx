@@ -161,6 +161,27 @@ await session.sendMessage({
 
 When `requestContext` carries `MASTRA_MESSAGE_AUTHOR_KEY`, the stored message names that sender under `content.providerMetadata.mastra.author`. See [Reserved keys](/docs/server/request-context#reserved-keys).
 
+#### `editMessage({ messageId, content, requestContext? })`
+
+Corrects a saved user input and replaces that input and all later messages on the existing thread. `content` accepts native signal contents, including attachment parts. The replacement has a new message ID and is saved before the new answer starts. Earlier messages, thread settings and title, and resource working memory remain saved.
+
+The session must be bound to an owned thread and have no active, starting, queued, or suspended run. PostgreSQL and InMemory support the atomic history rewrite. Other stores refuse unless they implement the native revision capability. Thread observations and working memory are reset; resource-scoped context remains unchanged.
+
+```typescript
+const result = await session.editMessage({
+  messageId: savedUserMessageId,
+  content: 'Corrected question',
+})
+
+if (!result.accepted) {
+  showError(result.deliveryError)
+}
+```
+
+Returns `{ threadId, messageId, saved: true, accepted, removedMessageIds, deliveryError? }`. `accepted` means native answer startup was accepted, not that the answer has finished. When delivery fails after saving, the method returns `saved: true, accepted: false` and keeps the corrected input. It doesn't retry or restore removed replies.
+
+Validation and storage failures throw. `MessageRevisionError`, exported from `@mastra/core/storage`, uses `code` values `NOT_FOUND`, `INVALID_INPUT`, `UNSUPPORTED`, and `BUSY`. Vector cleanup failures also throw before the transcript changes. Recall cleanup and the database transaction don't share a transaction: cleanup may reduce recall if a later storage operation fails, but failed cleanup never reports a saved edit.
+
 #### `steer({ content, requestContext? })`
 
 Queue steering content into an active run.

@@ -35,9 +35,50 @@ import {
   validateStorageMetadataFilter,
 } from '../../utils';
 import type { InMemoryDB } from '../inmemory-db';
-import { MemoryStorage } from './base';
+import { MemoryStorage, MessageRevisionError, validateMessageRevision } from './base';
+import type { ReviseThreadMessagesInput } from './base';
 
 export class InMemoryMemory extends MemoryStorage {
+  override readonly supportsThreadMessageRevision: boolean = true;
+
+  override async reviseThreadMessages(input: ReviseThreadMessagesInput): Promise<{ removedMessageIds: string[] }> {
+    // No await between validation and commit: the map mutation is one synchronous operation.
+    const thread = this.db.threads.get(input.threadId) ?? null;
+    const stored = this.db.messages.get(input.fromMessageId);
+    const target = stored
+      ? ({
+          ...stored,
+          threadId: stored.thread_id,
+          resourceId: stored.resourceId ?? undefined,
+          content: safelyParseJSON(stored.content),
+        } as MastraDBMessage)
+      : undefined;
+    validateMessageRevision(input, thread, target);
+    if (this.db.messages.has(input.replacement.id))
+      throw new MessageRevisionError('INVALID_INPUT', 'Replacement id already exists');
+    const replacement = input.replacement;
+    const encoded = JSON.stringify(replacement.content);
+    const rows = [...this.db.messages.values()]
+      .filter(row => row.thread_id === input.threadId)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() || a.id.localeCompare(b.id));
+    const position = rows.findIndex(row => row.id === input.fromMessageId);
+    const removedMessageIds = rows.slice(position).map(row => row.id);
+    const metadata = { ...thread!.metadata };
+    delete metadata.workingMemory;
+    for (const id of removedMessageIds) this.db.messages.delete(id);
+    this.db.messages.set(replacement.id, {
+      id: replacement.id,
+      thread_id: input.threadId,
+      resourceId: input.resourceId,
+      content: encoded,
+      role: replacement.role,
+      type: replacement.type ?? 'v2',
+      createdAt: replacement.createdAt,
+    });
+    this.db.threads.set(input.threadId, { ...thread!, metadata, updatedAt: new Date() });
+    this.db.observationalMemory.delete(this.getObservationalMemoryKey(input.threadId, input.resourceId));
+    return { removedMessageIds };
+  }
   override readonly supportsPartialThreadUpdate: boolean = true;
   readonly supportsObservationalMemory = true;
   readonly supportsObservationalMemoryHistorySearch = true;
@@ -170,7 +211,8 @@ export class InMemoryMemory extends MemoryStorage {
       const bValue = isDateField ? new Date(b[field]).getTime() : b[field];
 
       if (typeof aValue === 'number' && typeof bValue === 'number') {
-        return direction === 'ASC' ? aValue - bValue : bValue - aValue;
+        const compared = aValue - bValue || a.id.localeCompare(b.id);
+        return direction === 'ASC' ? compared : -compared;
       }
       return direction === 'ASC'
         ? String(aValue).localeCompare(String(bValue))
