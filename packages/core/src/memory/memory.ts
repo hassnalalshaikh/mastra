@@ -26,7 +26,9 @@ import type {
   StorageCloneThreadInput,
   StorageCloneThreadOutput,
   StorageCopyThreadOutput,
+  ReviseThreadMessagesInput,
 } from '../storage';
+import { MessageRevisionError } from '../storage/domains/memory/base';
 import { augmentWithInit } from '../storage/storageWithInit';
 import type { ToolAction } from '../tools';
 import type { IdGeneratorContext } from '../types';
@@ -1122,6 +1124,20 @@ https://mastra.ai/en/docs/memory/overview`,
     messageIds: MessageDeleteInput,
     observabilityContext?: Partial<ObservabilityContext>,
   ): Promise<void>;
+
+  /** Revise stored history; vector-aware implementations must also remove derived recall. */
+  async reviseThreadMessages(
+    input: ReviseThreadMessagesInput,
+    options?: { beforeCommit?: () => Promise<void> },
+  ): Promise<{ removedMessageIds: string[] }> {
+    if (this.vector)
+      throw new MessageRevisionError('UNSUPPORTED', 'This memory implementation cannot safely revise vector recall');
+    const storage = await this.storage.getStore('memory');
+    if (!storage?.supportsThreadMessageRevision)
+      throw new MessageRevisionError('UNSUPPORTED', 'Atomic message revision is not supported');
+    await options?.beforeCommit?.();
+    return storage.reviseThreadMessages(input);
+  }
 
   /**
    * Clones a thread with all its messages to a new thread
