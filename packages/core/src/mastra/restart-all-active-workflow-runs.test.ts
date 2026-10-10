@@ -153,6 +153,34 @@ describe('Mastra.restartAllActiveWorkflowRuns', () => {
     expect(defaultList).toHaveBeenCalledTimes(1);
   });
 
+  it('lists both running and waiting runs as summaries at boot, never as full checkpoints', async () => {
+    const userWorkflow = createWorkflow({
+      id: 'summary-wf',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+    }).commit();
+    const storage = new InMemoryStore();
+    const mastra = new Mastra({ logger: false, storage, workflows: { userWorkflow } });
+    const workflowsStore = await storage.getStore('workflows');
+    const list = vi.spyOn(workflowsStore!, 'listWorkflowRuns');
+
+    await mastra.restartAllActiveWorkflowRuns();
+
+    const statusQueries = list.mock.calls
+      .map(([args]) => args)
+      .filter(args => args?.workflowName === 'summary-wf')
+      .map(args => ({ status: args?.status, summary: args?.summary }));
+    // restart() loads each run's own checkpoint by runId, so discovery of BOTH active
+    // statuses must request the short form.
+    expect(statusQueries).toEqual(
+      expect.arrayContaining([
+        { status: 'running', summary: true },
+        { status: 'waiting', summary: true },
+      ]),
+    );
+    expect(statusQueries).toHaveLength(2);
+  });
+
   it('never queries the store for durable-agent snapshots at boot (the read this change removes)', async () => {
     const userWorkflow = createWorkflow({
       id: 'user-wf',
