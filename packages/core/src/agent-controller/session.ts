@@ -3653,6 +3653,7 @@ export class Session<TState = unknown> {
     if (!threadId) throw new MessageRevisionError('NOT_FOUND', 'Bind a saved conversation before editing');
     const assertIdle = () => {
       if (
+        this.#browserReplacement ||
         this.#pendingSignals ||
         this.#pendingBindings ||
         this.#messageWrites.size ||
@@ -3959,7 +3960,13 @@ export class Session<TState = unknown> {
   /** @internal Serialize browser ownership changes without replacing the chat Session. */
   __withBrowserReplacement<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
     if (this.#browserReplacement) return Promise.reject(new Error('Session browser replacement is in progress'));
-    if (this.run.isRunning() || this.stream.isActive() || this.approval.isArmed() || this.suspensions.hasPending()) {
+    if (
+      this.#editing ||
+      this.run.isRunning() ||
+      this.stream.isActive() ||
+      this.approval.isArmed() ||
+      this.suspensions.hasPending()
+    ) {
       return Promise.reject(new Error('Cannot replace the browser of an active Session'));
     }
     this.#browserGeneration += 1;
@@ -5482,6 +5489,8 @@ export class Session<TState = unknown> {
       tracingContext,
       tracingOptions,
       untilIdle,
+      // Preparing a queued message must not arm or borrow the Session's run.
+      abortSignal: new AbortController().signal,
     });
 
     return {
