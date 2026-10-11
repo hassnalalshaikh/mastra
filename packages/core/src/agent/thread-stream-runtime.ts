@@ -6,6 +6,7 @@ import type { LeaseProvider, PubSub } from '../events/pubsub';
 import type { EventCallback } from '../events/types';
 import { parseMemoryRequestContext } from '../memory/types';
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, RequestContext } from '../request-context';
+import { MessageRevisionError } from '../storage/domains/memory/base';
 import type { MastraModelOutput } from '../stream/base/output';
 import { getChunkProducedAt } from '../stream/base/produced-at';
 import { isSignalChunkExcluded } from '../stream/signal-exclusions';
@@ -1086,6 +1087,63 @@ export class AgentThreadStreamRuntime {
     }
 
     return 'active';
+  }
+
+  /** Use the existing thread reservation and lease for an idle history correction. */
+  async withIdleThreadMutation<T>(
+    agent: Agent<any, any, any, any>,
+    options: { resourceId: string; threadId: string },
+    operation: (
+      dispatch: (signal: AgentSignal, target: SendAgentSignalOptions<any>) => SendAgentSignalResult<any>,
+      assertOwnership: () => Promise<void>,
+    ) => Promise<T>,
+    pubsub?: PubSub,
+  ): Promise<T> {
+    const state = this.#getState(pubsub);
+    const key = this.#threadKey(options.resourceId, options.threadId);
+    if (
+      state.activeThreadRunIds.has(key) ||
+      this.#hasPendingThreadWork(state, key) ||
+      state.drainingIdleSignalsByThread.has(key)
+    ) {
+      throw new MessageRevisionError('BUSY', 'Conversation is active or has pending work');
+    }
+    const reservation = `message-revision:${globalThis.crypto.randomUUID()}`;
+    state.activeThreadRunIds.set(key, reservation);
+    state.threadKeysByRunId.set(reservation, key);
+    let dispatched = false;
+    try {
+      const lease = await this.#acquireOrTransferThreadLease(pubsub, key, reservation);
+      if (!lease.acquired) throw new MessageRevisionError('BUSY', 'Another process owns the conversation');
+      const assertOwnership = async () => {
+        if (
+          state.activeThreadRunIds.get(key) !== reservation ||
+          !(await this.#hasLiveThreadLease(this.#getPubSub(pubsub), key, reservation))
+        ) {
+          throw new MessageRevisionError('BUSY', 'Conversation ownership was lost before saving');
+        }
+      };
+      return await operation((signal, target) => {
+        if (dispatched || target.resourceId !== options.resourceId || target.threadId !== options.threadId) {
+          throw new MessageRevisionError(
+            'INVALID_INPUT',
+            'Correction dispatch must use its reserved conversation once',
+          );
+        }
+        state.activeThreadRunIds.delete(key);
+        state.threadKeysByRunId.delete(reservation);
+        const result = this.sendSignal(agent, signal, target, pubsub, reservation);
+        dispatched = true;
+        return result;
+      }, assertOwnership);
+    } finally {
+      if (state.activeThreadRunIds.get(key) === reservation) state.activeThreadRunIds.delete(key);
+      state.threadKeysByRunId.delete(reservation);
+      this.#stopLeaseRenewal(this.#getPubSub(pubsub), reservation);
+      // Owner-checked release is also needed if dispatch returned a receipt but
+      // its acceptance failed before lease transfer. After a transfer it is a no-op.
+      this.#releaseThreadLease(pubsub, key, reservation);
+    }
   }
 
   async claimThreadOwnership<OUTPUT = unknown>(
@@ -4947,6 +5005,8 @@ export class AgentThreadStreamRuntime {
     if (target.resourceId && target.threadId) {
       key = this.#threadKey(target.resourceId, target.threadId);
       const activeRunId = state.activeThreadRunIds.get(key);
+      if (activeRunId?.startsWith('message-revision:'))
+        throw new MessageRevisionError('BUSY', 'Message edit is in progress');
       activeRecord = activeRunId ? state.threadRunsById.get(activeRunId) : undefined;
       if (activeRecord && !this.#isThreadBlockingRun(state, activeRecord)) {
         state.activeThreadRunIds.delete(key);
@@ -5078,6 +5138,7 @@ export class AgentThreadStreamRuntime {
     signalInput: AgentSignal,
     target: SendAgentSignalOptions<OUTPUT>,
     pubsub?: PubSub,
+    mutationFromRunId?: string,
   ): SendAgentSignalResult<OUTPUT> {
     const state = this.#getState(pubsub);
     let key: string | undefined;
@@ -5089,6 +5150,8 @@ export class AgentThreadStreamRuntime {
     if (target.resourceId && target.threadId) {
       key = this.#threadKey(target.resourceId, target.threadId);
       const activeRunId = state.activeThreadRunIds.get(key);
+      if (activeRunId?.startsWith('message-revision:'))
+        throw new MessageRevisionError('BUSY', 'Message edit is in progress');
       activeRecord = activeRunId ? state.threadRunsById.get(activeRunId) : undefined;
       if (activeRecord && !this.#isThreadBlockingRun(state, activeRecord)) {
         state.activeThreadRunIds.delete(key);
@@ -5328,7 +5391,7 @@ export class AgentThreadStreamRuntime {
     // signal off to the winning process via signal-enqueued and resolve a `deliver` result
     // (the signal was queued onto the winning run, not run locally).
     const accepted: Promise<SendAgentSignalAccepted<OUTPUT>> = (async () => {
-      const localClaimedOwner = state.claimedThreadOwners.get(reservedKey);
+      const localClaimedOwner = mutationFromRunId ? undefined : state.claimedThreadOwners.get(reservedKey);
       if (localClaimedOwner) {
         if (state.activeThreadRunIds.get(reservedKey) === reservedRunId) {
           state.activeThreadRunIds.delete(reservedKey);
@@ -5359,7 +5422,7 @@ export class AgentThreadStreamRuntime {
         return { action: 'wake' as const, runId: localAcceptance.runId, output: localAcceptance.output };
       }
 
-      if (target.ifIdle?.requireClaimedOwner) {
+      if (!mutationFromRunId && target.ifIdle?.requireClaimedOwner) {
         const discovery = this.#findClaimedThreadOwnerWithRetry(resolvedPubSub, reservedKey);
         state.claimedThreadOwnerDiscoveries.set(reservedKey, discovery);
         try {
@@ -5395,9 +5458,11 @@ export class AgentThreadStreamRuntime {
       // but failing closed would silently drop user messages on any Redis blip which
       // is the worse failure mode. Lease TTL + renewal still bound the duplicate
       // window to a single run, and the next clean acquireLease re-serializes callers.
-      const lease = await leaseProvider
-        .acquireLease(reservedKey, reservedRunId, AGENT_THREAD_LEASE_TTL_MS)
-        .catch(() => ({ acquired: true as boolean, owner: reservedRunId as string | undefined }));
+      const lease = mutationFromRunId
+        ? await this.#acquireOrTransferThreadLease(pubsub, reservedKey, reservedRunId, mutationFromRunId)
+        : await leaseProvider
+            .acquireLease(reservedKey, reservedRunId, AGENT_THREAD_LEASE_TTL_MS)
+            .catch(() => ({ acquired: true as boolean, owner: reservedRunId as string | undefined }));
 
       if (!lease.acquired) {
         // Lost the wake race to another process. Roll back our optimistic local reservation
@@ -5407,6 +5472,10 @@ export class AgentThreadStreamRuntime {
         }
         state.threadKeysByRunId.delete(reservedRunId);
         state.preRunSignalsByThread.delete(reservedKey);
+
+        if (mutationFromRunId || lease.owner?.startsWith('message-revision:')) {
+          throw new MessageRevisionError('BUSY', 'Correction could not retain exclusive conversation ownership');
+        }
 
         // Forward the user signal to the winning runId so the message is not dropped.
         // Await the publish so that callers using `accepted` resolution as their

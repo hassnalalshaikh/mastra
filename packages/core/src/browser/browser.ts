@@ -542,6 +542,23 @@ export abstract class MastraBrowser extends MastraBase {
   private activeBrowserOperations = 0;
   private readonly lifecycleHook = new AsyncLocalStorage<'launch' | 'close'>();
   private closeRequested = false;
+  private closeStateCaptured = false;
+  private retired = false;
+
+  /** Whether this instance has permanently released its Session ownership. */
+  get isRetired(): boolean {
+    return this.retired;
+  }
+
+  protected assertNotRetired(): void {
+    if (this.retired) throw new Error('Browser ownership has been released');
+  }
+
+  /** Permanently release an instance; stale commands cannot reopen a paid provider session. */
+  async retire(): Promise<void> {
+    this.retired = true;
+    await this.close();
+  }
   private idleTimeoutMs?: number;
   private idleTimer?: ReturnType<typeof setTimeout>;
 
@@ -595,10 +612,12 @@ export abstract class MastraBrowser extends MastraBase {
 
   /** Protect the entire operation, including launch, waits, failure and cancellation. */
   async runBrowserOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertNotRetired();
     this.activeBrowserOperations++;
     this.recordActivity();
     try {
       if (this._closePromise && !this.lifecycleHook.getStore()) await this._closePromise;
+      this.assertNotRetired();
       return await operation();
     } finally {
       this.activeBrowserOperations--;
@@ -847,6 +866,7 @@ export abstract class MastraBrowser extends MastraBase {
    * @param _threadId - Thread identifier (for thread-scoped browsers, launches a browser for that thread)
    */
   async launch(threadId?: string): Promise<void> {
+    this.assertNotRetired();
     // Set current thread if provided, so thread-scoped browsers launch for that thread
     if (threadId !== undefined) {
       this.setCurrentThread(threadId);
@@ -933,13 +953,17 @@ export abstract class MastraBrowser extends MastraBase {
         if (this.config.onClose && (wasReady || pendingLaunch)) {
           await this.lifecycleHook.run('close', () => this.config.onClose!({ browser: this }));
         }
-        const currentState = await this.getBrowserState();
-        if (currentState && currentState.tabs.length > 0) this.lastBrowserState = currentState;
+        if (!this.closeStateCaptured) {
+          const currentState = await this.getBrowserState();
+          if (currentState && currentState.tabs.length > 0) this.lastBrowserState = currentState;
+          this.closeStateCaptured = true;
+        }
         this.status = 'closing';
         providerCloseStarted = true;
         await this.doClose();
         this.status = 'closed';
         this.closeRequested = false;
+        this.closeStateCaptured = false;
         this.notifyBrowserClosed();
         // Clean up stale lock files only after confirmed shutdown.
         // Removing them from a live profile (if doClose threw) could cause corruption.
@@ -989,6 +1013,9 @@ export abstract class MastraBrowser extends MastraBase {
    * If browser was previously closed, it will be re-launched.
    */
   async ensureReady(): Promise<void> {
+    // A close hook may inspect its still-live connection while retirement owns cleanup.
+    if (this.lifecycleHook.getStore() === 'close' && this.status === 'ready') return;
+    this.assertNotRetired();
     if (this.lifecycleHook.getStore() && this.status === 'ready') return;
     if (this._closePromise) await this._closePromise;
     if (this.closeRequested) await this.close();

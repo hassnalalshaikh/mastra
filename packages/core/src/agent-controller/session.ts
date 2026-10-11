@@ -34,13 +34,14 @@ import type { RequestContext } from '../request-context';
 import { toStandardSchema } from '../schema';
 import type { PublicSchema, StandardSchemaWithJSON } from '../schema';
 import type { MemoryStorage } from '../storage/domains/memory/base';
+import { MessageRevisionError } from '../storage/domains/memory/base';
 import type { StorageListMessagesOutput } from '../storage/types';
 import type { SubmitPlanResumeData } from '../tools/builtin/submit-plan';
 import { safeStringify } from '../utils';
 import { Workspace } from '../workspace';
 
-import { SessionStartupCancelledError } from './errors';
 import { attachmentInputOptions } from './attachment-input';
+import { SessionStartupCancelledError } from './errors';
 import { readMessageAuthor, withMessageAuthor } from './message-author';
 import { SessionRunEngine } from './session-run-engine';
 import { LiveToolCompletionProjector } from './tool-completion-display';
@@ -301,6 +302,7 @@ function isReservedThreadMetadataKey(key: string): boolean {
  * here — identity is the stable "who", the thread is the navigational "where".
  */
 export class SessionIdentity {
+  #assertMutable: () => void;
   /** The memory resourceId the session currently reads/writes under. */
   #resourceId: string;
   /** The resourceId the session started with, retained across resource switches. */
@@ -310,7 +312,18 @@ export class SessionIdentity {
   /** Stable session owner (mirrors SessionRecord.ownerId in storage). */
   readonly #ownerId: string;
 
-  constructor({ resourceId, id, ownerId }: { resourceId: string; id: string; ownerId: string }) {
+  constructor({
+    resourceId,
+    id,
+    ownerId,
+    assertMutable = () => {},
+  }: {
+    resourceId: string;
+    id: string;
+    ownerId: string;
+    assertMutable?: () => void;
+  }) {
+    this.#assertMutable = assertMutable;
     this.#resourceId = resourceId;
     this.#defaultResourceId = resourceId;
     this.#id = id;
@@ -339,6 +352,7 @@ export class SessionIdentity {
 
   /** Point the session at a different resourceId (the default is unchanged). */
   setResourceId({ resourceId }: { resourceId: string }): void {
+    this.#assertMutable();
     this.#resourceId = resourceId;
   }
 }
@@ -565,16 +579,19 @@ export class SessionThread {
 
   /** Bind the session to a thread. */
   set({ threadId }: { threadId: string }): void {
+    this.#session?.assertNotEditing();
     this.#threadId = threadId;
   }
 
   /** Clear the session's thread binding. */
   clear(): void {
+    this.#session?.assertNotEditing();
     this.#threadId = null;
   }
 
   /** Clear the session's thread binding and release its lock when one is held. */
   async clearAndReleaseLock(): Promise<void> {
+    this.#owner.assertNotEditing();
     const threadId = this.#threadId;
     this.#threadId = null;
     if (threadId) {
@@ -727,6 +744,7 @@ export class SessionThread {
 
   /** Tear down the current agent subscription and reset the run tracker. */
   cleanupSubscription(): void {
+    this.#owner.assertNotEditing();
     this.#owner.cleanupFollowUpBinding();
     this.#owner.stream.cleanup();
     this.#owner.run.supersedeBinding();
@@ -820,104 +838,109 @@ export class SessionThread {
     requestContext,
   }: { title?: string; id?: string; requestContext?: RequestContext } = {}): Promise<AgentControllerThread> {
     const session = this.#owner;
-    const store = this.#store;
-    this.cleanupSubscription();
-    const now = new Date();
-    const thread: AgentControllerThread = {
-      id: id ?? session.machinery.generateId(),
-      resourceId: session.identity.getResourceId(),
-      title: title || '',
-      createdAt: now,
-      updatedAt: now,
-    };
+    session.beginMessageBinding();
+    try {
+      const store = this.#store;
+      this.cleanupSubscription();
+      const now = new Date();
+      const thread: AgentControllerThread = {
+        id: id ?? session.machinery.generateId(),
+        resourceId: session.identity.getResourceId(),
+        title: title || '',
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    const currentStateModel = session.model.get();
-    const currentMode = session.mode.resolve();
-    const modelId = currentStateModel || currentMode.defaultModelId;
+      const currentStateModel = session.model.get();
+      const currentMode = session.mode.resolve();
+      const modelId = currentStateModel || currentMode.defaultModelId;
 
-    const metadata: Record<string, unknown> = {};
-    if (modelId) {
-      metadata.currentModelId = modelId;
-      metadata[MODEL_PERSISTENCE_VERSION_KEY] = MODEL_PERSISTENCE_VERSION;
-    }
+      const metadata: Record<string, unknown> = {};
+      if (modelId) {
+        metadata.currentModelId = modelId;
+        metadata[MODEL_PERSISTENCE_VERSION_KEY] = MODEL_PERSISTENCE_VERSION;
+      }
 
-    // Stamp the session's scope so thread selection can filter listings back to
-    // it (e.g. a `projectPath` per git worktree).
-    Object.assign(metadata, session.getThreadScope());
+      // Stamp the session's scope so thread selection can filter listings back to
+      // it (e.g. a `projectPath` per git worktree).
+      Object.assign(metadata, session.getThreadScope());
 
-    // Acquire lock on new thread before releasing old one.
-    // If acquire fails, attempt to re-acquire the old lock before rethrowing.
-    const oldThreadId = this.#threadId;
-    if (store) {
-      try {
-        await store.acquireLock(thread.id);
-      } catch (err) {
-        if (oldThreadId) {
-          try {
-            await store.acquireLock(oldThreadId);
-          } catch {
-            // Best-effort re-acquire; original error is more important
+      // Acquire lock on new thread before releasing old one.
+      // If acquire fails, attempt to re-acquire the old lock before rethrowing.
+      const oldThreadId = this.#threadId;
+      if (store) {
+        try {
+          await store.acquireLock(thread.id);
+        } catch (err) {
+          if (oldThreadId) {
+            try {
+              await store.acquireLock(oldThreadId);
+            } catch {
+              // Best-effort re-acquire; original error is more important
+            }
           }
-        }
-        throw err;
-      }
-      if (oldThreadId) {
-        try {
-          await store.releaseLock(oldThreadId);
-        } catch {
-          // Best-effort release of the old lock; the new lock is already held.
-        }
-      }
-    }
-
-    if (store?.hasStorage()) {
-      try {
-        await store.saveThread({
-          thread: {
-            id: thread.id,
-            resourceId: thread.resourceId,
-            title: thread.title!,
-            createdAt: thread.createdAt,
-            updatedAt: thread.updatedAt,
-            metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-          },
-        });
-      } catch (err) {
-        // saveThread failed after lock was swapped; restore previous lock state
-        let reacquired = false;
-        try {
-          await store.releaseLock(thread.id);
-        } catch {
-          // Best-effort release of new thread lock
+          throw err;
         }
         if (oldThreadId) {
           try {
-            await store.acquireLock(oldThreadId);
-            reacquired = true;
+            await store.releaseLock(oldThreadId);
           } catch {
-            // Re-acquire failed; no lock is held
+            // Best-effort release of the old lock; the new lock is already held.
           }
         }
-        if (reacquired && oldThreadId) {
-          this.set({ threadId: oldThreadId });
-        } else {
-          this.clear();
-        }
-        throw err;
       }
+
+      if (store?.hasStorage()) {
+        try {
+          await store.saveThread({
+            thread: {
+              id: thread.id,
+              resourceId: thread.resourceId,
+              title: thread.title!,
+              createdAt: thread.createdAt,
+              updatedAt: thread.updatedAt,
+              metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+            },
+          });
+        } catch (err) {
+          // saveThread failed after lock was swapped; restore previous lock state
+          let reacquired = false;
+          try {
+            await store.releaseLock(thread.id);
+          } catch {
+            // Best-effort release of new thread lock
+          }
+          if (oldThreadId) {
+            try {
+              await store.acquireLock(oldThreadId);
+              reacquired = true;
+            } catch {
+              // Re-acquire failed; no lock is held
+            }
+          }
+          if (reacquired && oldThreadId) {
+            this.set({ threadId: oldThreadId });
+          } else {
+            this.clear();
+          }
+          throw err;
+        }
+      }
+
+      this.set({ threadId: thread.id });
+
+      if (modelId && !currentStateModel) {
+        session.model.set({ modelId });
+      }
+
+      session.resetTokenUsage();
+      session.emit({ type: 'thread_created', thread });
+      await this.ensureCurrentSubscription(requestContext);
+
+      return thread;
+    } finally {
+      session.endMessageBinding();
     }
-
-    this.set({ threadId: thread.id });
-
-    if (modelId && !currentStateModel) {
-      session.model.set({ modelId });
-    }
-
-    session.resetTokenUsage();
-    session.emit({ type: 'thread_created', thread });
-    await this.ensureCurrentSubscription(requestContext);
-
-    return thread;
   }
 
   /**
@@ -988,39 +1011,44 @@ export class SessionThread {
     requestContext?: RequestContext;
   }): Promise<AgentControllerThread> {
     const session = this.#owner;
-    const store = this.#store;
-    if (!store) {
-      throw new Error('Memory is not configured on this AgentController');
-    }
-
-    const clonedThread = await store.cloneThread({ sourceThreadId, resourceId, title, metadata, requestContext });
-
-    // Acquire lock on new thread before releasing old one
-    const oldThreadId = this.#threadId;
+    session.beginMessageBinding();
     try {
-      await store.acquireLock(clonedThread.id);
-    } catch (err) {
-      if (oldThreadId) {
-        try {
-          await store.acquireLock(oldThreadId);
-        } catch {
-          // Best-effort re-acquire; original error is more important
-        }
+      const store = this.#store;
+      if (!store) {
+        throw new Error('Memory is not configured on this AgentController');
       }
-      throw err;
-    }
-    if (oldThreadId) {
-      await store.releaseLock(oldThreadId);
-    }
 
-    this.cleanupSubscription();
-    this.set({ threadId: clonedThread.id });
-    await this.loadMetadata();
-    session.resetTokenUsage();
-    session.emit({ type: 'thread_created', thread: clonedThread });
-    await this.ensureCurrentSubscription(requestContext);
+      const clonedThread = await store.cloneThread({ sourceThreadId, resourceId, title, metadata, requestContext });
 
-    return clonedThread;
+      // Acquire lock on new thread before releasing old one
+      const oldThreadId = this.#threadId;
+      try {
+        await store.acquireLock(clonedThread.id);
+      } catch (err) {
+        if (oldThreadId) {
+          try {
+            await store.acquireLock(oldThreadId);
+          } catch {
+            // Best-effort re-acquire; original error is more important
+          }
+        }
+        throw err;
+      }
+      if (oldThreadId) {
+        await store.releaseLock(oldThreadId);
+      }
+
+      this.cleanupSubscription();
+      this.set({ threadId: clonedThread.id });
+      await this.loadMetadata();
+      session.resetTokenUsage();
+      session.emit({ type: 'thread_created', thread: clonedThread });
+      await this.ensureCurrentSubscription(requestContext);
+
+      return clonedThread;
+    } finally {
+      session.endMessageBinding();
+    }
   }
 
   /** Switch the session to an existing thread, hydrating its persisted settings and rebinding the stream. */
@@ -1034,72 +1062,82 @@ export class SessionThread {
     requestContext?: RequestContext;
   }): Promise<void> {
     const session = this.#owner;
-    const store = this.#store;
-    session.abort({ localOnly: true });
-    this.cleanupSubscription();
+    session.beginMessageBinding();
+    try {
+      const store = this.#store;
+      session.abort({ localOnly: true });
+      this.cleanupSubscription();
 
-    // Acquire lock on new thread before releasing old one.
-    // Lock operations must be adjacent (no intermediate awaits) so callers
-    // can rely on a single microtask tick to observe both acquire and release.
-    await store?.acquireLock(threadId);
-    const previousThreadId = this.#threadId;
-    if (previousThreadId) {
-      await store?.releaseLock(previousThreadId);
-    }
-
-    // Verify the thread exists and belongs to this session's resourceId before
-    // binding to it, so a session can never switch onto a thread owned by
-    // another resource. Release the just-acquired lock if the check fails so we
-    // never leave a foreign thread locked.
-    if (store?.hasStorage()) {
-      try {
-        await this.#requireOwnedThread({ threadId });
-      } catch (err) {
-        // Release the just-acquired foreign lock and restore the previous
-        // thread's lock so the still-bound session is not left unlocked.
-        await store.releaseLock(threadId).catch(() => {});
-        if (previousThreadId) {
-          await store.acquireLock(previousThreadId).catch(() => {});
-        }
-        throw err;
+      // Acquire lock on new thread before releasing old one.
+      // Lock operations must be adjacent (no intermediate awaits) so callers
+      // can rely on a single microtask tick to observe both acquire and release.
+      await store?.acquireLock(threadId);
+      const previousThreadId = this.#threadId;
+      if (previousThreadId) {
+        await store?.releaseLock(previousThreadId);
       }
+
+      // Verify the thread exists and belongs to this session's resourceId before
+      // binding to it, so a session can never switch onto a thread owned by
+      // another resource. Release the just-acquired lock if the check fails so we
+      // never leave a foreign thread locked.
+      if (store?.hasStorage()) {
+        try {
+          await this.#requireOwnedThread({ threadId });
+        } catch (err) {
+          // Release the just-acquired foreign lock and restore the previous
+          // thread's lock so the still-bound session is not left unlocked.
+          await store.releaseLock(threadId).catch(() => {});
+          if (previousThreadId) {
+            await store.acquireLock(previousThreadId).catch(() => {});
+          }
+          throw err;
+        }
+      }
+
+      this.set({ threadId });
+
+      await this.loadMetadata();
+
+      if (emitEvent) {
+        session.emit({ type: 'thread_changed', threadId, previousThreadId });
+      }
+      await this.ensureCurrentSubscription(requestContext);
+    } finally {
+      session.endMessageBinding();
     }
-
-    this.set({ threadId });
-
-    await this.loadMetadata();
-
-    if (emitEvent) {
-      session.emit({ type: 'thread_changed', threadId, previousThreadId });
-    }
-    await this.ensureCurrentSubscription(requestContext);
   }
 
   /** Delete a thread; when it's the active thread, clear the binding and tear down the run. */
   async delete({ threadId, requestContext }: { threadId: string; requestContext?: RequestContext }): Promise<void> {
     const session = this.#owner;
-    const store = this.#store;
-    if (!store?.hasStorage()) return;
+    session.beginMessageBinding();
+    try {
+      const store = this.#store;
+      if (!store?.hasStorage()) return;
 
-    // Only allow deleting threads this session owns.
-    await this.#requireOwnedThread({ threadId });
+      // Only allow deleting threads this session owns.
+      await this.#requireOwnedThread({ threadId });
 
-    const isDeletingCurrentThread = this.#threadId === threadId;
+      const isDeletingCurrentThread = this.#threadId === threadId;
 
-    await store.deleteThread({ threadId, requestContext });
+      await store.deleteThread({ threadId, requestContext });
 
-    if (isDeletingCurrentThread) {
-      try {
-        await store.releaseLock(threadId);
-      } catch {
-        // Lock release failed; proceed with state cleanup regardless
+      if (isDeletingCurrentThread) {
+        try {
+          await store.releaseLock(threadId);
+        } catch {
+          // Lock release failed; proceed with state cleanup regardless
+        }
+        this.cleanupSubscription();
+        this.clear();
+        session.resetTokenUsage();
       }
-      this.cleanupSubscription();
-      this.clear();
-      session.resetTokenUsage();
-    }
 
-    session.emit({ type: 'thread_deleted', threadId });
+      session.emit({ type: 'thread_deleted', threadId });
+    } finally {
+      session.endMessageBinding();
+    }
   }
 
   /**
@@ -3569,6 +3607,128 @@ export class SessionBus {
 }
 
 export class Session<TState = unknown> {
+  #editing = false;
+  #editDispatch = false;
+  #editSignalDispatch:
+    | ((signal: CreatedAgentSignal, target: Parameters<Agent['sendSignal']>[1]) => ReturnType<Agent['sendSignal']>)
+    | undefined;
+  #pendingSignals = 0;
+  #pendingBindings = 0;
+
+  /** @internal Track async thread transitions before their first await. */
+  beginMessageBinding(): void {
+    this.assertNotEditing();
+    this.#pendingBindings++;
+  }
+  /** @internal */
+  endMessageBinding(): void {
+    this.#pendingBindings--;
+  }
+
+  /** @internal Protect binding and send entrypoints during an atomic history revision. */
+  assertNotEditing(): void {
+    if (this.#editing && !this.#editDispatch) throw new MessageRevisionError('BUSY', 'Message edit is in progress');
+  }
+
+  /** @khayalek-known-mastra-violation KV-AG-019 */
+  async editMessage({
+    messageId,
+    content,
+    requestContext,
+  }: {
+    messageId: string;
+    content: AgentSignalContents;
+    requestContext?: RequestContext;
+  }): Promise<{
+    threadId: string;
+    messageId: string;
+    saved: true;
+    accepted: boolean;
+    removedMessageIds: string[];
+    deliveryError?: string;
+  }> {
+    this.assertNotEditing();
+    const threadId = this.thread.getId();
+    const resourceId = this.identity.getResourceId();
+    if (!threadId) throw new MessageRevisionError('NOT_FOUND', 'Bind a saved conversation before editing');
+    const assertIdle = () => {
+      if (
+        this.#browserReplacement ||
+        this.#pendingSignals ||
+        this.#pendingBindings ||
+        this.#messageWrites.size ||
+        this.run.isRunning() ||
+        this.run.getRunId() ||
+        this.stream.isActive() ||
+        this.stream.activeRunId() ||
+        this.approval.isArmed() ||
+        this.approval.isRestored() ||
+        this.suspensions.hasPending() ||
+        !this.followUps.isEmpty()
+      ) {
+        throw new MessageRevisionError('BUSY', 'Wait for the conversation to finish before editing');
+      }
+    };
+    assertIdle();
+    this.#editing = true;
+    try {
+      const agent = this.machinery.getAgent();
+      if (agent.getActiveThreadRunId({ threadId, resourceId }))
+        throw new MessageRevisionError('BUSY', 'Wait for the active conversation run before editing');
+      const memory = await agent.getMemory({ requestContext });
+      const storage = await this.machinery.getMessageStorage?.();
+      if (
+        !memory ||
+        !storage ||
+        !storage.supportsThreadMessageRevision ||
+        (await memory.storage.getStore('memory')) !== storage
+      ) {
+        throw new MessageRevisionError('UNSUPPORTED', 'Editing requires shared atomic memory storage');
+      }
+      await memory.settled();
+      const { runs } = await agent.listSuspendedRuns({ threadId, resourceId });
+      if (runs.length) throw new MessageRevisionError('BUSY', 'Finish or stop the saved run before editing');
+      assertIdle();
+      this.assertMessageScope(threadId, resourceId);
+      return await agent.withIdleThreadMutation({ threadId, resourceId }, async (dispatch, assertOwnership) => {
+        this.#editSignalDispatch = dispatch;
+        const { messages: selected } = await storage.listMessagesById({ messageIds: [messageId] });
+        const selectedAt = selected[0]?.createdAt.getTime() ?? 0;
+        const signal = createSignal({
+          type: 'user',
+          contents: content,
+          createdAt: new Date(Math.max(Date.now(), selectedAt + 1)),
+          providerOptions: withMessageAuthor(undefined, readMessageAuthor(requestContext)),
+        });
+        const replacement = signal.toDBMessage({ threadId, resourceId });
+        const { removedMessageIds } = await memory.reviseThreadMessages(
+          { threadId, resourceId, fromMessageId: messageId, replacement },
+          { beforeCommit: assertOwnership },
+        );
+        const result = { threadId, messageId: signal.id, saved: true as const, removedMessageIds };
+        // Saved first. No restore or automatic retry after a failed/uncertain dispatch.
+        try {
+          this.#editDispatch = true;
+          const receipt = this.sendSignal(signal, { requestContext, requireDelivery: true });
+          this.#editDispatch = false;
+          const delivered = await receipt.accepted;
+          return {
+            ...result,
+            accepted: delivered.action === 'wake' || delivered.action === 'deliver',
+            ...(delivered.action !== 'wake' && delivered.action !== 'deliver'
+              ? { deliveryError: 'Edited message saved, but no answer was started' }
+              : {}),
+          };
+        } catch {
+          return { ...result, accepted: false, deliveryError: 'Edited message saved, but no answer was started' };
+        }
+      });
+    } finally {
+      this.#editSignalDispatch = undefined;
+      this.#editDispatch = false;
+      this.#editing = false;
+    }
+  }
   /** Every cancellation intent invalidates pending startup, even when teardown is already in progress. */
   #abortGeneration = 0;
   readonly #messageWrites = new Map<string, Promise<unknown>>();
@@ -3584,6 +3744,7 @@ export class Session<TState = unknown> {
   >();
 
   private serializeMessage<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    this.assertNotEditing();
     const previous = this.#messageWrites.get(id) ?? Promise.resolve();
     const pending = previous.catch(() => undefined).then(operation);
     this.#messageWrites.set(id, pending);
@@ -3772,6 +3933,8 @@ export class Session<TState = unknown> {
   readonly #workspace: Workspace | undefined;
   #browser?: MastraBrowser;
   #browserIdentity?: { resourceId: string; threadId: string | null };
+  #browserReplacement?: Promise<unknown>;
+  #browserGeneration = 0;
 
   /** The browser bound to this session's current identity, if available. */
   get browser(): MastraBrowser | undefined {
@@ -3790,8 +3953,41 @@ export class Session<TState = unknown> {
   }
 
   /** @internal Bind a controller factory result to the identity it was created for. */
-  __bindBrowserIdentity(): void {
-    this.#browserIdentity = { resourceId: this.identity.getResourceId(), threadId: this.thread.getId() };
+  __bindBrowserIdentity(identity = { resourceId: this.identity.getResourceId(), threadId: this.thread.getId() }): void {
+    this.#browserIdentity = { ...identity };
+  }
+
+  /** @internal Serialize browser ownership changes without replacing the chat Session. */
+  __withBrowserReplacement<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+    if (this.#browserReplacement) return Promise.reject(new Error('Session browser replacement is in progress'));
+    if (
+      this.#editing ||
+      this.run.isRunning() ||
+      this.stream.isActive() ||
+      this.approval.isArmed() ||
+      this.suspensions.hasPending()
+    ) {
+      return Promise.reject(new Error('Cannot replace the browser of an active Session'));
+    }
+    this.#browserGeneration += 1;
+    const replacement = Promise.resolve()
+      .then(operation)
+      .finally(() => {
+        if (this.#browserReplacement === replacement) this.#browserReplacement = undefined;
+      });
+    this.#browserReplacement = replacement;
+    return replacement;
+  }
+
+  /** @internal Teardown waits for ownership to settle, then retries any failed cleanup. */
+  async __waitForBrowserReplacement(): Promise<void> {
+    await this.#browserReplacement?.catch(() => undefined);
+  }
+
+  private assertBrowserGeneration(generation: number): void {
+    if (this.#browserReplacement || generation !== this.#browserGeneration) {
+      throw new Error('Session browser replacement superseded message startup');
+    }
   }
 
   constructor({
@@ -3812,7 +4008,7 @@ export class Session<TState = unknown> {
     browser?: MastraBrowser;
   }) {
     this.#tags = tags && Object.keys(tags).length > 0 ? { ...tags } : {};
-    this.identity = new SessionIdentity({ resourceId, id, ownerId });
+    this.identity = new SessionIdentity({ resourceId, id, ownerId, assertMutable: () => this.assertNotEditing() });
     this.thread = new SessionThread(() => this.identity.getResourceId());
     this.displayState = new SessionDisplayState({
       getTokenUsage: () => this.getTokenUsage(),
@@ -4798,8 +4994,9 @@ export class Session<TState = unknown> {
     if (!files?.length) return content;
 
     const fileParts = files.flatMap((f): Exclude<AgentSignalContents, string> => {
-      const reference = f.source ? [{ type: 'text' as const, text: f.source,
-        providerOptions: attachmentInputOptions('source', f.filename) }] : [];
+      const reference = f.source
+        ? [{ type: 'text' as const, text: f.source, providerOptions: attachmentInputOptions('source', f.filename) }]
+        : [];
       const isText = f.mediaType.startsWith('text/') || f.mediaType === 'application/json';
       if (isText) {
         let textContent = f.data;
@@ -4814,16 +5011,25 @@ export class Session<TState = unknown> {
         const label = f.filename ? `[File: ${f.filename}]` : '[Attached file]';
         const maxBacktickRun = Math.max(0, ...Array.from(textContent.matchAll(/`+/g), match => match[0].length));
         const fence = '`'.repeat(Math.max(3, maxBacktickRun + 1));
-        return [...reference, { type: 'text' as const, text: `${label}\n${fence}\n${textContent}\n${fence}`,
-          providerOptions: attachmentInputOptions('file', f.filename) }];
+        return [
+          ...reference,
+          {
+            type: 'text' as const,
+            text: `${label}\n${fence}\n${textContent}\n${fence}`,
+            providerOptions: attachmentInputOptions('file', f.filename),
+          },
+        ];
       }
-      return [...reference, {
-        type: 'file' as const,
-        data: f.data,
-        mediaType: f.mediaType,
-        ...(f.filename ? { filename: f.filename } : {}),
-        providerOptions: attachmentInputOptions('file', f.filename),
-      }];
+      return [
+        ...reference,
+        {
+          type: 'file' as const,
+          data: f.data,
+          mediaType: f.mediaType,
+          ...(f.filename ? { filename: f.filename } : {}),
+          providerOptions: attachmentInputOptions('file', f.filename),
+        },
+      ];
     });
 
     return [{ type: 'text', text: content }, ...fileParts];
@@ -4903,7 +5109,9 @@ export class Session<TState = unknown> {
     input: AgentSignalInput,
     target: { resourceId: string; threadId: string },
   ): { id: string; type: AgentSignalInput['type']; accepted: Promise<{ accepted: true }> } {
+    this.assertNotEditing();
     const signal = createSignal(input);
+    this.#pendingSignals++;
     const accepted = Promise.resolve().then(async () => {
       const resourceId = this.identity.getResourceId();
       const thread = target.resourceId === resourceId ? await this.thread.getById({ threadId: target.threadId }) : null;
@@ -4930,7 +5138,13 @@ export class Session<TState = unknown> {
       return { accepted: true as const };
     });
 
-    return { id: signal.id, type: signal.type, accepted };
+    return {
+      id: signal.id,
+      type: signal.type,
+      accepted: accepted.finally(() => {
+        this.#pendingSignals--;
+      }),
+    };
   }
 
   /**
@@ -4982,6 +5196,7 @@ export class Session<TState = unknown> {
     type: AgentSignalInput['type'];
     accepted: Promise<{ accepted: true; runId?: string; action?: SendAgentSignalAccepted['action'] }>;
   } {
+    this.assertNotEditing();
     const settleRunId = async <T>(result: {
       accepted: Promise<SendAgentSignalAccepted<T>>;
     }): Promise<string | undefined> => {
@@ -4992,7 +5207,9 @@ export class Session<TState = unknown> {
       return settled && 'runId' in settled ? settled.runId : undefined;
     };
     const submittedAbortGeneration = this.#abortGeneration;
+    const submittedBrowserGeneration = this.#browserGeneration;
     const assertNotCancelled = () => {
+      this.assertBrowserGeneration(submittedBrowserGeneration);
       if (this.#abortGeneration !== submittedAbortGeneration) {
         // A newer signal may already own the session controller. Reject only
         // this obsolete startup, without aborting that newer run.
@@ -5037,7 +5254,9 @@ export class Session<TState = unknown> {
         : input,
     );
     const signal = submittedWhileWorking ? asInterjection(submitted) : submitted;
+    this.#pendingSignals++;
     const accepted = Promise.resolve().then(async () => {
+      assertNotCancelled();
       const threadId = await this.thread.ensureId({ requestContext: requestContextInput });
 
       const agent = this.machinery.getAgent();
@@ -5162,7 +5381,7 @@ export class Session<TState = unknown> {
       });
 
       assertNotCancelled();
-      const result = agent.sendSignal(signal, {
+      const result = (this.#editSignalDispatch ?? agent.sendSignal.bind(agent))(signal, {
         resourceId: this.identity.getResourceId(),
         threadId,
         ifActive,
@@ -5193,7 +5412,14 @@ export class Session<TState = unknown> {
       return { accepted: true as const, runId: undefined };
     });
 
-    return { id: signal.id, type: signal.type, accepted: accepted.finally(() => abortedStreamTeardown?.cancel()) };
+    return {
+      id: signal.id,
+      type: signal.type,
+      accepted: accepted.finally(() => {
+        this.#pendingSignals--;
+        abortedStreamTeardown?.cancel();
+      }),
+    };
   }
 
   /**
@@ -5203,33 +5429,39 @@ export class Session<TState = unknown> {
     input: SendNotificationSignalInput,
     options: SessionSendNotificationSignalOptions = {},
   ): Promise<SendAgentNotificationSignalResult> {
-    const { ifActive, ifIdle, requestContext: requestContextInput, tracingContext, tracingOptions } = options;
-    const threadId = await this.thread.ensureId({ requestContext: requestContextInput });
+    this.assertNotEditing();
+    this.#pendingSignals++;
+    try {
+      const { ifActive, ifIdle, requestContext: requestContextInput, tracingContext, tracingOptions } = options;
+      const threadId = await this.thread.ensureId({ requestContext: requestContextInput });
 
-    const agent = this.machinery.getAgent();
-    await this.thread.ensureSubscription(threadId, agent, requestContextInput);
+      const agent = this.machinery.getAgent();
+      await this.thread.ensureSubscription(threadId, agent, requestContextInput);
 
-    if (this.run.getRunId() && this.stream.activeRunId()) {
-      return agent.sendNotificationSignal(input, {
+      if (this.run.getRunId() && this.stream.activeRunId()) {
+        return await agent.sendNotificationSignal(input, {
+          resourceId: this.identity.getResourceId(),
+          threadId,
+          ifActive,
+          ifIdle,
+        });
+      }
+
+      const streamOptions = await this.machinery.buildStreamOptions({
+        requestContext: requestContextInput,
+        tracingContext,
+        tracingOptions,
+      });
+
+      return await agent.sendNotificationSignal(input, {
         resourceId: this.identity.getResourceId(),
         threadId,
         ifActive,
-        ifIdle,
+        ifIdle: { ...ifIdle, streamOptions: streamOptions as any },
       });
+    } finally {
+      this.#pendingSignals--;
     }
-
-    const streamOptions = await this.machinery.buildStreamOptions({
-      requestContext: requestContextInput,
-      tracingContext,
-      tracingOptions,
-    });
-
-    return agent.sendNotificationSignal(input, {
-      resourceId: this.identity.getResourceId(),
-      threadId,
-      ifActive,
-      ifIdle: { ...ifIdle, streamOptions: streamOptions as any },
-    });
   }
 
   private async prepareMessageTarget({
@@ -5257,6 +5489,8 @@ export class Session<TState = unknown> {
       tracingContext,
       tracingOptions,
       untilIdle,
+      // Preparing a queued message must not arm or borrow the Session's run.
+      abortSignal: new AbortController().signal,
     });
 
     return {
@@ -5287,6 +5521,7 @@ export class Session<TState = unknown> {
     tracingOptions?: TracingOptions;
     requestContext?: RequestContext;
   }): ReturnType<Session['sendSignal']> {
+    this.assertNotEditing();
     if (id !== undefined) {
       if (!id.trim()) throw new Error('Message id must not be empty');
       const contents = this.createMessageInput({ content, files });
@@ -5441,22 +5676,31 @@ export class Session<TState = unknown> {
     tracingOptions?: TracingOptions;
     requestContext?: RequestContext;
   }): Promise<void> {
+    const browserGeneration = this.#browserGeneration;
+    this.assertBrowserGeneration(browserGeneration);
     const wasActive = this.stream.isActive();
-    const target = await this.prepareMessageTarget({
-      requestContext: requestContextInput,
-      tracingContext,
-      tracingOptions,
-    });
-    const messageInput = this.createMessageInput({ content, files });
-    const providerOptions = withMessageAuthor(undefined, readMessageAuthor(requestContextInput));
-    const result = this.machinery
-      .getAgent()
-      .queueMessage(providerOptions ? { contents: messageInput, providerOptions } : messageInput, target);
+    this.assertNotEditing();
+    this.#pendingSignals++;
+    try {
+      const target = await this.prepareMessageTarget({
+        requestContext: requestContextInput,
+        tracingContext,
+        tracingOptions,
+      });
+      this.assertBrowserGeneration(browserGeneration);
+      const messageInput = this.createMessageInput({ content, files });
+      const providerOptions = withMessageAuthor(undefined, readMessageAuthor(requestContextInput));
+      const result = this.machinery
+        .getAgent()
+        .queueMessage(providerOptions ? { contents: messageInput, providerOptions } : messageInput, target);
 
-    if (wasActive) {
-      await result.accepted;
-    } else {
-      await this.waitForAcceptedRunCompletion(result.accepted, { waitForDelivery: false });
+      if (wasActive) {
+        await result.accepted;
+      } else {
+        await this.waitForAcceptedRunCompletion(result.accepted, { waitForDelivery: false });
+      }
+    } finally {
+      this.#pendingSignals--;
     }
   }
 

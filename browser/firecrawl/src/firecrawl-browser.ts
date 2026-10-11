@@ -4,144 +4,132 @@ import { resolveViewportSize, DEFAULT_BROWSER_VIEWPORT } from '@mastra/core/brow
 import type { BrowserLaunchOptions } from 'agent-browser';
 import { BrowserManager } from 'agent-browser';
 import { Firecrawl } from 'firecrawl';
+import { deleteFirecrawlBrowserSession, FirecrawlSessions } from './firecrawl-sessions';
 import { FirecrawlAgentBrowserThreadManager } from './firecrawl-thread-manager';
 import { resolveCdpWebSocketUrl } from './resolve-cdp';
 import type { FirecrawlBrowserConfig, FirecrawlBrowserSessionOptions } from './types';
 
-function pickSessionOpts(c: FirecrawlBrowserConfig): FirecrawlBrowserSessionOptions {
-  return c.firecrawl ?? {};
-}
-
 function toBaseConfig(config: FirecrawlBrowserConfig): AgentBrowserConfig {
-  const { apiKey: _a, apiUrl: _u, firecrawl: _f, ...rest } = config;
-  return rest;
+  const { apiKey: _a, apiUrl: _u, firecrawl: _f, sessionLifecycle: _l, createThreadManager: _m, ...rest } = config;
+  return rest as AgentBrowserConfig;
 }
 
 /**
- * Mastra browser provider backed by [Firecrawl Browser Sandbox](https://docs.firecrawl.dev/features/browser):
- * provisions remote sessions via API and drives them with the same deterministic tools as {@link AgentBrowser}.
+ * Native hosted browser provider with retryable remote cleanup and provider usage observations.
+ * @khayalek-known-mastra-violation KV-BR-002
  */
 export class FirecrawlBrowser extends AgentBrowser {
   override readonly name = 'FirecrawlBrowser';
   override readonly provider = 'firecrawl/browser-sandbox';
-
-  /** Narrowed from base `MastraBrowser` (`unknown`) — same pattern as {@link AgentBrowser}. */
   declare protected sharedManager: BrowserManager | null;
-
-  private readonly firecrawl: Firecrawl;
+  private readonly sessions: FirecrawlSessions;
   private readonly sessionOpts: FirecrawlBrowserSessionOptions;
-  private sharedFirecrawlSessionId?: string;
+
+  /** Release one recorded provider resource during native workflow recovery; never launches a browser. */
+  static async deleteProviderSession({
+    apiKey,
+    apiUrl,
+    sessionId,
+  }: {
+    apiKey: string;
+    apiUrl?: string;
+    sessionId: string;
+  }) {
+    if (!apiKey) throw new Error('Firecrawl provider cleanup requires an API key');
+    return deleteFirecrawlBrowserSession(new Firecrawl({ apiKey, apiUrl }), sessionId);
+  }
 
   constructor(config: FirecrawlBrowserConfig) {
     const apiKey = config.apiKey ?? process.env.FIRECRAWL_API_KEY;
-    if (!apiKey) {
-      throw new Error('FirecrawlBrowser requires `apiKey` or FIRECRAWL_API_KEY');
-    }
-    const fc = new Firecrawl({ apiKey, apiUrl: config.apiUrl });
-    const sessionOpts = pickSessionOpts(config);
-
+    if (!apiKey) throw new Error('FirecrawlBrowser requires `apiKey` or FIRECRAWL_API_KEY');
+    const firecrawl = new Firecrawl({ apiKey, apiUrl: config.apiUrl });
+    const sessions = new FirecrawlSessions(firecrawl, config.sessionLifecycle);
+    const sessionOpts = config.firecrawl ?? {};
     super({
       ...toBaseConfig(config),
-      createThreadManager: opts =>
-        new FirecrawlAgentBrowserThreadManager({
+      createThreadManager: opts => {
+        const providerOptions = {
           ...opts,
-          firecrawl: fc,
-          resolveWebSocketUrl: url => resolveCdpWebSocketUrl(url, opts.logger),
+          firecrawl,
+          sessions,
+          resolveWebSocketUrl: (url: string) => resolveCdpWebSocketUrl(url, opts.logger),
           sessionOptions: sessionOpts,
-        }),
+        };
+        const manager =
+          config.createThreadManager?.(providerOptions) ?? new FirecrawlAgentBrowserThreadManager(providerOptions);
+        if (!(manager instanceof FirecrawlAgentBrowserThreadManager)) {
+          throw new Error('FirecrawlBrowser requires a Firecrawl thread manager');
+        }
+        return manager;
+      },
     });
-    this.firecrawl = fc;
+    this.sessions = sessions;
     this.sessionOpts = sessionOpts;
   }
 
-  /**
-   * Firecrawl always drives a remote browser over CDP, including per-thread
-   * sessions, so its PID must never be captured (issue #23588).
-   */
   protected override isRemoteThreadBrowser(): boolean {
     return true;
   }
 
   protected override async doLaunch(): Promise<void> {
-    const scope = this.threadManager.getScope();
-    if (scope === 'thread') {
+    if (this.threadManager.getScope() === 'thread') {
       await super.doLaunch();
       return;
     }
-
-    const createRes = await this.firecrawl.browser({
-      ttl: this.sessionOpts.ttl,
-      activityTtl: this.sessionOpts.activityTtl,
-      streamWebView: this.sessionOpts.streamWebView,
-      profile: this.sessionOpts.profile,
-      integration: this.sessionOpts.integration,
-      origin: this.sessionOpts.origin,
-    });
-
-    if (!createRes.success || !createRes.id || !createRes.cdpUrl) {
-      const msg = createRes.error ?? 'Firecrawl browser session creation failed';
-      const err = new Error(`Firecrawl browser(): ${msg}`);
-      if (createRes.id) {
-        try {
-          await this.firecrawl.deleteBrowser(createRes.id);
-        } catch (cleanupErr) {
-          this.logger?.warn?.(`Firecrawl deleteBrowser(${createRes.id}) after failed browser(): ${cleanupErr}`);
-        }
-      }
-      throw err;
-    }
-
-    const sessionId = createRes.id;
+    this.sessions.beginCleanup();
+    await this.sessions.closeAll();
+    await this.prepareBrowserLaunch();
+    const created = await this.sessions.create(this.sessionOpts, this.getCurrentThread());
     this.sharedManager = new BrowserManager();
-
     try {
-      const localConfig = this.config as AgentBrowserConfig;
-      const wsUrl = await resolveCdpWebSocketUrl(createRes.cdpUrl, this.logger);
-
+      const config = this.config as AgentBrowserConfig;
       const launchOptions: BrowserLaunchOptions = {
-        headless: localConfig.headless ?? true,
-        // Firecrawl drives a remote browser, so there is no local window to
-        // match; `'window'` falls back to the default dimensions.
-        viewport: resolveViewportSize(localConfig.viewport) ?? DEFAULT_BROWSER_VIEWPORT,
-        profile: localConfig.profile,
-        executablePath: localConfig.executablePath,
-        storageState: localConfig.storageState,
-        cdpUrl: wsUrl,
+        headless: config.headless ?? true,
+        viewport: resolveViewportSize(config.viewport) ?? DEFAULT_BROWSER_VIEWPORT,
+        profile: config.profile,
+        executablePath: config.executablePath,
+        storageState: config.storageState,
+        cdpUrl: await resolveCdpWebSocketUrl(created.cdpUrl, this.logger),
       };
-
       await this.sharedManager.launch(launchOptions);
-      this.threadManager.setSharedManager(this.sharedManager);
-      // Firecrawl always drives a remote browser over CDP — never capture its
-      // PID (issue #23588); it belongs to Firecrawl's host, not ours.
-      this.setupCloseListenerForSharedScope(this.sharedManager, true);
-      this.sharedFirecrawlSessionId = sessionId;
-    } catch (launchErr) {
+      await this.initializeSharedBrowser(true);
+    } catch (error) {
       try {
-        await this.sharedManager.close();
-      } catch (closeErr) {
-        this.logger?.warn?.(`BrowserManager.close() after failed shared launch: ${closeErr}`);
+        await this.doClose();
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], 'Firecrawl connection and cleanup failed');
       }
-      try {
-        await this.firecrawl.deleteBrowser(sessionId);
-      } catch (delErr) {
-        this.logger?.warn?.(`Firecrawl deleteBrowser(${sessionId}) after failed shared launch: ${delErr}`);
-      }
-      this.sharedManager = null;
-      this.sharedFirecrawlSessionId = undefined;
-      throw launchErr;
+      throw error;
     }
   }
 
   protected override async doClose(): Promise<void> {
-    const sid = this.sharedFirecrawlSessionId;
-    await super.doClose();
-    if (sid) {
-      try {
-        await this.firecrawl.deleteBrowser(sid);
-      } catch (err) {
-        this.logger?.warn?.(`Firecrawl deleteBrowser(${sid}) failed: ${err}`);
-      }
-      this.sharedFirecrawlSessionId = undefined;
+    this.sessions.beginCleanup();
+    let localError: unknown;
+    try {
+      await super.doClose();
+    } catch (error) {
+      localError = error;
     }
+    try {
+      await this.sessions.closeAll();
+    } catch (error) {
+      if (localError) throw new AggregateError([localError, error], 'Firecrawl cleanup failed');
+      throw error;
+    }
+    if (localError) throw localError;
+  }
+
+  override async closeThreadSession(threadId: string): Promise<void> {
+    this.sessions.beginCleanup();
+    await super.closeThreadSession(threadId);
+  }
+
+  async assertCleanupSettled(): Promise<void> {
+    await this.sessions.assertCleanupSettled();
+  }
+
+  ownsProviderSession(sessionId: string): boolean {
+    return this.sessions.owns(sessionId);
   }
 }

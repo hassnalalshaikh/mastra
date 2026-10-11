@@ -4,6 +4,8 @@ import { ErrorCategory, ErrorDomain, MastraError } from '@mastra/core/error';
 import type { MastraMessageV1, MastraDBMessage, StorageThreadType } from '@mastra/core/memory';
 import {
   MemoryStorage,
+  MessageRevisionError,
+  validateMessageRevision,
   normalizePerPage,
   calculatePagination,
   OBSERVATIONAL_MEMORY_TABLE_SCHEMA,
@@ -71,6 +73,7 @@ export const OM_MIGRATION_COLUMNS: string[] = [
 const _omTableSchema: Record<string, Record<string, any>> = OBSERVATIONAL_MEMORY_TABLE_SCHEMA;
 import type {
   StorageResourceType,
+  ReviseThreadMessagesInput,
   StorageListMessagesInput,
   StorageListMessagesByResourceIdInput,
   StorageListMessagesOutput,
@@ -173,6 +176,75 @@ function dedupeMessagesForSave(messages: MastraDBMessage[]): MastraDBMessage[] {
 }
 
 export class MemoryPG extends MemoryStorage {
+  override readonly supportsThreadMessageRevision: boolean = true;
+
+  override async reviseThreadMessages(input: ReviseThreadMessagesInput): Promise<{ removedMessageIds: string[] }> {
+    const threads = getTableName({ indexName: TABLE_THREADS, schemaName: getSchemaName(this.#schema) });
+    const messages = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
+    const observations = getTableName({ indexName: OM_TABLE, schemaName: getSchemaName(this.#schema) });
+    return this.#db.client.tx(async transaction => {
+      const thread = await transaction.oneOrNone<StorageThreadType>(
+        `SELECT * FROM ${threads} WHERE id = $1 FOR UPDATE`,
+        [input.threadId],
+      );
+      const row = await transaction.oneOrNone<MastraDBMessage>(
+        `SELECT id, thread_id AS "threadId", "resourceId", content, role, type, COALESCE("createdAtZ", "createdAt") AS "createdAt" FROM ${messages} WHERE id = $1 FOR UPDATE`,
+        [input.fromMessageId],
+      );
+      const target = row
+        ? { ...row, content: typeof row.content === 'string' ? JSON.parse(row.content) : row.content }
+        : undefined;
+      validateMessageRevision(input, thread, target);
+      const replacement = input.replacement;
+      const collision = await transaction.oneOrNone(`SELECT id FROM ${messages} WHERE id = $1`, [replacement.id]);
+      if (collision) throw new MessageRevisionError('INVALID_INPUT', 'Replacement id already exists');
+      // History's final sort uses JS localeCompare for id ties. Sort the full
+      // locked history by that same routine; database collation can differ.
+      const historyRows = await transaction.manyOrNone(
+        `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId" FROM ${messages} WHERE thread_id = $1 FOR UPDATE`,
+        [input.threadId],
+      );
+      const history = this._sortMessages(
+        historyRows.map(row => this.parseRow(row)),
+        'createdAt',
+        'ASC',
+      );
+      const targetIndex = history.findIndex(message => message.id === input.fromMessageId);
+      const suffixIds = history.slice(targetIndex).map(message => message.id);
+      const removed = await transaction.manyOrNone<{ id: string }>(
+        `DELETE FROM ${messages} WHERE thread_id = $1 AND id = ANY($2::text[]) RETURNING id`,
+        [input.threadId, suffixIds],
+      );
+      const createdAt = toUtcISOString(replacement.createdAt);
+      // No upsert: a colliding replacement id must roll the entire transaction back.
+      await transaction.none(
+        `INSERT INTO ${messages} (id, thread_id, "resourceId", content, role, type, "createdAt", "createdAtZ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          replacement.id,
+          input.threadId,
+          input.resourceId,
+          JSON.stringify(replacement.content),
+          replacement.role,
+          replacement.type ?? 'v2',
+          createdAt,
+          createdAt,
+        ],
+      );
+      const metadata = { ...thread!.metadata };
+      delete metadata.workingMemory;
+      const now = toUtcISOString(new Date());
+      await transaction.none(`UPDATE ${threads} SET metadata = $1, "updatedAt" = $2, "updatedAtZ" = $3 WHERE id = $4`, [
+        JSON.stringify(metadata),
+        now,
+        now,
+        input.threadId,
+      ]);
+      await transaction.none(`DELETE FROM ${observations} WHERE "lookupKey" = $1`, [
+        this.getOMKey(input.threadId, input.resourceId),
+      ]);
+      return { removedMessageIds: removed.map(row => row.id) };
+    });
+  }
   override readonly supportsPartialThreadUpdate = true;
   readonly supportsObservationalMemory = true;
   readonly supportsObservationalMemoryHistorySearch = true;
@@ -1744,6 +1816,10 @@ export class MemoryPG extends MemoryStorage {
 
       const messagesToSave = dedupeMessagesForSave(messages);
       await this.#db.client.tx(async t => {
+        const lockedThreads = getTableName({ indexName: TABLE_THREADS, schemaName: getSchemaName(this.#schema) });
+        // Serialize writes with an atomic correction on the same thread.
+        for (const id of [...threadIds].sort())
+          await t.one(`SELECT id FROM ${lockedThreads} WHERE id = $1 FOR UPDATE`, [id]);
         for (let offset = 0; offset < messagesToSave.length; offset += MAX_MESSAGES_PER_INSERT) {
           const batch = messagesToSave.slice(offset, offset + MAX_MESSAGES_PER_INSERT);
           const values: unknown[] = [];

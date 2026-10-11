@@ -41,7 +41,21 @@ export interface ToolSearchProcessorOptions {
    * Request-scoped search metadata. Called on discovery or when restoring loaded
    * tools, never for an unloaded plain reply. Full schemas resolve on activation.
    */
-  deferredTools?: (args: { requestContext?: RequestContext }) => Promise<Record<string, DeferredTool>>;
+  deferredTools?: (args: {
+    requestContext?: RequestContext;
+    /** Present only with `restoreDeferred: 'known-only'`. Restore must use known metadata without remote discovery. */
+    reason?: 'restore' | 'search' | 'load' | 'execute';
+    /** Native loaded names on restoration, or the selected name on execution. */
+    toolNames?: readonly string[];
+  }) => Promise<Record<string, DeferredTool>>;
+  /**
+   * Restore only declarations already known to the supplier, retaining missing
+   * names in native history for later explicit search/load. The supplier must
+   * not perform remote discovery for reason `restore`; returned declarations
+   * must resolve their exact known schemas without remote reads or waits.
+   * @default 'eager'
+   */
+  restoreDeferred?: 'eager' | 'known-only';
   /** Metadata policy for deferred entries; the ordinary filter still sees full tools only. */
   deferredFilter?: (args: Omit<ToolSearchFilterArgs, 'tool'> & { tool: DeferredTool }) => boolean | Promise<boolean>;
 
@@ -218,6 +232,8 @@ type ToolCatalog = {
   /** Tool ID -> full description, for formatting search results. */
   descriptions: Map<string, string>;
   deferredRead?: Promise<void>;
+  deferredRestore?: Promise<void>;
+  deferredNames?: Set<string>;
 };
 
 function buildToolCatalog(tools: Record<string, Tool<any, any> | DeferredTool>): ToolCatalog {
@@ -273,6 +289,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
   private injectCatalog: boolean;
   private deferredTools?: ToolSearchProcessorOptions['deferredTools'];
   private deferredFilter?: ToolSearchProcessorOptions['deferredFilter'];
+  private restoreDeferred: 'eager' | 'known-only';
   private searchConfig: Required<NonNullable<ToolSearchProcessorOptions['search']>>;
   private filter?: ToolSearchProcessorOptions['filter'];
   private toolPolicy?: ToolPolicy;
@@ -291,6 +308,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
     this.injectCatalog = options.injectCatalog ?? false;
     this.deferredTools = options.deferredTools;
     this.deferredFilter = options.deferredFilter;
+    this.restoreDeferred = options.restoreDeferred ?? 'eager';
     this.filter = options.filter;
     this.toolPolicy = options.toolPolicy;
     this.searchConfig = {
@@ -381,21 +399,54 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
     return lines.join('\n');
   }
 
-  private async ensureDeferredCatalog(catalog: ToolCatalog, requestContext?: RequestContext): Promise<void> {
+  private async ensureDeferredCatalog(
+    catalog: ToolCatalog,
+    requestContext?: RequestContext,
+    reason: 'restore' | 'search' | 'load' | 'execute' = 'search',
+    toolNames?: readonly string[],
+  ): Promise<void> {
     if (!this.deferredTools) return;
-    catalog.deferredRead ??= (async () => {
-      const deferred = await this.deferredTools!({ requestContext });
+    const knownOnly = this.restoreDeferred === 'known-only';
+    const restoring = knownOnly && reason === 'restore';
+    const read = async () => {
+      // A partial restoration must not freeze the catalog used by later native
+      // discovery in this same step. Serialize replacement of this supplier's
+      // entries, keeping all static/request-resolved declarations intact.
+      if (!restoring) await catalog.deferredRestore;
+      let deferred: Record<string, DeferredTool>;
+      try {
+        deferred = await this.deferredTools!(knownOnly ? { requestContext, reason, toolNames } : { requestContext });
+      } catch (error) {
+        if (restoring) return;
+        throw error;
+      }
       for (const [name, tool] of Object.entries(deferred)) {
-        if (name !== tool.id || META_TOOL_NAMES.has(name) || Object.hasOwn(catalog.tools, name)) {
+        if (
+          name !== tool.id ||
+          META_TOOL_NAMES.has(name) ||
+          (Object.hasOwn(catalog.tools, name) && !catalog.deferredNames?.has(name))
+        ) {
           throw new Error(`Invalid or duplicate deferred tool: ${name}`);
         }
       }
-      const expanded = buildToolCatalog({ ...catalog.tools, ...deferred });
+      const retained = Object.fromEntries(
+        Object.entries(catalog.tools).filter(([name]) => !catalog.deferredNames?.has(name)),
+      );
+      const expanded = buildToolCatalog({ ...retained, ...deferred });
       catalog.tools = expanded.tools;
       catalog.index = expanded.index;
       catalog.descriptions = expanded.descriptions;
-    })();
-    await catalog.deferredRead;
+      catalog.deferredNames = new Set(Object.keys(deferred));
+    };
+    if (restoring) {
+      // A full catalog already read by this step is also sufficient to restore.
+      if (catalog.deferredRead) return catalog.deferredRead;
+      catalog.deferredRestore ??= read();
+      await catalog.deferredRestore;
+    } else {
+      catalog.deferredRead ??= read();
+      await catalog.deferredRead;
+    }
   }
 
   private async resolveTool(
@@ -454,7 +505,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
           throw new Error(`Deferred tool request identity changed: ${toolName}`);
         }
         const catalog = this.catalogForStep(undefined);
-        await this.ensureDeferredCatalog(catalog, currentContext);
+        await this.ensureDeferredCatalog(catalog, currentContext, 'execute', [toolName]);
         const current = this.findToolForDynamicName(catalog, toolName);
         if (!current || !(await this.isToolAllowed(current, currentContext, 'active'))) {
           throw new Error(`Deferred tool is no longer authorized: ${toolName}`);
@@ -541,7 +592,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
   ): Promise<Record<string, Tool<any, any>>> {
     const loadedTools: Record<string, Tool<any, any>> = {};
     if ([...loadedNames].some(name => !this.findToolForDynamicName(catalog, name))) {
-      await this.ensureDeferredCatalog(catalog, requestContext);
+      await this.ensureDeferredCatalog(catalog, requestContext, 'restore', [...loadedNames]);
     }
 
     for (const toolName of loadedNames) {
@@ -862,7 +913,7 @@ export class ToolSearchProcessor implements Processor<'tool-search'> {
         dependencyErrors: z.array(z.record(z.string(), z.unknown())).optional(),
       }),
       execute: async ({ toolName, toolNames }) => {
-        await this.ensureDeferredCatalog(catalog, requestContext);
+        await this.ensureDeferredCatalog(catalog, requestContext, 'load', toolNames ?? (toolName ? [toolName] : []));
         // Determine which tools to load
         let toLoad: string[];
         const toolNamesProvided = toolNames !== undefined;

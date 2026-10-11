@@ -1,8 +1,8 @@
 ---
-title: "Reference: ToolSearchProcessor | Processors"
-description: "The ToolSearchProcessor is an input processor that enables runtime-defined tool discovery and loading."
+title: 'Reference: ToolSearchProcessor | Processors'
+description: 'The ToolSearchProcessor is an input processor that enables runtime-defined tool discovery and loading.'
 packages:
-  - "@mastra/core"
+  - '@mastra/core'
 ---
 
 # ToolSearchProcessor
@@ -47,6 +47,14 @@ const toolSearch = new ToolSearchProcessor({
             description:
               'All tools that can be searched and loaded dynamically. These tools are not immediately available to the agent — they must be discovered via search and loaded on demand.',
             isOptional: false,
+          },
+          {
+            name: 'restoreDeferred',
+            type: "'eager' | 'known-only'",
+            description:
+              "With 'known-only', the deferred supplier receives a reason and native tool names. Restoration must return only already-known declarations without remote discovery. Missing schemas are withheld while their names remain in loaded history; explicit search/load can refresh them later in the same step.",
+            isOptional: true,
+            default: "'eager'",
           },
           {
             name: 'includeResolvedTools',
@@ -241,6 +249,14 @@ const agent = new Agent({
 Each request is indexed on its own, so a tool loaded by one caller never resolves to another caller's instance of the same tool name.
 
 This option applies to every tool resolved for the request, including memory, workspace, skill, and browser tools. Only the `search_tools` and `load_tool` meta-tools stay in the prompt, so any tool the agent relies on implicitly must be found through search before it can be called.
+
+## Deferred history restoration
+
+If your deferred metadata source can be slow or unavailable, set `restoreDeferred: 'known-only'`. The `deferredTools` callback then receives `reason` (`restore`, `search`, `load`, or `execute`) and optional `toolNames`. For `restore`, return only exact declarations already known for that request identity whose `resolve` callback returns a complete, known tool and schema without remote reads or waits. Otherwise omit the entry. Do not fetch a remote inventory or invent a schema. Static tools continue to work, and a missing deferred tool keeps its name in native loaded history.
+
+Explicit search or load refreshes the partial restoration view, including newly added tools, even within the same step. The refresh replaces only this supplier's earlier deferred entries. Execution still checks the current request identity, binding, input schema, approval requirement, and access policy before dispatch.
+
+The default is `eager`: existing suppliers receive only `{ requestContext }` and retain their current restoration behavior. This option does not impose a timeout on a supplier that ignores `reason`, and it does not authorize cached prices or skip execution checks. A cold tool with no known schema must be discovered and loaded before use.
 
 ## Extended usage example
 

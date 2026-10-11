@@ -1,4 +1,5 @@
 import type { MastraMessageContentV2 } from '../../../agent';
+import { isUserAuthoredMessage } from '../../../agent/signals';
 import type { MastraDBMessage, StorageThreadType } from '../../../memory/types';
 import type {
   StorageResourceType,
@@ -36,7 +37,59 @@ const SAFE_METADATA_KEY_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const MAX_METADATA_KEY_LENGTH = 128;
 const DISALLOWED_METADATA_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
+export interface ReviseThreadMessagesInput {
+  threadId: string;
+  resourceId: string;
+  fromMessageId: string;
+  replacement: MastraDBMessage;
+}
+
+export class MessageRevisionError extends Error {
+  constructor(
+    readonly code: 'UNSUPPORTED' | 'NOT_FOUND' | 'INVALID_INPUT' | 'BUSY',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'MessageRevisionError';
+  }
+}
+
+/** Validate before any mutation, including direct storage callers. */
+export function validateMessageRevision(
+  input: ReviseThreadMessagesInput,
+  thread: StorageThreadType | null,
+  target?: MastraDBMessage,
+): void {
+  const { threadId, resourceId, replacement } = input;
+  if (
+    !thread ||
+    thread.resourceId !== resourceId ||
+    !target ||
+    target.threadId !== threadId ||
+    target.resourceId !== resourceId
+  ) {
+    throw new MessageRevisionError('NOT_FOUND', 'Saved user message not found');
+  }
+  if (
+    !isUserAuthoredMessage(target) ||
+    !isUserAuthoredMessage(replacement) ||
+    replacement.id === target.id ||
+    !replacement.id ||
+    replacement.threadId !== threadId ||
+    replacement.resourceId !== resourceId ||
+    !Number.isFinite(replacement.createdAt.getTime())
+  ) {
+    throw new MessageRevisionError('INVALID_INPUT', 'Revision requires a new owned user input');
+  }
+}
+
 export abstract class MemoryStorage extends StorageDomain {
+  readonly supportsThreadMessageRevision: boolean = false;
+
+  /** Atomically replace a saved user input and its chronological suffix. No delete/save fallback. */
+  async reviseThreadMessages(_input: ReviseThreadMessagesInput): Promise<{ removedMessageIds: string[] }> {
+    throw new MessageRevisionError('UNSUPPORTED', 'This memory store does not support atomic message revision');
+  }
   /**
    * Whether this storage adapter supports Observational Memory.
    * Adapters that implement OM methods should set this to true.
