@@ -259,8 +259,8 @@ describe('AgentController signal messages', () => {
     );
     const createdAt = new Date(1000);
     await session.recordMessage({ id: 'first', role: 'user', content: 'Hello', createdAt });
-    await session.recordMessage({ id: 'second', role: 'user', content: 'Hello', createdAt });
-    await session.recordMessage({ id: 'answer', role: 'assistant', content: 'Welcome', createdAt });
+    await session.recordMessage({ id: 'second', role: 'user', content: 'Hello', createdAt: new Date(1001) });
+    await session.recordMessage({ id: 'answer', role: 'assistant', content: 'Welcome', createdAt: new Date(1002) });
     const messages = await session.thread.listActiveMessages();
     expect(messages.map(message => message.id)).toEqual(['first', 'second', 'answer']);
     expect(messages[0]?.createdAt).toEqual(createdAt);
@@ -502,7 +502,11 @@ describe('AgentController signal messages', () => {
 
     expect(input).toEqual([
       { type: 'text', text: 'Review these attachments.' },
-      { type: 'text', text: '[File: snippet.ts]\n```\nconsole.log("hi");\n```', providerOptions: fileInput('snippet.ts') },
+      {
+        type: 'text',
+        text: '[File: snippet.ts]\n```\nconsole.log("hi");\n```',
+        providerOptions: fileInput('snippet.ts'),
+      },
       {
         type: 'file',
         data: 'data:application/octet-stream;base64,AAEC',
