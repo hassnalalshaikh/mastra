@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { MockMemory } from '../../memory/mock';
 import { ToolSearchProcessor } from '../../processors/processors/tool-search';
@@ -97,5 +97,50 @@ describe('ToolSearchProcessor storage: context — resume tool rebuild', () => {
     });
 
     expect(tools.weather).toBeUndefined();
+  });
+
+  it.each([false, true])('restores persisted deferred history without inventory reads (known=%s)', async known => {
+    const memory = new MockMemory();
+    await seedThread(memory, 'deferred-thread', 'user-1', true);
+    const inventory = vi.fn(async () => new Promise<never>(() => {}));
+    const supplier = vi.fn(async ({ reason }: { reason?: string }) => {
+      if (reason !== 'restore') return inventory();
+      return known ? { weather: { id: 'weather', description: 'Get weather', resolve: async () => weather } } : {};
+    });
+    const processor = new ToolSearchProcessor({
+      tools: {},
+      storage: 'context',
+      restoreDeferred: 'known-only',
+      deferredTools: supplier,
+    });
+    const agent = new Agent({
+      id: 'deferred-history-agent',
+      name: 'deferred-history-agent',
+      instructions: 'test',
+      model: 'openai/gpt-4o-mini',
+      memory,
+      inputProcessors: [processor],
+    });
+    const requestContext = new RequestContext();
+    const tools = await agent.getToolsForExecution({
+      threadId: 'deferred-thread',
+      resourceId: 'user-1',
+      requestContext,
+    });
+    expect(Boolean(tools.weather)).toBe(known);
+    expect(inventory).not.toHaveBeenCalled();
+    expect(supplier).toHaveBeenCalledExactlyOnceWith({ requestContext, reason: 'restore', toolNames: ['weather'] });
+    if (known)
+      expect(tools.weather.parameters.jsonSchema).toEqual({
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { city: { type: 'string' } },
+        required: ['city'],
+        additionalProperties: false,
+      });
+    // Restoration did not rewrite persisted tool history or fabricate a cold schema.
+    const messages = await memory.recall({ threadId: 'deferred-thread', resourceId: 'user-1' });
+    expect(JSON.stringify(messages.messages)).toContain('load_tool');
+    expect(JSON.stringify(messages.messages)).toContain('weather');
   });
 });
