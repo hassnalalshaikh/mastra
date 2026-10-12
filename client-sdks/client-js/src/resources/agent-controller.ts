@@ -316,10 +316,10 @@ export interface SubscribeAgentControllerSessionOptions {
   onError?: (error: unknown) => void;
   /**
    * Called each time the stream is re-established after a drop (reconnect
-   * only). Every stream starts with a `display_state_changed` snapshot of the
-   * current picture, but the server does NOT replay other events missed while
-   * disconnected: re-read messages completed during the gap from here (e.g.
-   * `session.listMessages()`).
+   * only). A stream opened while work is live starts with a
+   * `display_state_changed` snapshot of the current picture, but the server does
+   * NOT replay other events missed while disconnected: re-sync from here (e.g.
+   * `session.state()` and `session.listMessages()`).
    */
   onReconnect?: () => void;
   /**

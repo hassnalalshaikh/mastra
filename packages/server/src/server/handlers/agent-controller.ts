@@ -660,11 +660,16 @@ export const STREAM_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
             }
           };
 
-          // Every stream starts from the current picture, then carries the
-          // changes. A client that opens or re-opens a stream mid-run (a page
-          // load, a reconnect) shows the run as it is now: whether it is
-          // running, the reply so far, active tools and pending approvals.
-          send({ type: 'display_state_changed', displayState: session.displayState.get() });
+          // A stream opened while work is live starts from the current
+          // picture, then carries the changes. A client that opens or re-opens
+          // a stream mid-run (a page load, a reconnect) shows the run as it is
+          // now: the reply so far, active tools and pending approvals. An idle
+          // session sends nothing extra, so a client about to send its first
+          // message never receives an idle frame after subscribing.
+          const current = session.displayState.get();
+          if (current.isRunning || current.pendingApprovals.size > 0 || current.pendingSuspensions.size > 0) {
+            send({ type: 'display_state_changed', displayState: current });
+          }
           unsubscribe = session.subscribe(send);
 
           const abortCleanup = () => cleanup(controller);

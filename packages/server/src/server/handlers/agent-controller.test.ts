@@ -1095,6 +1095,29 @@ describe('agent-controller routes', () => {
       });
     });
 
+    it('sends no extra frame when a stream opens on an idle session', async () => {
+      const controller = mastra.getAgentController('code')!;
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'user-idle', id: 'user-idle', ownerId: 'code' });
+      const stream = (await STREAM_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-idle',
+        abortSignal: new AbortController().signal,
+      } as any)) as ReadableStream<unknown>;
+      const reader = stream.getReader();
+      session.emit({ type: 'agent_start' } as any);
+
+      let first: any;
+      for (let i = 0; i < 10 && first === undefined; i++) {
+        const { value } = await reader.read();
+        if (value && typeof value === 'object' && (value as any).type !== 'workspace_status_changed') first = value;
+      }
+      await reader.cancel();
+
+      expect(first.type).toBe('agent_start');
+    });
+
     it('starts a stream opened mid-run with the current picture before any change', async () => {
       const controller = mastra.getAgentController('code')!;
       await controller.init();
