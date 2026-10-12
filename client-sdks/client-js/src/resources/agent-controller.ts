@@ -20,7 +20,7 @@ export interface AgentControllerCommandAck {
  * to a run (or was never queued), so nothing changed.
  */
 /**
- * The ack of sendMessage/steer/followUp. `messageId` is the id the server gave
+ * The ack of sendMessage/followUp. `messageId` is the id the server gave
  * the message: its saved user message, stream events and (for a follow-up)
  * its queue row carry it. Older servers answer `{ ok: true }` only.
  */
@@ -762,20 +762,12 @@ export class AgentControllerSession extends BaseResource {
     });
   }
 
-  /** Stop the current run and send this message next. */
-  async steer(
-    message: string | { content: string; files?: AgentControllerMessageFile[] },
-    options?: AgentControllerRequestOptions,
-  ): Promise<AgentControllerMessageAck> {
-    const { content, files } = typeof message === 'string' ? { content: message, files: undefined } : message;
+  /** Inject a message into the in-flight run without starting a new turn. */
+  async steer(message: string, options?: AgentControllerRequestOptions): Promise<void> {
     const requestContext = parseClientRequestContext(options?.requestContext);
-    return this.request<AgentControllerMessageAck>(this.url(`${this.base()}/steer`), {
+    await this.request(this.url(`${this.base()}/steer`), {
       method: 'POST',
-      body: {
-        message: content,
-        ...(files?.length ? { files } : {}),
-        ...(requestContext ? { requestContext } : {}),
-      },
+      body: { message, ...(requestContext ? { requestContext } : {}) },
     });
   }
 
@@ -945,30 +937,6 @@ export class AgentControllerSession extends BaseResource {
         method: 'DELETE',
         // Not idempotent: a replay after a lost response would answer not_queued
         // and misreport an applied removal as ignored.
-        retries: 0,
-      },
-    );
-  }
-
-  /**
-   * Steer the current run with one queued follow-up, by the id listed in
-   * `displayState.queuedFollowUpItems`, in one call: the server takes it off
-   * the queue and sends it as the steering message (files included). A
-   * follow-up that is no longer waiting answers `{ ok: false, reason: 'not_queued' }`
-   * and nothing is aborted or sent. The reply streams over the session stream.
-   */
-  async steerFollowUp(
-    followUpId: string,
-    options?: AgentControllerRequestOptions,
-  ): Promise<AgentControllerFollowUpRemoveAck> {
-    const requestContext = parseClientRequestContext(options?.requestContext);
-    return this.request<AgentControllerFollowUpRemoveAck>(
-      this.url(`${this.base()}/follow-up/${encodeURIComponent(followUpId)}/steer`),
-      {
-        method: 'POST',
-        body: requestContext ? { requestContext } : {},
-        // Not idempotent: a replay after a lost response would answer not_queued
-        // and misreport a steer that already happened as refused.
         retries: 0,
       },
     );

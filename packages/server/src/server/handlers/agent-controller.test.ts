@@ -30,7 +30,6 @@ import {
   STEER_AGENT_CONTROLLER_SESSION_ROUTE,
   FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
   REMOVE_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
-  STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
   AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE,
   AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE,
 } from './agent-controller';
@@ -490,12 +489,7 @@ describe('agent-controller routes', () => {
         requestContext,
       } as any);
 
-      expect(spy).toHaveBeenCalledWith({
-        id: expect.any(String),
-        content: 'change course',
-        files: undefined,
-        requestContext,
-      });
+      expect(spy).toHaveBeenCalledWith({ content: 'change course', requestContext });
     });
 
     it('forwards requestContext to session.followUp', async () => {
@@ -519,26 +513,26 @@ describe('agent-controller routes', () => {
       });
     });
 
-    // 1.74 port of the fork's attached steer/follow-up case: 1.74 acknowledges these
-    // commands and runs them as background session work, so a later refusal is an
+    // 1.74 port of the fork's attached follow-up case: 1.74 acknowledges this
+    // command and runs it as background session work, so a later refusal is an
     // error event (covered above), not a rejected route.
-    it.each([
-      ['steer', STEER_AGENT_CONTROLLER_SESSION_ROUTE],
-      ['followUp', FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE],
-    ] as const)('%s validates and forwards files', async (method, route) => {
-      const session = await getRouteSession(`attached-${method}`);
-      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
-      expect(route.bodySchema!.safeParse({ message: '', files }).success).toBe(true);
-      expect(
-        route.bodySchema!.safeParse({ message: '', files: [{ ...files[0], data: 'a'.repeat(14 * 1024 * 1024 + 1) }] })
-          .success,
-      ).toBe(false);
-      const spy = vi.spyOn(session, method).mockResolvedValue(undefined);
-      await expect(
-        route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
-      ).resolves.toEqual({ ok: true, messageId: expect.any(String) });
-      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ content: '', files }));
-    });
+    it.each([['followUp', FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE]] as const)(
+      '%s validates and forwards files',
+      async (method, route) => {
+        const session = await getRouteSession(`attached-${method}`);
+        const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+        expect(route.bodySchema!.safeParse({ message: '', files }).success).toBe(true);
+        expect(
+          route.bodySchema!.safeParse({ message: '', files: [{ ...files[0], data: 'a'.repeat(14 * 1024 * 1024 + 1) }] })
+            .success,
+        ).toBe(false);
+        const spy = vi.spyOn(session, method).mockResolvedValue(undefined);
+        await expect(
+          route.handler({ mastra, controllerId: 'code', resourceId: `attached-${method}`, message: '', files } as any),
+        ).resolves.toEqual({ ok: true, messageId: expect.any(String) });
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({ content: '', files }));
+      },
+    );
 
     it('removes one queued follow-up by id', async () => {
       const session = await getRouteSession('user-remove-follow-up');
@@ -582,101 +576,6 @@ describe('agent-controller routes', () => {
       } as any);
 
       expect(res).toEqual({ ok: false, reason: 'not_queued' });
-    });
-
-    it('steers with one queued follow-up by id in one call and acks before the turn ends', async () => {
-      const session = await getRouteSession('user-steer-follow-up');
-      let settle!: () => void;
-      const delivery = new Promise<void>(resolve => (settle = resolve));
-      const spy = vi.spyOn(session, 'steerFollowUp').mockReturnValue({ ok: true, delivery });
-      const steer = vi.spyOn(session, 'steer');
-      const removeFollowUp = vi.spyOn(session, 'removeFollowUp');
-      const requestContext = makeRequestContext();
-
-      const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-steer-follow-up',
-        followUpId: 'follow-up-9-steer',
-        requestContext,
-      } as any);
-
-      expect(res).toEqual({ ok: true });
-      expect(spy).toHaveBeenCalledWith({ id: 'follow-up-9-steer', requestContext });
-      expect(spy).toHaveBeenCalledTimes(1);
-      // One native command: the route never removes and re-sends on its own.
-      expect(removeFollowUp).not.toHaveBeenCalled();
-      expect(steer).not.toHaveBeenCalled();
-      expect(STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.responseSchema!.safeParse(res).success).toBe(true);
-      settle();
-    });
-
-    it('answers not_queued and steers nothing when the follow-up is no longer waiting', async () => {
-      const session = await getRouteSession('user-steer-drained-follow-up');
-      vi.spyOn(session, 'steerFollowUp').mockReturnValue({ ok: false, reason: 'not_queued' });
-      const abort = vi.spyOn(session, 'abort');
-
-      const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-steer-drained-follow-up',
-        followUpId: 'follow-up-10-drained',
-      } as any);
-
-      expect(res).toEqual({ ok: false, reason: 'not_queued' });
-      expect(abort).not.toHaveBeenCalled();
-      expect(STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.responseSchema!.safeParse(res).success).toBe(true);
-    });
-
-    it('answers not_queued for a steer by an id the real session never queued', async () => {
-      const session = await getRouteSession('user-steer-unknown-follow-up');
-      const abort = vi.spyOn(session, 'abort');
-
-      const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-steer-unknown-follow-up',
-        followUpId: 'follow-up-never-queued',
-      } as any);
-
-      expect(res).toEqual({ ok: false, reason: 'not_queued' });
-      expect(abort).not.toHaveBeenCalled();
-    });
-
-    it('still acks, logs, and emits an error event when the steered follow-up fails to deliver', async () => {
-      const session = await getRouteSession('user-steer-follow-up-fails');
-      const failure = new Error('signal failed before stream started');
-      const delivery = Promise.reject(failure);
-      vi.spyOn(session, 'steerFollowUp').mockReturnValue({ ok: true, delivery });
-      const errorLog = vi.spyOn(mastra.getLogger(), 'error').mockImplementation(() => {});
-      const events: any[] = [];
-      const unsubscribe = session.subscribe(event => {
-        if (event.type === 'error') events.push(event);
-      });
-      const unhandled: unknown[] = [];
-      const onUnhandled = (reason: unknown) => unhandled.push(reason);
-      process.on('unhandledRejection', onUnhandled);
-      try {
-        const res = await STEER_FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE.handler({
-          mastra,
-          controllerId: 'code',
-          resourceId: 'user-steer-follow-up-fails',
-          followUpId: 'follow-up-11-fails',
-        } as any);
-        expect(res).toEqual({ ok: true });
-        await new Promise(resolve => setTimeout(resolve, 0));
-        await new Promise(resolve => setTimeout(resolve, 0));
-        expect(unhandled).toEqual([]);
-        expect(errorLog).toHaveBeenCalledWith(
-          expect.stringContaining('steerFollowUp'),
-          expect.objectContaining({ operation: 'steerFollowUp', error: failure }),
-        );
-        expect(events).toEqual([expect.objectContaining({ type: 'error', error: failure })]);
-      } finally {
-        process.off('unhandledRejection', onUnhandled);
-        unsubscribe();
-        errorLog.mockRestore();
-      }
     });
 
     it('forwards requestContext to session.respondToToolApproval', async () => {

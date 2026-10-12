@@ -40,8 +40,8 @@ import type { SubmitPlanResumeData } from '../tools/builtin/submit-plan';
 import { safeStringify } from '../utils';
 import { Workspace } from '../workspace';
 
-import { SessionStartupCancelledError } from './errors';
 import { attachmentInputOptions } from './attachment-input';
+import { SessionStartupCancelledError } from './errors';
 import { readMessageAuthor, withMessageAuthor } from './message-author';
 import { SessionRunEngine } from './session-run-engine';
 import { LiveToolCompletionProjector } from './tool-completion-display';
@@ -63,7 +63,6 @@ import type {
   TokenUsage,
   ToolCategory,
   QueuedFollowUpItem,
-  SteerFollowUpResult,
 } from './types';
 
 export const SUSPENDED_RUN_AGENT_KEY = createRunScopeKey<Agent>('agent-controller.suspendedRunAgent');
@@ -851,19 +850,19 @@ export class SessionThread {
         updatedAt: now,
       };
 
-    const currentStateModel = session.model.get();
-    const currentMode = session.mode.resolve();
-    const modelId = currentStateModel || currentMode.defaultModelId;
+      const currentStateModel = session.model.get();
+      const currentMode = session.mode.resolve();
+      const modelId = currentStateModel || currentMode.defaultModelId;
 
-    const metadata: Record<string, unknown> = {};
-    if (modelId) {
-      metadata.currentModelId = modelId;
-      metadata[MODEL_PERSISTENCE_VERSION_KEY] = MODEL_PERSISTENCE_VERSION;
-    }
+      const metadata: Record<string, unknown> = {};
+      if (modelId) {
+        metadata.currentModelId = modelId;
+        metadata[MODEL_PERSISTENCE_VERSION_KEY] = MODEL_PERSISTENCE_VERSION;
+      }
 
-    // Stamp the session's scope so thread selection can filter listings back to
-    // it (e.g. a `projectPath` per git worktree).
-    Object.assign(metadata, session.getThreadScope());
+      // Stamp the session's scope so thread selection can filter listings back to
+      // it (e.g. a `projectPath` per git worktree).
+      Object.assign(metadata, session.getThreadScope());
 
       // Acquire lock on new thread before releasing old one.
       // If acquire fails, attempt to re-acquire the old lock before rethrowing.
@@ -927,15 +926,15 @@ export class SessionThread {
         }
       }
 
-    this.set({ threadId: thread.id });
+      this.set({ threadId: thread.id });
 
-    if (modelId && !currentStateModel) {
-      session.model.set({ modelId });
-    }
+      if (modelId && !currentStateModel) {
+        session.model.set({ modelId });
+      }
 
-    session.resetTokenUsage();
-    session.emit({ type: 'thread_created', thread });
-    await this.ensureCurrentSubscription(requestContext);
+      session.resetTokenUsage();
+      session.emit({ type: 'thread_created', thread });
+      await this.ensureCurrentSubscription(requestContext);
 
       return thread;
     } finally {
@@ -1018,7 +1017,7 @@ export class SessionThread {
         throw new Error('Memory is not configured on this AgentController');
       }
 
-    const clonedThread = await store.cloneThread({ sourceThreadId, resourceId, title, metadata, requestContext });
+      const clonedThread = await store.cloneThread({ sourceThreadId, resourceId, title, metadata, requestContext });
 
       // Acquire lock on new thread before releasing old one
       const oldThreadId = this.#threadId;
@@ -1038,12 +1037,12 @@ export class SessionThread {
         await store.releaseLock(oldThreadId);
       }
 
-    this.cleanupSubscription();
-    this.set({ threadId: clonedThread.id });
-    await this.loadMetadata();
-    session.resetTokenUsage();
-    session.emit({ type: 'thread_created', thread: clonedThread });
-    await this.ensureCurrentSubscription(requestContext);
+      this.cleanupSubscription();
+      this.set({ threadId: clonedThread.id });
+      await this.loadMetadata();
+      session.resetTokenUsage();
+      session.emit({ type: 'thread_created', thread: clonedThread });
+      await this.ensureCurrentSubscription(requestContext);
 
       return clonedThread;
     } finally {
@@ -1068,14 +1067,14 @@ export class SessionThread {
       session.abort({ localOnly: true });
       this.cleanupSubscription();
 
-    // Acquire lock on new thread before releasing old one.
-    // Lock operations must be adjacent (no intermediate awaits) so callers
-    // can rely on a single microtask tick to observe both acquire and release.
-    await store?.acquireLock(threadId);
-    const previousThreadId = this.#threadId;
-    if (previousThreadId) {
-      await store?.releaseLock(previousThreadId);
-    }
+      // Acquire lock on new thread before releasing old one.
+      // Lock operations must be adjacent (no intermediate awaits) so callers
+      // can rely on a single microtask tick to observe both acquire and release.
+      await store?.acquireLock(threadId);
+      const previousThreadId = this.#threadId;
+      if (previousThreadId) {
+        await store?.releaseLock(previousThreadId);
+      }
 
       // Verify the thread exists and belongs to this session's resourceId before
       // binding to it, so a session can never switch onto a thread owned by
@@ -1095,9 +1094,9 @@ export class SessionThread {
         }
       }
 
-    this.set({ threadId });
+      this.set({ threadId });
 
-    await this.loadMetadata();
+      await this.loadMetadata();
 
       if (emitEvent) {
         session.emit({ type: 'thread_changed', threadId, previousThreadId });
@@ -1116,12 +1115,12 @@ export class SessionThread {
       const store = this.#store;
       if (!store?.hasStorage()) return;
 
-    // Only allow deleting threads this session owns.
-    await this.#requireOwnedThread({ threadId });
+      // Only allow deleting threads this session owns.
+      await this.#requireOwnedThread({ threadId });
 
-    const isDeletingCurrentThread = this.#threadId === threadId;
+      const isDeletingCurrentThread = this.#threadId === threadId;
 
-    await store.deleteThread({ threadId, requestContext });
+      await store.deleteThread({ threadId, requestContext });
 
       if (isDeletingCurrentThread) {
         try {
@@ -4958,8 +4957,9 @@ export class Session<TState = unknown> {
     if (!files?.length) return content;
 
     const fileParts = files.flatMap((f): Exclude<AgentSignalContents, string> => {
-      const reference = f.source ? [{ type: 'text' as const, text: f.source,
-        providerOptions: attachmentInputOptions('source', f.filename) }] : [];
+      const reference = f.source
+        ? [{ type: 'text' as const, text: f.source, providerOptions: attachmentInputOptions('source', f.filename) }]
+        : [];
       const isText = f.mediaType.startsWith('text/') || f.mediaType === 'application/json';
       if (isText) {
         let textContent = f.data;
@@ -5660,20 +5660,9 @@ export class Session<TState = unknown> {
   }
 
   /** Abort the current run and send steering input without clearing queued follow-ups. */
-  async steer({
-    id,
-    content,
-    files,
-    requestContext,
-  }: {
-    /** The message id; the saved user message and its stream events carry it. */
-    id?: string;
-    content: string;
-    files?: Array<{ data: string; mediaType: string; filename?: string; source?: string }>;
-    requestContext?: RequestContext;
-  }): Promise<void> {
+  async steer({ content, requestContext }: { content: string; requestContext?: RequestContext }): Promise<void> {
     this.abort();
-    await this.sendMessage({ id, content, files, requestContext });
+    await this.sendMessage({ content, requestContext });
   }
 
   ensureFollowUpBinding(agent: Agent, resourceId: string, threadId: string) {
@@ -5782,31 +5771,6 @@ export class Session<TState = unknown> {
     // nothing changed there (the item had already left the queue).
     this.emit({ type: 'follow_up_queued', count: this.#queuedFollowUpCount, items: this.followUps.list() });
     return cancelledSignalIds.length > 0;
-  }
-
-  /**
-   * Steer with one queued follow-up, by the id a UI read from
-   * `displayState.queuedFollowUpItems`, in one step: the follow-up leaves the
-   * queue and becomes the steering message (with its files), so it can neither
-   * run twice nor be lost between a remove and a steer.
-   *
-   * A follow-up that is no longer waiting (its run is already starting, it was
-   * already handed to a run, or this Session never queued it) answers
-   * `{ ok: false, reason: 'not_queued' }`: nothing is aborted and nothing is sent.
-   * Otherwise `delivery` settles like `steer()`.
-   */
-  steerFollowUp({ id, requestContext }: { id: string; requestContext?: RequestContext }): SteerFollowUpResult {
-    const item = this.#queuedFollowUps.get(id);
-    if (!item) return { ok: false, reason: 'not_queued' };
-    const { cancelledSignalIds } = item.agent.cancelQueuedMessages({
-      resourceId: item.resourceId,
-      threadId: item.threadId,
-      queueOwnerId: id,
-      waitingOnly: true,
-    });
-    if (cancelledSignalIds.length === 0) return { ok: false, reason: 'not_queued' };
-    this.#dropFollowUp(id);
-    return { ok: true, delivery: this.steer({ id, content: item.content, files: item.files, requestContext }) };
   }
 
   /** Queue a follow-up through the Agent runtime, or send it immediately while idle. */

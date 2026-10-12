@@ -100,20 +100,17 @@ describe('AgentController Resource', () => {
     expect(JSON.parse(init.body as string)).toEqual({ message: 'hello' });
   });
 
-  it.each(['followUp', 'steer'] as const)(
-    '%s forwards attached-only messages and text through the normal command route',
-    async method => {
-      const session = client.getAgentController('code').session('user-1');
-      const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
-      mockJson({ ok: true });
-      await session[method]({ content: '', files });
-      expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: '', files });
-      expect(lastCall()[0]).toContain(method === 'steer' ? '/steer' : '/follow-up');
-      mockJson({ ok: true });
-      await session[method]('Still supports text');
-      expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: 'Still supports text' });
-    },
-  );
+  it('followUp forwards attached-only messages and text through the normal command route', async () => {
+    const session = client.getAgentController('code').session('user-1');
+    const files = [{ data: 'https://files.example/checked.png', mediaType: 'image/png', filename: 'checked.png' }];
+    mockJson({ ok: true });
+    await session.followUp({ content: '', files });
+    expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: '', files });
+    expect(lastCall()[0]).toContain('/follow-up');
+    mockJson({ ok: true });
+    await session.followUp('Still supports text');
+    expect(JSON.parse(lastCall()[1].body as string)).toEqual({ message: 'Still supports text' });
+  });
 
   it('sends a message with file attachments', async () => {
     mockJson({ ok: true });
@@ -243,44 +240,12 @@ describe('AgentController Resource', () => {
     expect((global.fetch as any).mock.calls).toHaveLength(1);
   });
 
-  it('returns the message id the server gave a send, a steer and a follow-up', async () => {
+  it('returns the message id the server gave a send and a follow-up', async () => {
     const session = client.getAgentController('code').session('user-1');
     mockJson({ ok: true, messageId: 'm-send' });
     await expect(session.sendMessage('hi')).resolves.toEqual({ ok: true, messageId: 'm-send' });
-    mockJson({ ok: true, messageId: 'm-steer' });
-    await expect(session.steer('now')).resolves.toEqual({ ok: true, messageId: 'm-steer' });
     mockJson({ ok: true, messageId: 'm-follow' });
     await expect(session.followUp('later')).resolves.toEqual({ ok: true, messageId: 'm-follow' });
-  });
-
-  it('steers with a queued follow-up by id in one POST and returns the ack', async () => {
-    mockJson({ ok: true });
-    await expect(client.getAgentController('code').session('user-1').steerFollowUp('follow-up-7/abc')).resolves.toEqual(
-      { ok: true },
-    );
-    const [url, init] = lastCall();
-    expect(url).toBe(
-      'http://localhost:4111/api/agent-controller/code/sessions/user-1/follow-up/follow-up-7%2Fabc/steer',
-    );
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body)).toEqual({});
-
-    mockJson({ ok: false, reason: 'not_queued' });
-    await expect(client.getAgentController('code').session('user-1').steerFollowUp('drained-1')).resolves.toEqual({
-      ok: false,
-      reason: 'not_queued',
-    });
-
-    mockJson({ ok: true });
-    const requestContext = { userId: 'u-42' };
-    await client.getAgentController('code').session('user-1').steerFollowUp('queued-2', { requestContext });
-    expect(JSON.parse(lastCall()[1].body as string)).toEqual({ requestContext });
-  });
-
-  it('does not replay a follow-up steer after a failed response', async () => {
-    (global.fetch as any).mockResolvedValue(new Response('boom', { status: 500, statusText: 'Internal Server Error' }));
-    await expect(client.getAgentController('code').session('user-1').steerFollowUp('queued-1')).rejects.toThrow();
-    expect((global.fetch as any).mock.calls).toHaveLength(1);
   });
 
   it('reads session state', async () => {

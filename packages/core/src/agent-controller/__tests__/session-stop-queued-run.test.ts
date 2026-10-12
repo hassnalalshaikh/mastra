@@ -114,29 +114,5 @@ describe.each([{ durable: false }, { durable: true }])(
         await controller.destroy();
       }
     }, 20_000);
-
-    it('is cut by Send now: the queued run is aborted and the steered message runs next', async () => {
-      const { controller, session, aborted, prompts, finish } = await startQueueDrainedRun(
-        `steer-queued-${durable}`,
-        durable,
-      );
-      try {
-        await session.followUp({ content: 'Answer this one right now.' });
-        const [item] = session.displayState.get().queuedFollowUpItems;
-        const result = session.steerFollowUp({ id: item!.id });
-        expect(result.ok).toBe(true);
-        if (!result.ok) return;
-        void result.delivery.catch(() => {});
-        await vi.waitFor(() => expect(aborted).toContain(1));
-        await vi.waitFor(() => expect(prompts).toHaveLength(3));
-        expect(occurrences(prompts[2], 'Answer this one right now.')).toBe(1);
-        finish(2);
-        await result.delivery;
-        await vi.waitFor(() => expect(session.displayState.get().isRunning).toBe(false));
-        expect(prompts).toHaveLength(3);
-      } finally {
-        await controller.destroy();
-      }
-    }, 20_000);
   },
 );
