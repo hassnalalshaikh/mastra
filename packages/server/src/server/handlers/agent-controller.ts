@@ -647,7 +647,7 @@ export const STREAM_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
             }, 25_000);
           };
 
-          unsubscribe = session.subscribe(event => {
+          const send = (event: AgentControllerEvent) => {
             if (cleanedUp) return;
             try {
               // Enqueue the raw event object. The server adapter is responsible
@@ -658,7 +658,14 @@ export const STREAM_AGENT_CONTROLLER_SESSION_ROUTE = createRoute({
             } catch {
               cleanup();
             }
-          });
+          };
+
+          // Every stream starts from the current picture, then carries the
+          // changes. A client that opens or re-opens a stream mid-run (a page
+          // load, a reconnect) shows the run as it is now: whether it is
+          // running, the reply so far, active tools and pending approvals.
+          send({ type: 'display_state_changed', displayState: session.displayState.get() });
+          unsubscribe = session.subscribe(send);
 
           const abortCleanup = () => cleanup(controller);
           abortSignal?.addEventListener('abort', abortCleanup, { once: true });

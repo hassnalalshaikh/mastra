@@ -1094,6 +1094,35 @@ describe('agent-controller routes', () => {
         args: { path: 'b.ts' },
       });
     });
+
+    it('starts a stream opened mid-run with the current picture before any change', async () => {
+      const controller = mastra.getAgentController('code')!;
+      await controller.init();
+      const session = await controller.createSession({ resourceId: 'user-late', id: 'user-late', ownerId: 'code' });
+      // The run is already working before this viewer connects.
+      session.emit({ type: 'agent_start' } as any);
+      session.emit({ type: 'tool_start', toolCallId: 'call-late', toolName: 'execute_command', args: { cmd: 'ls' } });
+
+      const stream = (await STREAM_AGENT_CONTROLLER_SESSION_ROUTE.handler({
+        mastra,
+        controllerId: 'code',
+        resourceId: 'user-late',
+        abortSignal: new AbortController().signal,
+      } as any)) as ReadableStream<unknown>;
+      const reader = stream.getReader();
+
+      let first: any;
+      for (let i = 0; i < 10 && first === undefined; i++) {
+        const { value } = await reader.read();
+        if (value && typeof value === 'object') first = value;
+      }
+      await reader.cancel();
+
+      expect(first.type).toBe('display_state_changed');
+      const wire = JSON.parse(JSON.stringify(first));
+      expect(wire.displayState.isRunning).toBe(true);
+      expect(wire.displayState.activeTools['call-late']).toMatchObject({ name: 'execute_command', status: 'running' });
+    });
   });
 
   describe('LIST_AGENT_CONTROLLER_MODES_ROUTE', () => {

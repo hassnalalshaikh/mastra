@@ -316,11 +316,19 @@ export interface SubscribeAgentControllerSessionOptions {
   onError?: (error: unknown) => void;
   /**
    * Called each time the stream is re-established after a drop (reconnect
-   * only). The server does NOT replay events missed while disconnected, so
-   * stateful consumers MUST re-sync from here (e.g. `session.state()`) or
-   * they will silently lose the gap.
+   * only). Every stream starts with a `display_state_changed` snapshot of the
+   * current picture, but the server does NOT replay other events missed while
+   * disconnected: re-read messages completed during the gap from here (e.g.
+   * `session.listMessages()`).
    */
   onReconnect?: () => void;
+  /**
+   * Treat a stream that delivers nothing, not even the server heartbeat sent
+   * every 25 seconds, for this long as dropped. The same limit applies to
+   * opening the stream. A dropped stream follows the `reconnect` policy.
+   * Defaults to 60000; 0 disables the limit.
+   */
+  idleTimeoutMs?: number;
   /**
    * Automatically re-establish the stream after an established stream drops
    * (clean close or transport error). Does not apply to the initial
@@ -468,16 +476,50 @@ export class AgentControllerSession extends BaseResource {
         reconnectTimer = setTimeout(settleDelay, ms);
       });
 
+    // A half-open connection never errors on its own: no bytes arrive and the
+    // read never settles. The server writes a heartbeat after 25 seconds of
+    // silence, so a longer silence means the connection is gone.
+    const idleTimeoutMs = finiteOr(options.idleTimeoutMs, 60_000);
+    const streamControllers = new WeakMap<Response, AbortController>();
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdle = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+    };
+    const armIdle = (controller: AbortController) => {
+      clearIdle();
+      if (!idleTimeoutMs) return;
+      idleTimer = setTimeout(() => {
+        idleTimer = undefined;
+        const silent = new Error('Agent controller session stream went silent');
+        controller.abort(silent);
+        // A custom fetch may ignore the signal; releasing the reader still ends the read.
+        void currentReader?.cancel(silent).catch(() => {});
+      }, idleTimeoutMs);
+    };
+
     const requestStream = async (): Promise<Response> => {
       if (options.threadId !== undefined) {
         await this.create({ threadId: options.threadId });
         if (cancelled) throw new Error('Agent controller session subscription cancelled');
       }
-      const response = (await this.request(this.url(`${this.base()}/stream`), { stream: true })) as Response;
-      if (!response.body) {
-        throw new Error('No response body for agent controller session stream');
+      const controller = new AbortController();
+      armIdle(controller);
+      try {
+        const response = (await this.request(this.url(`${this.base()}/stream`), {
+          stream: true,
+          signal: controller.signal,
+        })) as Response;
+        if (!response.body) {
+          throw new Error('No response body for agent controller session stream');
+        }
+        streamControllers.set(response, controller);
+        return response;
+      } finally {
+        clearIdle();
       }
-      return response;
     };
 
     const streamEndedError = () => new Error('Agent controller session stream ended unexpectedly');
@@ -503,9 +545,11 @@ export class AgentControllerSession extends BaseResource {
       currentReader = reader;
       const decoder = new TextDecoder();
       let buffer = '';
+      const controller = streamControllers.get(response);
 
       try {
         while (!cancelled) {
+          if (controller) armIdle(controller);
           const { done, value } = await reader.read();
           if (done) return cancelled ? { kind: 'cancelled' } : { kind: 'done' };
           // A read() that resolved just before unsubscribe() must not deliver its
@@ -543,6 +587,7 @@ export class AgentControllerSession extends BaseResource {
       } catch (error) {
         return cancelled ? { kind: 'cancelled' } : { kind: 'transport_error', error };
       } finally {
+        clearIdle();
         if (currentReader === reader) currentReader = null;
         void reader.cancel().catch(() => {});
       }
@@ -645,6 +690,7 @@ export class AgentControllerSession extends BaseResource {
       unsubscribe: () => {
         cancelled = true;
         settleDelay();
+        clearIdle();
         void currentReader?.cancel().catch(() => {});
       },
     };

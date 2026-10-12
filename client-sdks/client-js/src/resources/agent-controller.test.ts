@@ -692,6 +692,106 @@ describe('AgentController Resource', () => {
     expect(received).toEqual([firstEvent, secondEvent]);
   });
 
+  it('reconnects a stream that delivers nothing past the idle limit', async () => {
+    const firstEvent = { type: 'agent_start' };
+    const secondEvent = { type: 'agent_end', reason: 'complete' };
+    const encoder = new TextEncoder();
+    // A half-open connection: one event, then silence without ever closing.
+    (global.fetch as any)
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(firstEvent)}\n\n`));
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(sseResponse([`data: ${JSON.stringify(secondEvent)}\n\n`]));
+
+    const received: AgentControllerEvent[] = [];
+    const onReconnect = vi.fn();
+    const done = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), 2000);
+      void client
+        .getAgentController('code')
+        .session('user-1')
+        .subscribe({
+          onEvent: event => {
+            received.push(event);
+            if (received.length === 2) {
+              clearTimeout(timer);
+              resolve();
+            }
+          },
+          onReconnect,
+          onError: error => {
+            clearTimeout(timer);
+            reject(error);
+          },
+          idleTimeoutMs: 50,
+          reconnect: { maxRetries: 1, delayMs: 0 },
+        })
+        .then(sub => {
+          void done.then(() => sub.unsubscribe());
+        });
+    });
+
+    await done;
+
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    expect((global.fetch as any).mock.calls).toHaveLength(2);
+    expect(received).toEqual([firstEvent, secondEvent]);
+  });
+
+  it('keeps a stream that receives server heartbeats', async () => {
+    const encoder = new TextEncoder();
+    let beat: ReturnType<typeof setInterval> | undefined;
+    (global.fetch as any).mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            beat = setInterval(() => controller.enqueue(encoder.encode(': heartbeat\n\n')), 20);
+          },
+          cancel() {
+            clearInterval(beat);
+          },
+        }),
+      ),
+    );
+
+    const onReconnect = vi.fn();
+    const onError = vi.fn();
+    const sub = await client
+      .getAgentController('code')
+      .session('user-1')
+      .subscribe({ onEvent: () => {}, onReconnect, onError, idleTimeoutMs: 60, reconnect: { delayMs: 0 } });
+
+    await new Promise(r => setTimeout(r, 250));
+    sub.unsubscribe();
+    clearInterval(beat);
+
+    expect(onReconnect).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect((global.fetch as any).mock.calls).toHaveLength(1);
+  });
+
+  it('rejects an initial stream request that never answers', async () => {
+    (global.fetch as any).mockImplementationOnce(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        }),
+    );
+
+    await expect(
+      client
+        .getAgentController('code')
+        .session('user-1')
+        .subscribe({ onEvent: () => {}, idleTimeoutMs: 50, reconnect: true }),
+    ).rejects.toThrow('Agent controller session stream went silent');
+  });
+
   it('does not reconnect after unsubscribe', async () => {
     const firstEvent = { type: 'agent_start' };
     (global.fetch as any).mockResolvedValueOnce(sseResponse([`data: ${JSON.stringify(firstEvent)}\n\n`]));

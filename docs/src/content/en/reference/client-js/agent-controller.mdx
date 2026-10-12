@@ -120,6 +120,8 @@ Returns: `Promise<CreateAgentControllerSessionResponse>`
 
 Subscribes to the session's event stream over SSE. The promise resolves once the stream is established and rejects when it can't connect. A rejected call leaves nothing running in the background. `reconnect` only governs re-establishing a stream that drops after it was established. To retry the initial connection, loop around `subscribe()`.
 
+Every stream, including one re-established after a drop, starts with a `display_state_changed` event carrying the session's current display state: whether a run is in progress, the message streaming so far, active tools, and pending approvals and suspensions. A UI that renders from display state shows the current picture as soon as it connects.
+
 <PropertiesTable
   content={[
   {
@@ -139,7 +141,14 @@ Subscribes to the session's event stream over SSE. The promise resolves once the
     type: '() => void',
     isOptional: true,
     description:
-      'Called each time the stream is re-established after a drop. The server does not replay events missed while disconnected, so re-sync from here with `session.state()` and, for the message gap, `session.listMessages()`.',
+      'Called each time the stream is re-established after a drop. The new stream starts with the current display state, but the server does not replay other events missed while disconnected, so read messages completed during the gap with `session.listMessages()`, and mode, model, and thread with `session.state()`.',
+  },
+  {
+    name: 'idleTimeoutMs',
+    type: 'number',
+    isOptional: true,
+    description:
+      'Treats a stream that delivers nothing for this long, not even the heartbeat the server sends after 25 seconds of silence, as dropped. The same limit applies to opening the stream. A dropped stream follows the `reconnect` policy. Defaults to `60000`; `0` disables the limit.',
   },
   {
     name: 'reconnect',
