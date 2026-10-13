@@ -5488,8 +5488,6 @@ export class Session<TState = unknown> {
       tracingContext,
       tracingOptions,
       untilIdle,
-      // Preparing a queued message must not arm or borrow the Session's run.
-      abortSignal: new AbortController().signal,
     });
 
     return {
@@ -5678,6 +5676,7 @@ export class Session<TState = unknown> {
     const browserGeneration = this.#browserGeneration;
     this.assertBrowserGeneration(browserGeneration);
     const wasActive = this.stream.isActive();
+    const wasRunning = this.run.isRunning();
     this.assertNotEditing();
     this.#pendingSignals++;
     try {
@@ -5686,7 +5685,14 @@ export class Session<TState = unknown> {
         tracingContext,
         tracingOptions,
       });
-      this.assertBrowserGeneration(browserGeneration);
+      try {
+        this.assertBrowserGeneration(browserGeneration);
+      } catch (error) {
+        // Startup was superseded by a browser replacement: release the run controller
+        // that preparation armed, but only when this call is the one that armed it.
+        if (!wasRunning && !this.stream.isActive()) this.run.reset();
+        throw error;
+      }
       const messageInput = this.createMessageInput({ content, files });
       const providerOptions = withMessageAuthor(undefined, readMessageAuthor(requestContextInput));
       const result = this.machinery
