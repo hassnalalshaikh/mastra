@@ -1,10 +1,22 @@
+/** Optional bounds for the HTTP metadata request; WebSocket URLs need no discovery request. */
+export interface CdpResolveOptions {
+  timeoutMs?: number;
+  maxRedirects?: 0;
+}
+
 /**
  * Resolve an HTTP CDP endpoint to a WebSocket URL (same behavior as MastraBrowser.resolveWebSocketUrl).
  */
 export async function resolveCdpWebSocketUrl(
   url: string,
   logger?: { debug?: (message: string) => void; warn?: (message: string) => void },
+  options?: CdpResolveOptions,
 ): Promise<string> {
+  if (options?.maxRedirects !== undefined && options.maxRedirects !== 0) {
+    throw new Error('maxRedirects must be 0 or undefined');
+  }
+  const timeoutMs = options?.timeoutMs ?? 10000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('CDP resolution timeoutMs must be positive and finite');
   if (url.startsWith('ws://') || url.startsWith('wss://')) {
     return url;
   }
@@ -16,10 +28,13 @@ export async function resolveCdpWebSocketUrl(
     logger?.debug?.(`Resolving WebSocket URL from ${versionUrl}`);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(versionUrl, { signal: controller.signal });
+      const response = await fetch(versionUrl, {
+        signal: controller.signal,
+        ...(options?.maxRedirects === 0 ? { redirect: 'error' as const } : {}),
+      });
 
       if (!response.ok) {
         throw new Error(
@@ -36,7 +51,7 @@ export async function resolveCdpWebSocketUrl(
       return data.webSocketDebuggerUrl;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Timeout resolving WebSocket URL from ${versionUrl} (10s)`);
+        throw new Error(`Timeout resolving WebSocket URL from ${versionUrl} (${timeoutMs / 1000}s)`);
       }
       throw error;
     } finally {

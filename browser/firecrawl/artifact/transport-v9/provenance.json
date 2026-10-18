@@ -1,0 +1,90 @@
+{
+  "schema": "reviewed-firecrawl-transport-artifact.v1",
+  "artifactRevision": "v9",
+  "package": "@mastra/browser-firecrawl",
+  "packageVersion": "0.2.3",
+  "sourceRepository": "https://github.com/hassnalalshaikh/mastra",
+  "officialRepository": "https://github.com/mastra-ai/mastra",
+  "sourceBaseCommit": "92dadccad8a3a25a7765e7096aa0f8c368dfbd6f",
+  "sourceCommit": "1074258c0245336d7634fca833ac4c7df9f33a7d",
+  "pairedSourceCommits": {
+    "sdk": "d11428255c1887015dd5cf127eb0d86c01a62467",
+    "native": "1074258c0245336d7634fca833ac4c7df9f33a7d"
+  },
+  "sourceFiles": {
+    "src/firecrawl-browser.ts": "4231e97ae9b6d6607b8f5c740f1535b830fe39fa89da061b5a77586103bab219",
+    "src/firecrawl-sessions.test.ts": "5ed9d1ec9e583673eebfe7d23bc0c6f35fc3c1927af3b659d99e3352072769ad",
+    "src/firecrawl-sessions.ts": "e330c0cd636b14347e20d9da10add528316b841f353ba1f9b8c0fe98b0659596",
+    "src/firecrawl-shared.test.ts": "5cbc4a1b720735f41a8228af3c348f72d575fb472a6b73fec8b5ee0d05a7f1c7",
+    "src/firecrawl-thread-manager.ts": "3e6d52f45f80b1424db4ef2300edd683c4884680c76ebcccdc5397fa7eda2487",
+    "src/firecrawl-transport.test.ts": "34292ca50d89b031180842028fd07b79f6854e63d76e3e85562bccf4bcfb7923",
+    "src/index.ts": "f24d8ad6dbd28fe9cb06cd4de4f6443c3d78b8d2580182dd1b421d476170876e",
+    "src/resolve-cdp.ts": "536115bc79ec0e7fcdce42f88be5c7a6bbcdea121507519278459d468b061b79",
+    "src/types.ts": "6044fa8ff696c9ecc1347479edaf73dcd7365ceee453d16e4e10ea791d5a50ea"
+  },
+  "runtimeManifestSha256": "c03056d9092b1b18b25c55140f39e646a0c6656ca2c73096cc12bd7eecebf690",
+  "manifestChanges": {
+    "dependencies": {
+      "canonicalSource": {
+        "firecrawl": "^4.18.4"
+      },
+      "runtimeArchive": {
+        "firecrawl": "4.25.1"
+      }
+    },
+    "devDependencies": {
+      "canonicalSource": {
+        "@internal/lint": "workspace:*",
+        "@internal/types-builder": "workspace:*",
+        "@mastra/agent-browser": "workspace:*",
+        "@mastra/core": "workspace:*",
+        "@types/node": "22.20.1",
+        "@vitest/coverage-v8": "catalog:",
+        "@vitest/ui": "catalog:",
+        "agent-browser": "0.19.0",
+        "eslint": "^10.7.0",
+        "playwright-core": "^1.61.1",
+        "tsdown": "0.22.9",
+        "typescript": "catalog:",
+        "vitest": "catalog:"
+      },
+      "runtimeArchive": null
+    }
+  },
+  "distFiles": {
+    "index.cjs": "850fce375e4ffc624759886a0439ed417bb3b100b64217357146e9794809ff5a",
+    "index.cjs.map": "091d29f3f398a48a02886eb6e253b9767a53ce92cb1d0add2c361a7df771961a",
+    "index.d.cts": "6b8a17604816d33e824213af92788359887be0f53b2b5605b9c81ea0544275f7",
+    "index.d.cts.map": "e6ed2076f5c3e3af53248e6f74d7c872e575dd2e2f45499926b2336139229b2a",
+    "index.d.ts": "1ed9c95948c225eb76496201f6af2be7f73a93eaecd07cf9d668016699836a0f",
+    "index.d.ts.map": "7d968938895ee9cbc3df63bd87f97c4b5740faaba6c52081865200f0e8a2b465",
+    "index.js": "915987ed9f3dc45e2b26229f6ae38ecc7e7ece0bc8d26ab04b3b0c0f949434f8",
+    "index.js.map": "1d758673d6590a8e79dd2d86f9c1337a25fe64b90f2ffe7caf43e357fc0e467b"
+  },
+  "artifact": {
+    "filename": "mastra-browser-firecrawl-0.2.3.tgz",
+    "sha256": "30acc0e8cff232a6998d0b91700aa20dbabbe83332dd3e141f391131c439b54e",
+    "integrity": "sha512-b55pUHxZ9l4ZkZT1TWi3uRTrcPWGBR/xVDOoK3JqcwprGLj5G7aonjp62LTXJJRlJpuUA1sazjEWh4ze8GJ8mQ=="
+  },
+  "normalPackFilename": "mastra-browser-firecrawl-0.2.3.tgz",
+  "toolchain": {
+    "node": "v24.21.0",
+    "pnpm": "10.11.0",
+    "pnpmCliSha256": "b276da51dc8ca5b0d3ee3371695b50fc8b3244b281b091c63a3f082a88dadeb9",
+    "build": "The unchanged native tsdown0.22.9 configuration produced the qualified native dist/DTS with the paired SDK declarations. V2/V3 retain exact native build/typecheck/19-test evidence and documented audit-only tool-import/type-root adaptations. The stock SDK of the same version does not supply this new contract. A fresh normal full source build and supported source dependency resolution remain separate from this byte-preserving pack recipe; do not change the monorepo lock before the distribution route review."
+  },
+  "priorReceipts": {
+    "sdkOriginalBuildQualification": "8766043088737c8726df7add097f756a4fdc0d6cab56e2761e0e32171e89a4b8",
+    "privateSuccessorV9": "008f64ede2ea30a08541719044d30cb4764714c73b8fa78221c893871d486162",
+    "independentSuccessorReviewRelayedByRoot": "1fc340dd56264c1963d8cd91a6d4cd56120155a50b7089949a61c728d8777aee"
+  },
+  "distribution": {
+    "sourcePrUrl": null,
+    "publishedAssetUrl": null,
+    "selectedReleaseTag": null,
+    "status": "PRIVATE_SOURCE_AND_ARTIFACT_REVIEW_ONLY",
+    "policy": "pnpm11.3 may reject the same HTTPS URL when traversed as an overridden child before deduplication. A direct declaration is not a blanket exception. No HTTPS distribution approval or blockExoticSubdeps relaxation is implied."
+  },
+  "productAdmission": "Not product KV-BR-002 admission, full Root graph equivalence, provider/financial acceptance or deployment. Existing Core/AgentBrowser/driver archives unchanged.",
+  "sourceTextHashConvention": "Canonical LF text, matching Git source blobs and the qualified build. Working checkout CRLF is normalized only for text-source/runtime-manifest hashing; dist and archive bytes are always checked exactly."
+}

@@ -1,5 +1,5 @@
 import type { AgentBrowserConfig } from '@mastra/agent-browser';
-import type { BrowserDeleteResponse } from 'firecrawl';
+import type { BrowserDeleteResponse, FirecrawlClientOptions } from 'firecrawl';
 import type {
   FirecrawlAgentBrowserThreadManager,
   FirecrawlAgentBrowserThreadManagerConfig,
@@ -39,6 +39,9 @@ export interface FirecrawlBrowserSessionOptions {
   origin?: string;
 }
 
+/** Allowlisted native provider transport controls; credentials and endpoint remain separately owned. */
+export type FirecrawlBrowserClientOptions = Pick<FirecrawlClientOptions, 'timeoutMs' | 'maxRetries' | 'maxRedirects'>;
+
 /** Configuration for {@link FirecrawlBrowser}. */
 export type FirecrawlBrowserConfig = Omit<AgentBrowserConfig, 'createThreadManager'> & {
   /** Customize the public native manager while preserving this provider's session ownership. */
@@ -47,6 +50,8 @@ export type FirecrawlBrowserConfig = Omit<AgentBrowserConfig, 'createThreadManag
   apiKey?: string;
   /** Base URL for a self-hosted Firecrawl API. */
   apiUrl?: string;
+  /** SDK creation/cleanup bounds; timeout and redirect policy also bound HTTP CDP discovery. Omit to preserve defaults. */
+  clientOptions?: FirecrawlBrowserClientOptions;
   /**
    * Firecrawl-only session options (`browser()`). Distinct from {@link AgentBrowserConfig.profile}
    * (local Playwright profile path): see {@link FirecrawlBrowserSessionOptions.profile}.

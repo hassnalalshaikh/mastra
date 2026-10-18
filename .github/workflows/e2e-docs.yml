@@ -16,7 +16,8 @@ concurrency:
 jobs:
   e2e-docs:
     name: Docs E2E tests
-    runs-on: starsling-ubuntu-24.04
+    if: ${{ github.repository == 'hassnalalshaikh/mastra' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, linux, x64, khayalek-native-ci]
     timeout-minutes: 20
 
     steps:
@@ -28,6 +29,9 @@ jobs:
 
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
+        with:
+          package-manager-cache: false
+          check-store: true
 
       - name: Install Playwright browsers
         working-directory: ./docs

@@ -54,6 +54,38 @@ then interact with elements using their refs (e.g., @e5).`,
     isOptional: true,
   },
   {
+    name: 'clientOptions',
+    type: 'FirecrawlBrowserClientOptions',
+    description: 'Optional SDK transport bounds. The timeout and redirect policy also apply to HTTP CDP discovery.',
+    isOptional: true,
+    properties: [
+      {
+        type: 'FirecrawlBrowserClientOptions',
+        parameters: [
+          {
+            name: 'timeoutMs',
+            type: 'number',
+            description: 'Per-request timeout in milliseconds.',
+            isOptional: true,
+          },
+          {
+            name: 'maxRetries',
+            type: 'number',
+            description:
+              'Total SDK attempts, including the first request. Set 1 for one attempt. The SDK default is 3.',
+            isOptional: true,
+          },
+          {
+            name: 'maxRedirects',
+            type: '0',
+            description: 'Set 0 to reject HTTP redirects. Omit to preserve the transport default.',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
     name: 'firecrawl',
     type: 'FirecrawlBrowserSessionOptions',
     description: 'Session options passed to the Firecrawl browser() API when creating sandbox sessions.',
@@ -106,13 +138,28 @@ then interact with elements using their refs (e.g., @e5).`,
 ]}
 />
 
+## Transport controls
+
+The pinned transport contribution accepts an explicit allowlist of SDK options. Credentials and the API endpoint remain separate constructor options.
+
+```typescript
+import { FirecrawlBrowser } from '@mastra/browser-firecrawl'
+
+const browser = new FirecrawlBrowser({
+  apiKey: process.env.FIRECRAWL_API_KEY,
+  clientOptions: { timeoutMs: 20_000, maxRetries: 1, maxRedirects: 0 },
+})
+```
+
+These options apply to SDK session creation and cleanup in both scopes. The timeout and redirect policy also apply to HTTP CDP discovery. They don't limit CDP actions or replace the session's `firecrawl.ttl`. Omitting the options preserves existing defaults. This public contract requires the paired SDK transport contribution; the stock SDK version label alone doesn't identify it.
+
 ## Session lifecycle
 
 The pinned browser contribution also accepts `sessionLifecycle` observations. `beforeCreate({ threadId })` runs before the paid request; `created({ sessionId, threadId })` runs after provisioning; `deleted({ sessionId, threadId, receipt })` receives the provider's confirmed deletion response, including available duration and billed credits. These hooks are awaited. A failed deletion or observation keeps cleanup pending, and confirmed receipts can be observed again without issuing a second deletion. `assertCleanupSettled()` surfaces any incomplete cleanup.
 
 Shared sessions retain AgentBrowser's viewer preferences, saved tabs, trusted input observation and idle closure. A failed close can be retried through the native `close()` method. This enhanced behavior belongs to the pinned contribution until an accepted stable upstream replacement is adopted.
 
-The contribution exposes `ownsProviderSession(sessionId)` to check this instance's retained cleanup identity. A persisted native workflow can release an exact recorded resource through `FirecrawlBrowser.deleteProviderSession({ apiKey, sessionId, apiUrl? })`. This returns the confirmed provider deletion response without launching another browser. The workflow caller must verify the record's owner before supplying the identity and credentials.
+The contribution exposes `ownsProviderSession(sessionId)` to check this instance's retained cleanup identity. A persisted native workflow can release an exact recorded resource through `FirecrawlBrowser.deleteProviderSession({ apiKey, sessionId, apiUrl?, clientOptions? })`. This returns the confirmed provider deletion response without launching another browser. The workflow caller must verify the record's owner before supplying the identity and credentials. Pass the same `clientOptions` when the recorded cleanup request needs explicit transport bounds.
 
 `createThreadManager(options)` can return a subclass of the public `FirecrawlAgentBrowserThreadManager`, including one that checks restored page URLs before navigation. The supplied options retain native provider ownership and cleanup. Returning another manager type is rejected.
 
@@ -122,6 +169,12 @@ Session provisioning depends on the `scope` option inherited from `AgentBrowser`
 - `'shared'`: One Firecrawl sandbox session is created when the browser launches and shared across all threads. The session is deleted when the browser closes.
 
 In both cases, `FirecrawlBrowser` deletes the remote Firecrawl session when the browser closes, including when session creation or connection fails partway through.
+
+## `resolveCdpWebSocketUrl(url, logger?, options?)`
+
+This public helper resolves an HTTP endpoint through `/json/version` and returns its WebSocket debugger URL. WebSocket URLs pass through without a discovery request.
+
+The optional `CdpResolveOptions` contains `timeoutMs` and `maxRedirects?: 0`. The discovery timeout defaults to 10,000 milliseconds and must be positive and finite. Set `maxRedirects: 0` to reject HTTP redirects; omission preserves the default redirect behavior. Unsupported redirect values and invalid timeouts throw before discovery. The helper rejects failed responses, missing debugger URLs and timeout failures.
 
 ## Tools
 
