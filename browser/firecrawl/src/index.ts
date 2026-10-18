@@ -5,4 +5,10 @@ export type {
   FirecrawlAgentBrowserThreadManagerConfig,
 } from './firecrawl-thread-manager';
 export { resolveCdpWebSocketUrl } from './resolve-cdp';
-export type { FirecrawlBrowserConfig, FirecrawlBrowserSessionOptions, FirecrawlBrowserSessionLifecycle } from './types';
+export type { CdpResolveOptions } from './resolve-cdp';
+export type {
+  FirecrawlBrowserConfig,
+  FirecrawlBrowserClientOptions,
+  FirecrawlBrowserSessionOptions,
+  FirecrawlBrowserSessionLifecycle,
+} from './types';

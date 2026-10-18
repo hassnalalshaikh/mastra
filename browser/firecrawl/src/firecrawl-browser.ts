@@ -7,10 +7,19 @@ import { Firecrawl } from 'firecrawl';
 import { deleteFirecrawlBrowserSession, FirecrawlSessions } from './firecrawl-sessions';
 import { FirecrawlAgentBrowserThreadManager } from './firecrawl-thread-manager';
 import { resolveCdpWebSocketUrl } from './resolve-cdp';
-import type { FirecrawlBrowserConfig, FirecrawlBrowserSessionOptions } from './types';
+import type { CdpResolveOptions } from './resolve-cdp';
+import type { FirecrawlBrowserConfig, FirecrawlBrowserClientOptions, FirecrawlBrowserSessionOptions } from './types';
+
+function providerClientOptions(options?: FirecrawlBrowserClientOptions): FirecrawlBrowserClientOptions {
+  return {
+    timeoutMs: options?.timeoutMs,
+    maxRetries: options?.maxRetries,
+    maxRedirects: options?.maxRedirects,
+  };
+}
 
 function toBaseConfig(config: FirecrawlBrowserConfig): AgentBrowserConfig {
-  const { apiKey: _a, apiUrl: _u, firecrawl: _f, sessionLifecycle: _l, createThreadManager: _m, ...rest } = config;
+  const { apiKey: _a, apiUrl: _u, clientOptions: _c, firecrawl: _f, sessionLifecycle: _l, createThreadManager: _m, ...rest } = config;
   return rest as AgentBrowserConfig;
 }
 
@@ -24,25 +33,30 @@ export class FirecrawlBrowser extends AgentBrowser {
   declare protected sharedManager: BrowserManager | null;
   private readonly sessions: FirecrawlSessions;
   private readonly sessionOpts: FirecrawlBrowserSessionOptions;
+  private readonly cdpOptions: CdpResolveOptions;
 
   /** Release one recorded provider resource during native workflow recovery; never launches a browser. */
   static async deleteProviderSession({
     apiKey,
     apiUrl,
     sessionId,
+    clientOptions,
   }: {
     apiKey: string;
     apiUrl?: string;
     sessionId: string;
+    clientOptions?: FirecrawlBrowserClientOptions;
   }) {
     if (!apiKey) throw new Error('Firecrawl provider cleanup requires an API key');
-    return deleteFirecrawlBrowserSession(new Firecrawl({ apiKey, apiUrl }), sessionId);
+    return deleteFirecrawlBrowserSession(new Firecrawl({ apiKey, apiUrl, ...providerClientOptions(clientOptions) }), sessionId);
   }
 
   constructor(config: FirecrawlBrowserConfig) {
     const apiKey = config.apiKey ?? process.env.FIRECRAWL_API_KEY;
     if (!apiKey) throw new Error('FirecrawlBrowser requires `apiKey` or FIRECRAWL_API_KEY');
-    const firecrawl = new Firecrawl({ apiKey, apiUrl: config.apiUrl });
+    const clientOptions = providerClientOptions(config.clientOptions);
+    const cdpOptions = { timeoutMs: clientOptions.timeoutMs, maxRedirects: clientOptions.maxRedirects };
+    const firecrawl = new Firecrawl({ apiKey, apiUrl: config.apiUrl, ...clientOptions });
     const sessions = new FirecrawlSessions(firecrawl, config.sessionLifecycle);
     const sessionOpts = config.firecrawl ?? {};
     super({
@@ -52,7 +66,7 @@ export class FirecrawlBrowser extends AgentBrowser {
           ...opts,
           firecrawl,
           sessions,
-          resolveWebSocketUrl: (url: string) => resolveCdpWebSocketUrl(url, opts.logger),
+          resolveWebSocketUrl: (url: string) => resolveCdpWebSocketUrl(url, opts.logger, cdpOptions),
           sessionOptions: sessionOpts,
         };
         const manager =
@@ -65,6 +79,7 @@ export class FirecrawlBrowser extends AgentBrowser {
     });
     this.sessions = sessions;
     this.sessionOpts = sessionOpts;
+    this.cdpOptions = cdpOptions;
   }
 
   protected override isRemoteThreadBrowser(): boolean {
@@ -89,7 +104,7 @@ export class FirecrawlBrowser extends AgentBrowser {
         profile: config.profile,
         executablePath: config.executablePath,
         storageState: config.storageState,
-        cdpUrl: await resolveCdpWebSocketUrl(created.cdpUrl, this.logger),
+        cdpUrl: await resolveCdpWebSocketUrl(created.cdpUrl, this.logger, this.cdpOptions),
       };
       await this.sharedManager.launch(launchOptions);
       await this.initializeSharedBrowser(true);
