@@ -29,6 +29,9 @@ jobs:
 
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
+        with:
+          package-manager-cache: false
+          check-store: true
 
       - name: Install Playwright browsers
         working-directory: ./docs

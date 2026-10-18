@@ -135,6 +135,9 @@ jobs:
 
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
+        with:
+          package-manager-cache: false
+          check-store: true
 
       - name: Verify generated vercel redirects are up to date
         working-directory: ./docs
@@ -208,6 +211,9 @@ jobs:
 
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
+        with:
+          package-manager-cache: false
+          check-store: true
 
       - name: Check formatting
         working-directory: ./docs

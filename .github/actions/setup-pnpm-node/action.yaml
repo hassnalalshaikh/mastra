@@ -10,6 +10,10 @@ inputs:
     description: 'Should use package manager cache'
     required: false
     default: 'true'
+  check-store:
+    description: 'Check and repair the pnpm store independently of remote caching'
+    required: false
+    default: 'false'
   package-json-file:
     description: 'Path to package.json for reading packageManager version (useful when checkout is not at workspace root)'
     required: false
@@ -46,7 +50,7 @@ runs:
 
     - name: Reset corrupt pnpm store cache
       id: reset-store
-      if: ${{ inputs.package-manager-cache == 'true' }}
+      if: ${{ inputs.package-manager-cache == 'true' || inputs.check-store == 'true' }}
       shell: bash
       run: |
         set +e
