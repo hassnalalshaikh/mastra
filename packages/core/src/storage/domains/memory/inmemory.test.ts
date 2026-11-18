@@ -51,6 +51,17 @@ describe('InMemoryMemory listMessages include resource scope', () => {
     });
   });
 
+  it('keeps the history page and resource scope when selecting one role', async () => {
+    const args = { resourceId: 'resource-a', perPage: 1, page: 0 };
+    const original = await store.listMessagesByResourceId(args);
+    expect(original.hasMore).toBe(true);
+    expect(await store.listMessagePageByResourceIdAndRole({ ...args, role: 'assistant' })).toEqual({
+      ...original,
+      messages: [],
+    });
+    expect(await store.listMessagePageByResourceIdAndRole({ ...args, role: 'user' })).toEqual(original);
+  });
+
   it('does not return messages owned by another resource', async () => {
     const result = await store.listMessages({
       threadId: 'thread-b1',

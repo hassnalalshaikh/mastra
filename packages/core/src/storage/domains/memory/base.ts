@@ -258,6 +258,18 @@ export abstract class MemoryStorage extends StorageDomain {
     );
   }
 
+  /**
+   * Return messages of one role from the requested resource page. Pagination
+   * describes the original history window, so an empty page can have more pages.
+   */
+  async listMessagePageByResourceIdAndRole({
+    role,
+    ...args
+  }: StorageListMessagesByResourceIdInput & { role: MastraDBMessage['role'] }): Promise<StorageListMessagesOutput> {
+    const result = await this.listMessagesByResourceId(args);
+    return { ...result, messages: result.messages.filter(message => message.role === role) };
+  }
+
   abstract listMessagesById({ messageIds }: { messageIds: string[] }): Promise<{ messages: MastraDBMessage[] }>;
 
   abstract saveMessages(args: {

@@ -43,6 +43,42 @@ describe('MemoryPG paging over rows that share one timestamp', () => {
     await pool.end();
   });
 
+  it('reads one role within each resource page, including pages without a matching message', async () => {
+    const thread = createSampleThread();
+    await store.saveThread({ thread });
+    const roles = ['user', 'assistant', 'assistant'] as const;
+    const messages = roles.map((role, index) =>
+      createSampleMessageV2({
+        threadId: thread.id,
+        resourceId: thread.resourceId,
+        role,
+        createdAt: new Date(SAME_MOMENT.getTime() + index),
+        content: { content: role === 'assistant' ? 'large response '.repeat(20_000) : 'attached file' },
+      }),
+    );
+    await store.saveMessages({ messages });
+
+    for (const includeTotal of [true, false]) {
+      for (const page of [0, 1, 2, 3]) {
+        const args = {
+          resourceId: thread.resourceId,
+          perPage: 1,
+          page,
+          includeTotal,
+          orderBy: { field: 'createdAt', direction: 'DESC' } as const,
+        };
+        const original = await store.listMessagesByResourceId(args);
+        const projected = await store.listMessagePageByResourceIdAndRole({ ...args, role: 'user' });
+        expect(projected).toEqual({
+          ...original,
+          messages: original.messages.filter(message => message.role === 'user'),
+        });
+        expect(projected.messages.map(message => message.id)).toEqual(page === 2 ? [messages[0]!.id] : []);
+        expect(projected.hasMore).toBe(page < 2);
+      }
+    }
+  });
+
   for (const direction of ['ASC', 'DESC'] as const) {
     it(`lists ${TOTAL} threads created at the same moment exactly once (${direction}) even after one is updated between pages`, async () => {
       const resourceId = `resource-threads-${direction}-${Date.now()}`;

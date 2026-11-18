@@ -1386,6 +1386,7 @@ export class MemoryPG extends MemoryStorage {
     whereClause,
     orderByStatement,
     queryParams,
+    selectParams = [],
     perPageInput,
     perPage,
     offset,
@@ -1396,11 +1397,13 @@ export class MemoryPG extends MemoryStorage {
     whereClause: string;
     orderByStatement: string;
     queryParams: any[];
+    selectParams?: unknown[];
     perPageInput: number | false | undefined;
     perPage: number;
     offset: number;
     includeTotal?: boolean;
   }): Promise<{ total: number; messages: MessageRowFromDB[]; hasMore?: boolean }> {
+    const pageParams = selectParams.length ? [...queryParams, ...selectParams] : queryParams;
     // When the caller does not need `total` (e.g. agent last-N reads), skip the
     // `COUNT(*)` subquery entirely. For a bounded page we peek one extra row
     // (LIMIT perPage + 1) so `hasMore` can be derived without counting the whole
@@ -1409,8 +1412,8 @@ export class MemoryPG extends MemoryStorage {
       const peekLimit = perPage + 1;
       const rows =
         (await this.#db.readClient.manyOrNone<MessageRowFromDB>(
-          `${selectStatement} FROM ${tableName} ${whereClause} ${orderByStatement} LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`,
-          [...queryParams, peekLimit, offset],
+          `${selectStatement} FROM ${tableName} ${whereClause} ${orderByStatement} LIMIT $${pageParams.length + 1} OFFSET $${pageParams.length + 2}`,
+          [...pageParams, peekLimit, offset],
         )) || [];
       const hasMore = rows.length > perPage;
       const messages = hasMore ? rows.slice(0, perPage) : rows;
@@ -1419,8 +1422,8 @@ export class MemoryPG extends MemoryStorage {
 
     // `perPageInput === false` means "every row", so no LIMIT is applied.
     const limitClause =
-      perPageInput === false ? '' : ` LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
-    const dataParams = perPageInput === false ? queryParams : [...queryParams, perPage, offset];
+      perPageInput === false ? '' : ` LIMIT $${pageParams.length + 1} OFFSET $${pageParams.length + 2}`;
+    const dataParams = perPageInput === false ? pageParams : [...pageParams, perPage, offset];
 
     if (includeTotal === false) {
       // Unbounded read (perPageInput === false) that does not need `total`: skip the
@@ -1674,6 +1677,21 @@ export class MemoryPG extends MemoryStorage {
   public async listMessagesByResourceId(
     args: StorageListMessagesByResourceIdInput,
   ): Promise<StorageListMessagesOutput> {
+    return this.#listResourcePage(args);
+  }
+
+  public override async listMessagePageByResourceIdAndRole(
+    args: StorageListMessagesByResourceIdInput & { role: MastraDBMessage['role'] },
+  ): Promise<StorageListMessagesOutput> {
+    // Metadata matching reads message bodies. Includes add context beyond the page.
+    if (args.filter?.metadata || args.include?.length) return super.listMessagePageByResourceIdAndRole(args);
+    return this.#listResourcePage(args, args.role);
+  }
+
+  async #listResourcePage(
+    args: StorageListMessagesByResourceIdInput,
+    role?: MastraDBMessage['role'],
+  ): Promise<StorageListMessagesOutput> {
     const { resourceId, include, filter, perPage: perPageInput, page = 0, orderBy, includeTotal = true } = args;
 
     // Validate that resourceId is provided
@@ -1719,7 +1737,6 @@ export class MemoryPG extends MemoryStorage {
       // under LIMIT is identical. This mirrors the index-safe ordering in _getIncludedMessages.
       const orderByStatement = `ORDER BY "${field}" ${direction}, "id" ${direction}`;
 
-      const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
       const tableName = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.#schema) });
 
       // Build WHERE conditions
@@ -1744,6 +1761,11 @@ export class MemoryPG extends MemoryStorage {
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      // Preserve all rows for paging while transferring content only for the requested role.
+      const content =
+        role === undefined ? 'content' : `CASE WHEN role = $${queryParams.length + 1} THEN content END AS content`;
+      const selectStatement = `SELECT id, ${content}, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
 
       // When perPage is 0 with no includes, there's nothing to return.
       if (perPage === 0 && (!include || include.length === 0)) {
@@ -1810,6 +1832,7 @@ export class MemoryPG extends MemoryStorage {
           whereClause,
           orderByStatement,
           queryParams,
+          selectParams: role === undefined ? undefined : [role],
           perPageInput,
           perPage,
           offset,
@@ -1844,7 +1867,8 @@ export class MemoryPG extends MemoryStorage {
         }
       }
 
-      const messagesWithParsedContent = messages.map(row => this.parseRow(row));
+      const matching = role === undefined ? messages : messages.filter(row => row.role === role);
+      const messagesWithParsedContent = matching.map(row => this.parseRow(row));
 
       const list = new MessageList().add(messagesWithParsedContent, 'memory');
       const finalMessages = this._sortMessages(list.get.all.db(), field, direction);

@@ -555,6 +555,24 @@ for await (const chunk of stream.textStream) {
 }
 ```
 
+### Read one role from a resource page
+
+Use `listMessagePageByResourceIdAndRole()` to read one role from a page of conversation history. For example, to inspect attachments in the newest 100 messages, request the user messages in that window:
+
+```typescript
+const memoryStore = await storage.getStore('memory')
+
+const result = await memoryStore?.listMessagePageByResourceIdAndRole({
+  resourceId: 'example-person',
+  role: 'user',
+  page: 0,
+  perPage: 100,
+  orderBy: { field: 'createdAt', direction: 'DESC' },
+})
+```
+
+Pagination applies to the entire history window. A page can contain zero user messages and still have `hasMore: true`. PostgreSQL skips transferring other roles' content for ordinary page reads. Requests with metadata filters or explicit message includes use the regular resource reader.
+
 ## Index management
 
 PostgreSQL storage provides index management to optimize query performance.
